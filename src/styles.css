@@ -149,6 +149,13 @@ pre {
   gap: 6px;
 }
 
+.model-row {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr 36px;
+  position: relative;
+}
+
 .novel-item,
 .chapter-item {
   justify-content: flex-start;

@@ -146,6 +146,7 @@ pub fn run() {
             get_novel_detail,
             delete_novel,
             save_model_profile,
+            delete_model_profile,
             list_model_profiles,
             test_model_profile,
             list_ai_logs,
@@ -389,6 +390,17 @@ fn save_model_profile(input: ModelProfileInput, state: State<AppState>) -> Resul
     .map_err(to_string)?;
 
     Ok(profile)
+}
+
+#[tauri::command]
+fn delete_model_profile(profile_id: String, state: State<AppState>) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.execute("DELETE FROM model_profiles WHERE id = ?1", params![profile_id])
+        .map_err(to_string)?;
+    conn.execute("DELETE FROM ai_logs WHERE profile_id = ?1", params![profile_id])
+        .map_err(to_string)?;
+    let _ = delete_api_key(&profile_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1059,6 +1071,11 @@ fn read_api_key(profile_id: &str) -> Result<String, String> {
 fn write_api_key(profile_id: &str, api_key: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, profile_id).map_err(to_string)?;
     entry.set_password(api_key).map_err(to_string)
+}
+
+fn delete_api_key(profile_id: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, profile_id).map_err(to_string)?;
+    entry.delete_credential().map_err(to_string)
 }
 
 fn read_stored_api_key(state: &State<'_, AppState>, profile_id: &str) -> Result<String, String> {

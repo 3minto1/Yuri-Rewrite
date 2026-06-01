@@ -120,6 +120,7 @@ export default function App() {
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [selectedChapterId, setSelectedChapterId] = useState("");
   const [openNovelMenuId, setOpenNovelMenuId] = useState("");
+  const [openModelMenu, setOpenModelMenu] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
@@ -133,6 +134,12 @@ export default function App() {
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     void refreshLogs();
@@ -181,6 +188,10 @@ export default function App() {
     setLogs(rows);
   }
 
+  function showNotice(message: string) {
+    setNotice(message);
+  }
+
   async function importTxt() {
     setBusy("import");
     setNotice("");
@@ -193,9 +204,9 @@ export default function App() {
       const novel = await invoke<Novel>("import_txt", { filePath: selected });
       await refreshAll();
       await loadNovel(novel.id);
-      setNotice(`已导入《${novel.title}》。`);
+      showNotice(`已导入《${novel.title}》。`);
     } catch (error) {
-      setNotice(String(error));
+      showNotice(String(error));
     } finally {
       setBusy("");
     }
@@ -220,9 +231,9 @@ export default function App() {
           setLogs([]);
         }
       }
-      setNotice(`已删除《${novel.title}》。`);
+      showNotice(`已删除《${novel.title}》。`);
     } catch (error) {
-      setNotice(String(error));
+      showNotice(String(error));
     } finally {
       setBusy("");
     }
@@ -248,9 +259,9 @@ export default function App() {
         api_key: saved.has_api_key ? savedApiKeyMask : ""
       });
       await refreshAll();
-      setNotice(saved.has_api_key ? "模型配置和 API Key 已保存。" : "模型配置已保存，尚未保存 API Key。");
+      showNotice(saved.has_api_key ? "模型配置和 API Key 已保存。" : "模型配置已保存，尚未保存 API Key。");
     } catch (error) {
-      setNotice(String(error));
+      showNotice(String(error));
     } finally {
       setBusy("");
     }
@@ -258,7 +269,7 @@ export default function App() {
 
   async function testProfile() {
     if (!selectedProfileId) {
-      setNotice("请先保存并选择一个模型配置。");
+      showNotice("请先保存并选择一个模型配置。");
       return;
     }
     setBusy("test");
@@ -268,9 +279,9 @@ export default function App() {
         profileId: selectedProfileId
       });
       await refreshLogs();
-      setNotice(result.ok ? `连接成功：${result.message}` : `连接失败：${result.message}`);
+      showNotice(result.ok ? `连接成功：${result.message}` : `连接失败：${result.message}`);
     } catch (error) {
-      setNotice(String(error));
+      showNotice(String(error));
     } finally {
       setBusy("");
     }
@@ -287,9 +298,9 @@ export default function App() {
         assets
       });
       setDetail({ ...detail, canon_assets: updated });
-      setNotice("一致性资产已保存。");
+      showNotice("一致性资产已保存。");
     } catch (error) {
-      setNotice(String(error));
+      showNotice(String(error));
     } finally {
       setBusy("");
     }
@@ -297,7 +308,7 @@ export default function App() {
 
   async function runJob(kind: "analysis" | "rewrite") {
     if (!detail || !selectedProfileId) {
-      setNotice("请先导入小说并选择模型配置。");
+      showNotice("请先导入小说并选择模型配置。");
       return;
     }
     setBusy(kind);
@@ -310,9 +321,9 @@ export default function App() {
       setJob(result);
       await loadNovel(detail.novel.id);
       await refreshLogs(detail.novel.id);
-      setNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
+      showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
-      setNotice(String(error));
+      showNotice(String(error));
     } finally {
       setBusy("");
     }
@@ -327,9 +338,9 @@ export default function App() {
         novelId: detail.novel.id,
         format
       });
-      setNotice(`已导出：${result.path}`);
+      showNotice(`已导出：${result.path}`);
     } catch (error) {
-      setNotice(String(error));
+      showNotice(String(error));
     } finally {
       setBusy("");
     }
@@ -343,6 +354,35 @@ export default function App() {
         asset.kind === kind ? { ...asset, content } : asset
       )
     });
+  }
+
+  async function deleteSelectedModelProfile() {
+    const profile = profiles.find((item) => item.id === selectedProfileId);
+    if (!profile) {
+      showNotice("请先选择一个模型配置。");
+      return;
+    }
+    const confirmed = window.confirm(`删除模型配置「${profile.model}」及其保存的 API Key？`);
+    if (!confirmed) return;
+    setBusy("delete-model");
+    setNotice("");
+    try {
+      await invoke<void>("delete_model_profile", { profileId: profile.id });
+      const nextProfiles = await invoke<ModelProfile[]>("list_model_profiles");
+      setProfiles(nextProfiles);
+      const nextSelected = nextProfiles[0]?.id ?? "";
+      setSelectedProfileId(nextSelected);
+      setOpenModelMenu(false);
+      if (!nextSelected) {
+        setProfileDraft(emptyProfile);
+      }
+      await refreshLogs();
+      showNotice(`已删除模型配置「${profile.model}」。`);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
   }
 
   return (
@@ -396,14 +436,32 @@ export default function App() {
 
         <div className="side-section">
           <div className="section-label">模型</div>
-          <select value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}>
-            <option value="">未选择</option>
-            {profiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.model}
-              </option>
-            ))}
-          </select>
+          <div className="model-row">
+            <select value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}>
+              <option value="">未选择</option>
+              {profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.model}
+                </option>
+              ))}
+            </select>
+            <button
+              className="icon-button menu-trigger"
+              aria-label="打开模型菜单"
+              onClick={() => setOpenModelMenu(!openModelMenu)}
+              disabled={!selectedProfileId}
+            >
+              <MoreHorizontal size={17} />
+            </button>
+            {openModelMenu && selectedProfileId && (
+              <div className="context-menu">
+                <button onClick={deleteSelectedModelProfile} disabled={busy === "delete-model"}>
+                  <Trash2 size={15} />
+                  删除当前模型
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="side-section log-section">
