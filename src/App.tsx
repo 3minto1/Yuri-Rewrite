@@ -193,6 +193,22 @@ export default function App() {
     setLogs(rows);
   }
 
+  async function clearLogs() {
+    const targetText = detail ? `《${detail.novel.title}》相关日志和全局日志` : "所有日志";
+    if (!window.confirm(`清空${targetText}？`)) return;
+    setBusy("clear-logs");
+    setNotice("");
+    try {
+      await invoke<void>("clear_ai_logs", { novelId: detail?.novel.id ?? null });
+      await refreshLogs();
+      showNotice("日志已清空。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
   function showNotice(message: string) {
     setNotice(message);
   }
@@ -423,13 +439,13 @@ export default function App() {
       </nav>
 
       <aside className="sidebar">
-        <div className="brand">
+        <button className="brand brand-button" onClick={() => setActiveView("workspace")}>
           <Sparkles size={22} />
           <div>
             <strong>Yuri Rewrite</strong>
             <span>本地小说分析与改写</span>
           </div>
-        </div>
+        </button>
 
         <button className="primary-action" onClick={importTxt} disabled={busy === "import"}>
           {busy === "import" ? <Loader2 className="spin" size={18} /> : <FilePlus2 size={18} />}
@@ -581,10 +597,16 @@ export default function App() {
           <div className="page-panel">
             <div className="page-heading">
               <h2>AI 调用日志</h2>
-              <button onClick={() => refreshLogs()} disabled={busy !== ""}>
-                <RefreshCw size={16} />
-                刷新
-              </button>
+              <div className="panel-actions">
+                <button onClick={clearLogs} disabled={busy !== "" || logs.length === 0}>
+                  <Trash2 size={16} />
+                  清空
+                </button>
+                <button onClick={() => refreshLogs()} disabled={busy !== ""}>
+                  <RefreshCw size={16} />
+                  刷新
+                </button>
+              </div>
             </div>
             <div className="full-log-list">
               {logs.map((log) => (

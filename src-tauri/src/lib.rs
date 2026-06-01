@@ -163,6 +163,7 @@ pub fn run() {
             list_model_profiles,
             test_model_profile,
             list_ai_logs,
+            clear_ai_logs,
             get_app_settings,
             save_app_settings,
             update_canon_assets,
@@ -484,6 +485,21 @@ fn list_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<Vec<
             .map_err(to_string)?;
         Ok(logs)
     }
+}
+
+#[tauri::command]
+fn clear_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    if let Some(novel_id) = novel_id {
+        conn.execute(
+            "DELETE FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL",
+            params![novel_id],
+        )
+        .map_err(to_string)?;
+    } else {
+        conn.execute("DELETE FROM ai_logs", []).map_err(to_string)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
