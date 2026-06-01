@@ -1,0 +1,28 @@
+[package]
+name = "yuri-rewrite"
+version = "0.1.0"
+description = "Local Windows desktop tool for novel analysis and yuri rewriting"
+authors = ["Yuri Rewrite"]
+edition = "2021"
+
+[lib]
+name = "yuri_rewrite_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+encoding_rs = "0.8"
+keyring = "3"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4", "serde"] }

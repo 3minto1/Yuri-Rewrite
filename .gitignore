@@ -1,0 +1,8 @@
+node_modules
+dist
+portable
+target
+src-tauri/target
+*.log
+*.zip
+.DS_Store
