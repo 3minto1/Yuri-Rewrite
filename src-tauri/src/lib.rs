@@ -722,31 +722,28 @@ async fn generate_openai_compatible(
     user: &str,
 ) -> Result<String, String> {
     let base = profile.base_url.trim().trim_end_matches('/');
+    let model = normalize_model_name(base, &profile.model);
     let endpoint = if base.ends_with("/chat/completions") {
         base.to_string()
     } else {
         format!("{}/chat/completions", base)
     };
     let payload = json!({
-        "model": profile.model,
+        "model": model,
         "temperature": profile.temperature,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user}
         ]
     });
-    let value: serde_json::Value = client
+    let response = client
         .post(endpoint)
-        .bearer_auth(api_key)
+        .bearer_auth(api_key.trim())
         .json(&payload)
         .send()
         .await
-        .map_err(to_string)?
-        .error_for_status()
-        .map_err(to_string)?
-        .json()
-        .await
         .map_err(to_string)?;
+    let value = response_json_or_error(response).await?;
     value["choices"][0]["message"]["content"]
         .as_str()
         .map(|text| text.to_string())
@@ -765,7 +762,7 @@ async fn generate_gemini(
     } else {
         profile.base_url.trim().trim_end_matches('/').to_string()
     };
-    let endpoint = format!("{}/models/{}:generateContent?key={}", base, profile.model, api_key);
+    let endpoint = format!("{}/models/{}:generateContent?key={}", base, profile.model.trim(), api_key.trim());
     let payload = json!({
         "contents": [
             {
@@ -779,21 +776,45 @@ async fn generate_gemini(
             "temperature": profile.temperature
         }
     });
-    let value: serde_json::Value = client
+    let response = client
         .post(endpoint)
         .json(&payload)
         .send()
         .await
-        .map_err(to_string)?
-        .error_for_status()
-        .map_err(to_string)?
-        .json()
-        .await
         .map_err(to_string)?;
+    let value = response_json_or_error(response).await?;
     value["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
         .map(|text| text.to_string())
         .ok_or_else(|| format!("Gemini 响应缺少正文: {}", value))
+}
+
+async fn response_json_or_error(response: reqwest::Response) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response.text().await.map_err(to_string)?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status, compact_error_body(&body)));
+    }
+    serde_json::from_str(&body).map_err(|error| format!("模型响应不是合法 JSON: {}；原始响应：{}", error, body))
+}
+
+fn compact_error_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "响应体为空".to_string();
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| trimmed.to_string())
+}
+
+fn normalize_model_name(base_url: &str, model: &str) -> String {
+    let trimmed = model.trim();
+    if base_url.to_ascii_lowercase().contains("api.deepseek.com") {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn build_analysis_prompt(chapter: &Chapter) -> String {

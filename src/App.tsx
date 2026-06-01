@@ -179,6 +179,10 @@ export default function App() {
     try {
       const input = {
         ...profileDraft,
+        name: profileDraft.name.trim(),
+        provider: profileDraft.provider.trim(),
+        base_url: profileDraft.base_url.trim(),
+        model: profileDraft.model.trim(),
         api_key: profileDraft.api_key === savedApiKeyMask ? undefined : profileDraft.api_key
       };
       const saved = await invoke<ModelProfile>("save_model_profile", { input });
