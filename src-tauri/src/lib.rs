@@ -110,7 +110,20 @@ struct AiLog {
     chapter_title: Option<String>,
     status: String,
     content: String,
+    reasoning: Option<String>,
+    raw_response: Option<String>,
     created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AppSettings {
+    export_dir: Option<String>,
+}
+
+struct ModelOutput {
+    text: String,
+    reasoning: Option<String>,
+    raw_response: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,6 +163,8 @@ pub fn run() {
             list_model_profiles,
             test_model_profile,
             list_ai_logs,
+            get_app_settings,
+            save_app_settings,
             update_canon_assets,
             start_analysis,
             start_rewrite,
@@ -224,7 +239,14 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             chapter_title TEXT,
             status TEXT NOT NULL,
             content TEXT NOT NULL,
+            reasoning TEXT,
+            raw_response TEXT,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id, chapter_index);
@@ -234,6 +256,8 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
     ensure_column(conn, "model_profiles", "api_key", "TEXT")?;
+    ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
+    ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
     Ok(())
 }
 
@@ -438,7 +462,7 @@ fn list_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<Vec<
     if let Some(novel_id) = novel_id {
         let mut stmt = conn
             .prepare(
-                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, created_at FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL ORDER BY created_at DESC LIMIT 80",
+                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, created_at FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL ORDER BY created_at DESC LIMIT 80",
             )
             .map_err(to_string)?;
         let logs = stmt
@@ -450,7 +474,7 @@ fn list_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<Vec<
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, created_at FROM ai_logs ORDER BY created_at DESC LIMIT 80",
+                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, created_at FROM ai_logs ORDER BY created_at DESC LIMIT 80",
             )
             .map_err(to_string)?;
         let logs = stmt
@@ -459,6 +483,40 @@ fn list_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<Vec<
             .collect::<Result<Vec<_>, _>>()
             .map_err(to_string)?;
         Ok(logs)
+    }
+}
+
+#[tauri::command]
+fn get_app_settings(state: State<AppState>) -> Result<AppSettings, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let export_dir = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'export_dir'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    Ok(AppSettings { export_dir })
+}
+
+#[tauri::command]
+fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<AppSettings, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    if let Some(export_dir) = settings.export_dir.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        fs::create_dir_all(export_dir).map_err(to_string)?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('export_dir', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![export_dir],
+        )
+        .map_err(to_string)?;
+        Ok(AppSettings {
+            export_dir: Some(export_dir.to_string()),
+        })
+    } else {
+        conn.execute("DELETE FROM app_settings WHERE key = 'export_dir'", [])
+            .map_err(to_string)?;
+        Ok(AppSettings { export_dir: None })
     }
 }
 
@@ -475,15 +533,25 @@ async fn test_model_profile(profile_id: String, state: State<'_, AppState>) -> R
     )
     .await
     {
-        Ok(text) => {
-            append_ai_log(&state, None, &profile.id, "测试模型", None, "success", &text)?;
+        Ok(output) => {
+            append_ai_log(
+                &state,
+                None,
+                &profile.id,
+                "测试模型",
+                None,
+                "success",
+                &output.text,
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
             Ok(ModelTestResult {
                 ok: true,
-                message: text,
+                message: output.text,
             })
         }
         Err(error) => {
-            append_ai_log(&state, None, &profile.id, "测试模型", None, "error", &error)?;
+            append_ai_log(&state, None, &profile.id, "测试模型", None, "error", &error, None, None)?;
             Ok(ModelTestResult {
                 ok: false,
                 message: error,
@@ -544,8 +612,8 @@ async fn start_analysis(
         )
         .await
         {
-            Ok(text) => {
-                let normalized = normalize_jsonish(&text);
+            Ok(output) => {
+                let normalized = normalize_jsonish(&output.text);
                 append_ai_log(
                     &state,
                     Some(&novel_id),
@@ -554,6 +622,8 @@ async fn start_analysis(
                     Some(&chapter.title),
                     "success",
                     &normalized,
+                    output.reasoning.as_deref(),
+                    Some(&output.raw_response),
                 )?;
                 let conn = state.conn.lock().map_err(to_string)?;
                 conn.execute(
@@ -572,6 +642,8 @@ async fn start_analysis(
                     Some(&chapter.title),
                     "error",
                     &error,
+                    None,
+                    None,
                 )?;
                 set_chapter_status(&state, &chapter.id, "analysis_status", "failed")?;
                 update_job(&state, &job.id, "failed", chapter.index, &error)?;
@@ -618,7 +690,7 @@ async fn start_rewrite(
         )
         .await
         {
-            Ok(text) => {
+            Ok(output) => {
                 append_ai_log(
                     &state,
                     Some(&novel_id),
@@ -626,12 +698,14 @@ async fn start_rewrite(
                     "章节改写",
                     Some(&chapter.title),
                     "success",
-                    text.trim(),
+                    output.text.trim(),
+                    output.reasoning.as_deref(),
+                    Some(&output.raw_response),
                 )?;
                 let conn = state.conn.lock().map_err(to_string)?;
                 conn.execute(
                     "UPDATE chapters SET rewrite_text = ?1, rewrite_status = 'completed' WHERE id = ?2",
-                    params![text.trim(), chapter.id],
+                    params![output.text.trim(), chapter.id],
                 )
                 .map_err(to_string)?;
             }
@@ -644,6 +718,8 @@ async fn start_rewrite(
                     Some(&chapter.title),
                     "error",
                     &error,
+                    None,
+                    None,
                 )?;
                 set_chapter_status(&state, &chapter.id, "rewrite_status", "failed")?;
                 update_job(&state, &job.id, "failed", chapter.index, &error)?;
@@ -679,12 +755,21 @@ fn export_novel(novel_id: String, format: String, state: State<AppState>) -> Res
         )
         .map_err(to_string)?;
     let chapters = load_chapters(&conn, &novel.id)?;
+    let configured_export_dir = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'export_dir'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     let safe_title = sanitize_file_name(&novel.title);
     let extension = if format == "markdown" { "md" } else { "txt" };
-    let output_path = state
-        .data_dir
-        .join("exports")
-        .join(format!("{}-rewrite.{}", safe_title, extension));
+    let output_dir = configured_export_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.data_dir.join("exports"));
+    fs::create_dir_all(&output_dir).map_err(to_string)?;
+    let output_path = output_dir.join(format!("{}-rewrite.{}", safe_title, extension));
     let mut body = String::new();
     for chapter in chapters {
         if format == "markdown" {
@@ -833,7 +918,7 @@ async fn generate_text(
     api_key: &str,
     system: &str,
     user: &str,
-) -> Result<String, String> {
+) -> Result<ModelOutput, String> {
     if profile.provider.to_lowercase().contains("gemini") {
         generate_gemini(client, profile, api_key, system, user).await
     } else {
@@ -847,7 +932,7 @@ async fn generate_openai_compatible(
     api_key: &str,
     system: &str,
     user: &str,
-) -> Result<String, String> {
+) -> Result<ModelOutput, String> {
     let base = profile.base_url.trim().trim_end_matches('/');
     let model = normalize_model_name(base, &profile.model);
     let endpoint = if base.ends_with("/chat/completions") {
@@ -870,11 +955,20 @@ async fn generate_openai_compatible(
         .send()
         .await
         .map_err(to_string)?;
-    let value = response_json_or_error(response).await?;
-    value["choices"][0]["message"]["content"]
+    let (value, raw_response) = response_json_or_error(response).await?;
+    let text = value["choices"][0]["message"]["content"]
         .as_str()
         .map(|text| text.to_string())
-        .ok_or_else(|| format!("模型响应缺少 choices[0].message.content: {}", value))
+        .ok_or_else(|| format!("模型响应缺少 choices[0].message.content: {}", value))?;
+    let reasoning = value["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .or_else(|| value["choices"][0]["message"]["reasoning"].as_str())
+        .map(str::to_string);
+    Ok(ModelOutput {
+        text,
+        reasoning,
+        raw_response,
+    })
 }
 
 async fn generate_gemini(
@@ -883,7 +977,7 @@ async fn generate_gemini(
     api_key: &str,
     system: &str,
     user: &str,
-) -> Result<String, String> {
+) -> Result<ModelOutput, String> {
     let base = if profile.base_url.trim().is_empty() {
         "https://generativelanguage.googleapis.com/v1beta".to_string()
     } else {
@@ -909,20 +1003,41 @@ async fn generate_gemini(
         .send()
         .await
         .map_err(to_string)?;
-    let value = response_json_or_error(response).await?;
-    value["candidates"][0]["content"]["parts"][0]["text"]
+    let (value, raw_response) = response_json_or_error(response).await?;
+    let text = value["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
         .map(|text| text.to_string())
-        .ok_or_else(|| format!("Gemini 响应缺少正文: {}", value))
+        .ok_or_else(|| format!("Gemini 响应缺少正文: {}", value))?;
+    let reasoning = value["candidates"][0]["content"]["parts"]
+        .as_array()
+        .and_then(|parts| {
+            let thoughts = parts
+                .iter()
+                .filter(|part| part["thought"].as_bool().unwrap_or(false))
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>();
+            if thoughts.is_empty() {
+                None
+            } else {
+                Some(thoughts.join("\n\n"))
+            }
+        });
+    Ok(ModelOutput {
+        text,
+        reasoning,
+        raw_response,
+    })
 }
 
-async fn response_json_or_error(response: reqwest::Response) -> Result<serde_json::Value, String> {
+async fn response_json_or_error(response: reqwest::Response) -> Result<(serde_json::Value, String), String> {
     let status = response.status();
     let body = response.text().await.map_err(to_string)?;
     if !status.is_success() {
         return Err(format!("HTTP {}: {}", status, compact_error_body(&body)));
     }
-    serde_json::from_str(&body).map_err(|error| format!("模型响应不是合法 JSON: {}；原始响应：{}", error, body))
+    let value = serde_json::from_str(&body)
+        .map_err(|error| format!("模型响应不是合法 JSON: {}；原始响应：{}", error, body))?;
+    Ok((value, body))
 }
 
 fn compact_error_body(body: &str) -> String {
@@ -1158,7 +1273,9 @@ fn row_to_ai_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiLog> {
         chapter_title: row.get(4)?,
         status: row.get(5)?,
         content: row.get(6)?,
-        created_at: row.get(7)?,
+        reasoning: row.get(7)?,
+        raw_response: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -1170,10 +1287,12 @@ fn append_ai_log(
     chapter_title: Option<&str>,
     status: &str,
     content: &str,
+    reasoning: Option<&str>,
+    raw_response: Option<&str>,
 ) -> Result<(), String> {
     let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
-        "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             Uuid::new_v4().to_string(),
             novel_id,
@@ -1182,6 +1301,8 @@ fn append_ai_log(
             chapter_title,
             status,
             truncate_text(content, 12_000),
+            reasoning.map(|value| truncate_text(value, 12_000)),
+            raw_response.map(|value| truncate_text(value, 24_000)),
             Utc::now().to_rfc3339()
         ],
     )

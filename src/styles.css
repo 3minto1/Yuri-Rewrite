@@ -129,6 +129,29 @@ pre {
   min-height: 0;
 }
 
+.sidebar-spacer {
+  flex: 1;
+}
+
+.nav-section {
+  gap: 8px;
+}
+
+.nav-button {
+  background: transparent;
+  border-color: #49463f;
+  color: #f4efe6;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.nav-button.active,
+.nav-button:hover:not(:disabled) {
+  background: #f4efe6;
+  border-color: #f4efe6;
+  color: #242422;
+}
+
 .section-label {
   color: #c9c0b0;
   font-size: 12px;
@@ -344,6 +367,101 @@ pre {
   min-height: 0;
   overflow: auto;
   padding: 14px 22px 22px;
+}
+
+.hidden {
+  display: none;
+}
+
+.page-panel {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 22px;
+}
+
+.page-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.page-heading h2 {
+  font-size: 22px;
+  margin: 0;
+}
+
+.full-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.full-log-item,
+.settings-section {
+  background: #fff;
+  border: 1px solid #ded9ce;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.full-log-item.error {
+  border-color: #efbbb5;
+}
+
+.full-log-item header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.full-log-item header strong,
+.settings-section h3 {
+  display: block;
+  font-size: 16px;
+  margin: 0;
+}
+
+.full-log-item header span {
+  color: #776f65;
+  display: block;
+  margin-top: 4px;
+}
+
+.log-status {
+  border: 1px solid #d8d5cd;
+  border-radius: 999px;
+  padding: 4px 9px;
+}
+
+.full-log-item section {
+  margin-top: 14px;
+}
+
+.full-log-item h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.full-log-item pre {
+  background: #f7f4ed;
+  border: 1px solid #e2ded5;
+  border-radius: 7px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.settings-section {
+  max-width: 920px;
+}
+
+.setting-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr auto auto;
+  margin-top: 12px;
 }
 
 .panel {

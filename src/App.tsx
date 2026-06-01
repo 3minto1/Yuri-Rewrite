@@ -6,12 +6,14 @@ import {
   ClipboardList,
   Download,
   FilePlus2,
+  FolderOpen,
   KeyRound,
   Loader2,
   MoreHorizontal,
   Play,
   RefreshCw,
   Save,
+  Settings,
   Sparkles,
   Trash2
 } from "lucide-react";
@@ -80,7 +82,13 @@ type AiLog = {
   chapter_title?: string | null;
   status: string;
   content: string;
+  reasoning?: string | null;
+  raw_response?: string | null;
   created_at: string;
+};
+
+type AppSettings = {
+  export_dir?: string | null;
 };
 
 type ProfileDraft = {
@@ -122,6 +130,8 @@ export default function App() {
   const [openNovelMenuId, setOpenNovelMenuId] = useState("");
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
+  const [settings, setSettings] = useState<AppSettings>({});
+  const [activeView, setActiveView] = useState<"workspace" | "logs" | "settings">("workspace");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [job, setJob] = useState<Job | null>(null);
@@ -142,10 +152,6 @@ export default function App() {
   }, [notice]);
 
   useEffect(() => {
-    void refreshLogs();
-  }, [detail?.novel.id]);
-
-  useEffect(() => {
     const profile = profiles.find((item) => item.id === selectedProfileId);
     if (!profile) return;
     setProfileDraft({
@@ -160,18 +166,16 @@ export default function App() {
   }, [profiles, selectedProfileId]);
 
   async function refreshAll() {
-    const [novelRows, profileRows] = await Promise.all([
+    const [novelRows, profileRows, appSettings] = await Promise.all([
       invoke<Novel[]>("list_novels"),
-      invoke<ModelProfile[]>("list_model_profiles")
+      invoke<ModelProfile[]>("list_model_profiles"),
+      invoke<AppSettings>("get_app_settings")
     ]);
     setNovels(novelRows);
     setProfiles(profileRows);
-    if (!selectedProfileId && profileRows[0]) {
-      setSelectedProfileId(profileRows[0].id);
-    }
-    if (!detail && novelRows[0]) {
-      await loadNovel(novelRows[0].id);
-    }
+    setSettings(appSettings);
+    if (!selectedProfileId && profileRows[0]) setSelectedProfileId(profileRows[0].id);
+    if (!detail && novelRows[0]) await loadNovel(novelRows[0].id);
     await refreshLogs();
   }
 
@@ -180,6 +184,7 @@ export default function App() {
     setDetail(next);
     setSelectedChapterId(next.chapters[0]?.id ?? "");
     setOpenNovelMenuId("");
+    setActiveView("workspace");
     await refreshLogs(next.novel.id);
   }
 
@@ -213,8 +218,7 @@ export default function App() {
   }
 
   async function deleteNovel(novel: Novel) {
-    const confirmed = window.confirm(`删除《${novel.title}》及其本地分析、改写和日志数据？`);
-    if (!confirmed) return;
+    if (!window.confirm(`删除《${novel.title}》及其本地分析、改写和日志数据？`)) return;
     setBusy("delete-novel");
     setNotice("");
     try {
@@ -253,13 +257,35 @@ export default function App() {
       };
       const saved = await invoke<ModelProfile>("save_model_profile", { input });
       setSelectedProfileId(saved.id);
-      setProfileDraft({
-        ...profileDraft,
-        id: saved.id,
-        api_key: saved.has_api_key ? savedApiKeyMask : ""
-      });
+      setProfileDraft({ ...profileDraft, id: saved.id, api_key: saved.has_api_key ? savedApiKeyMask : "" });
       await refreshAll();
       showNotice(saved.has_api_key ? "模型配置和 API Key 已保存。" : "模型配置已保存，尚未保存 API Key。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deleteSelectedModelProfile() {
+    const profile = profiles.find((item) => item.id === selectedProfileId);
+    if (!profile) {
+      showNotice("请先选择一个模型配置。");
+      return;
+    }
+    if (!window.confirm(`删除模型配置「${profile.model}」及其保存的 API Key？`)) return;
+    setBusy("delete-model");
+    setNotice("");
+    try {
+      await invoke<void>("delete_model_profile", { profileId: profile.id });
+      const nextProfiles = await invoke<ModelProfile[]>("list_model_profiles");
+      setProfiles(nextProfiles);
+      const nextSelected = nextProfiles[0]?.id ?? "";
+      setSelectedProfileId(nextSelected);
+      setOpenModelMenu(false);
+      if (!nextSelected) setProfileDraft(emptyProfile);
+      await refreshLogs();
+      showNotice(`已删除模型配置「${profile.model}」。`);
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -346,43 +372,42 @@ export default function App() {
     }
   }
 
-  function updateCanon(kind: string, content: string) {
-    if (!detail) return;
-    setDetail({
-      ...detail,
-      canon_assets: detail.canon_assets.map((asset) =>
-        asset.kind === kind ? { ...asset, content } : asset
-      )
-    });
-  }
-
-  async function deleteSelectedModelProfile() {
-    const profile = profiles.find((item) => item.id === selectedProfileId);
-    if (!profile) {
-      showNotice("请先选择一个模型配置。");
-      return;
-    }
-    const confirmed = window.confirm(`删除模型配置「${profile.model}」及其保存的 API Key？`);
-    if (!confirmed) return;
-    setBusy("delete-model");
+  async function chooseExportDir() {
+    setBusy("choose-export-dir");
     setNotice("");
     try {
-      await invoke<void>("delete_model_profile", { profileId: profile.id });
-      const nextProfiles = await invoke<ModelProfile[]>("list_model_profiles");
-      setProfiles(nextProfiles);
-      const nextSelected = nextProfiles[0]?.id ?? "";
-      setSelectedProfileId(nextSelected);
-      setOpenModelMenu(false);
-      if (!nextSelected) {
-        setProfileDraft(emptyProfile);
-      }
-      await refreshLogs();
-      showNotice(`已删除模型配置「${profile.model}」。`);
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== "string") return;
+      const saved = await invoke<AppSettings>("save_app_settings", { settings: { export_dir: selected } });
+      setSettings(saved);
+      showNotice(`已设置导出目录：${saved.export_dir}`);
     } catch (error) {
       showNotice(String(error));
     } finally {
       setBusy("");
     }
+  }
+
+  async function clearExportDir() {
+    setBusy("clear-export-dir");
+    setNotice("");
+    try {
+      const saved = await invoke<AppSettings>("save_app_settings", { settings: { export_dir: null } });
+      setSettings(saved);
+      showNotice("已恢复默认导出目录。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function updateCanon(kind: string, content: string) {
+    if (!detail) return;
+    setDetail({
+      ...detail,
+      canon_assets: detail.canon_assets.map((asset) => (asset.kind === kind ? { ...asset, content } : asset))
+    });
   }
 
   return (
@@ -464,220 +489,278 @@ export default function App() {
           </div>
         </div>
 
-        <div className="side-section log-section">
-          <div className="section-label">日志</div>
-          <div className="log-list">
-            {logs.map((log) => (
-              <article className={`log-item ${log.status}`} key={log.id}>
-                <header>
-                  <ClipboardList size={14} />
-                  <span>{log.action}</span>
-                  <time>{new Date(log.created_at).toLocaleTimeString()}</time>
-                </header>
-                {log.chapter_title && <strong>{log.chapter_title}</strong>}
-                <pre>{log.content}</pre>
-              </article>
-            ))}
-            {logs.length === 0 && <p className="muted">暂无 AI 调用日志。</p>}
-          </div>
+        <div className="side-section nav-section">
+          <button
+            className={activeView === "logs" ? "nav-button active" : "nav-button"}
+            onClick={() => setActiveView("logs")}
+          >
+            <ClipboardList size={17} />
+            日志
+          </button>
         </div>
+
+        <div className="sidebar-spacer" />
+
+        <button
+          className={activeView === "settings" ? "nav-button active" : "nav-button"}
+          onClick={() => setActiveView("settings")}
+        >
+          <Settings size={17} />
+          设置
+        </button>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
           <div>
-            <h1>{detail?.novel.title ?? "工作台"}</h1>
+            <h1>{activeView === "logs" ? "日志" : activeView === "settings" ? "设置" : detail?.novel.title ?? "工作台"}</h1>
             <p>
-              {detail
-                ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}`
-                : "导入 TXT 后开始分析和改写"}
+              {activeView === "logs"
+                ? "查看 AI 调用的思考过程与原始输出"
+                : activeView === "settings"
+                  ? "配置导出目录"
+                  : detail
+                    ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}`
+                    : "导入 TXT 后开始分析和改写"}
             </p>
           </div>
-          <div className="topbar-actions">
-            <button onClick={() => runJob("analysis")} disabled={!detail || !selectedProfileId || busy !== ""}>
-              {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
-              分析
-            </button>
-            <button onClick={() => runJob("rewrite")} disabled={!detail || !selectedProfileId || busy !== ""}>
-              {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-              改写
-            </button>
-            <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
-              <Download size={17} />
-              TXT
-            </button>
-            <button onClick={() => exportNovel("markdown")} disabled={!detail || busy !== ""}>
-              <Download size={17} />
-              MD
-            </button>
-          </div>
+          {activeView === "workspace" && (
+            <div className="topbar-actions">
+              <button onClick={() => runJob("analysis")} disabled={!detail || !selectedProfileId || busy !== ""}>
+                {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
+                分析
+              </button>
+              <button onClick={() => runJob("rewrite")} disabled={!detail || !selectedProfileId || busy !== ""}>
+                {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+                改写
+              </button>
+              <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
+                <Download size={17} />
+                TXT
+              </button>
+              <button onClick={() => exportNovel("markdown")} disabled={!detail || busy !== ""}>
+                <Download size={17} />
+                MD
+              </button>
+            </div>
+          )}
         </header>
 
         {notice && <div className="notice">{notice}</div>}
-        {job && (
+        {job && activeView === "workspace" && (
           <div className={`job-strip ${job.status}`}>
             <CheckCircle2 size={17} />
             <span>
-              {job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/
-              {job.total_chapters} · {job.message}
+              {job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/{job.total_chapters} ·{" "}
+              {job.message}
             </span>
           </div>
         )}
 
-        <div className="content-grid">
-          <section className="panel model-panel">
-            <div className="panel-heading">
-              <h2>模型配置</h2>
-              <div className="panel-actions">
-                <button onClick={testProfile} disabled={!selectedProfileId || busy === "test"}>
-                  {busy === "test" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
-                  测试模型
+        {activeView === "logs" && (
+          <div className="page-panel">
+            <div className="page-heading">
+              <h2>AI 调用日志</h2>
+              <button onClick={() => refreshLogs()} disabled={busy !== ""}>
+                <RefreshCw size={16} />
+                刷新
+              </button>
+            </div>
+            <div className="full-log-list">
+              {logs.map((log) => (
+                <article className={`full-log-item ${log.status}`} key={log.id}>
+                  <header>
+                    <div>
+                      <strong>{log.action}</strong>
+                      <span>
+                        {log.chapter_title || "全局调用"} · {new Date(log.created_at).toLocaleString()}
+                      </span>
+                    </div>
+                    <span className="log-status">{log.status}</span>
+                  </header>
+                  {log.reasoning && (
+                    <section>
+                      <h3>思考过程</h3>
+                      <pre>{log.reasoning}</pre>
+                    </section>
+                  )}
+                  <section>
+                    <h3>输出文本</h3>
+                    <pre>{log.content || "无正文内容。"}</pre>
+                  </section>
+                  <section>
+                    <h3>原始响应</h3>
+                    <pre>{log.raw_response || log.content || "无原始响应。"}</pre>
+                  </section>
+                </article>
+              ))}
+              {logs.length === 0 && <p className="muted">暂无 AI 调用日志。</p>}
+            </div>
+          </div>
+        )}
+
+        {activeView === "settings" && (
+          <div className="page-panel">
+            <div className="page-heading">
+              <h2>设置</h2>
+            </div>
+            <section className="settings-section">
+              <h3>导出目录</h3>
+              <div className="setting-row">
+                <input readOnly value={settings.export_dir || "默认应用数据目录"} />
+                <button onClick={chooseExportDir} disabled={busy === "choose-export-dir"}>
+                  <FolderOpen size={16} />
+                  选择目录
                 </button>
-                <button onClick={saveProfile} disabled={busy === "profile"}>
-                  {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                <button onClick={clearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir"}>
+                  恢复默认
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {activeView === "workspace" && (
+          <div className="content-grid">
+            <section className="panel model-panel">
+              <div className="panel-heading">
+                <h2>模型配置</h2>
+                <div className="panel-actions">
+                  <button onClick={testProfile} disabled={!selectedProfileId || busy === "test"}>
+                    {busy === "test" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
+                    测试模型
+                  </button>
+                  <button onClick={saveProfile} disabled={busy === "profile"}>
+                    {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                    保存
+                  </button>
+                </div>
+              </div>
+              <div className="form-grid">
+                <label>
+                  名称
+                  <input value={profileDraft.name} onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })} />
+                </label>
+                <label>
+                  Provider
+                  <select
+                    value={profileDraft.provider}
+                    onChange={(event) =>
+                      setProfileDraft({
+                        ...profileDraft,
+                        provider: event.target.value,
+                        base_url:
+                          event.target.value === "gemini"
+                            ? "https://generativelanguage.googleapis.com/v1beta"
+                            : profileDraft.base_url
+                      })
+                    }
+                  >
+                    <option value="openai-compatible">OpenAI 兼容</option>
+                    <option value="gemini">Google Gemini</option>
+                  </select>
+                </label>
+                <label>
+                  Base URL
+                  <input value={profileDraft.base_url} onChange={(event) => setProfileDraft({ ...profileDraft, base_url: event.target.value })} />
+                </label>
+                <label>
+                  模型名
+                  <input value={profileDraft.model} onChange={(event) => setProfileDraft({ ...profileDraft, model: event.target.value })} />
+                </label>
+                <label>
+                  Temperature
+                  <input
+                    type="number"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={profileDraft.temperature}
+                    onChange={(event) => setProfileDraft({ ...profileDraft, temperature: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  API Key
+                  <input
+                    type="password"
+                    value={profileDraft.api_key}
+                    placeholder={selectedProfileId ? "留空则不保存 Key" : "填写 API Key 后保存"}
+                    onFocus={() => {
+                      if (profileDraft.api_key === savedApiKeyMask) setProfileDraft({ ...profileDraft, api_key: "" });
+                    }}
+                    onChange={(event) => setProfileDraft({ ...profileDraft, api_key: event.target.value })}
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="panel canon-panel">
+              <div className="panel-heading">
+                <h2>一致性资产</h2>
+                <button onClick={saveCanonAssets} disabled={!detail || busy === "canon"}>
+                  {busy === "canon" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                   保存
                 </button>
               </div>
-            </div>
-            <div className="form-grid">
-              <label>
-                名称
-                <input
-                  value={profileDraft.name}
-                  onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })}
-                />
-              </label>
-              <label>
-                Provider
-                <select
-                  value={profileDraft.provider}
-                  onChange={(event) =>
-                    setProfileDraft({
-                      ...profileDraft,
-                      provider: event.target.value,
-                      base_url:
-                        event.target.value === "gemini"
-                          ? "https://generativelanguage.googleapis.com/v1beta"
-                          : profileDraft.base_url
-                    })
-                  }
-                >
-                  <option value="openai-compatible">OpenAI 兼容</option>
-                  <option value="gemini">Google Gemini</option>
-                </select>
-              </label>
-              <label>
-                Base URL
-                <input
-                  value={profileDraft.base_url}
-                  onChange={(event) => setProfileDraft({ ...profileDraft, base_url: event.target.value })}
-                />
-              </label>
-              <label>
-                模型名
-                <input
-                  value={profileDraft.model}
-                  onChange={(event) => setProfileDraft({ ...profileDraft, model: event.target.value })}
-                />
-              </label>
-              <label>
-                Temperature
-                <input
-                  type="number"
-                  min="0"
-                  max="2"
-                  step="0.1"
-                  value={profileDraft.temperature}
-                  onChange={(event) =>
-                    setProfileDraft({ ...profileDraft, temperature: Number(event.target.value) })
-                  }
-                />
-              </label>
-              <label>
-                API Key
-                <input
-                  type="password"
-                  value={profileDraft.api_key}
-                  placeholder={selectedProfileId ? "留空则不保存 Key" : "填写 API Key 后保存"}
-                  onFocus={() => {
-                    if (profileDraft.api_key === savedApiKeyMask) {
-                      setProfileDraft({ ...profileDraft, api_key: "" });
-                    }
-                  }}
-                  onChange={(event) => setProfileDraft({ ...profileDraft, api_key: event.target.value })}
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className="panel canon-panel">
-            <div className="panel-heading">
-              <h2>一致性资产</h2>
-              <button onClick={saveCanonAssets} disabled={!detail || busy === "canon"}>
-                {busy === "canon" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-                保存
-              </button>
-            </div>
-            <div className="asset-stack">
-              {detail?.canon_assets.map((asset) => (
-                <label key={asset.kind}>
-                  {asset.kind}
-                  <textarea
-                    value={asset.content}
-                    onChange={(event) => updateCanon(asset.kind, event.target.value)}
-                    placeholder="分析后会自动生成，也可以手动补充。"
-                  />
-                </label>
-              ))}
-              {!detail && <p className="muted">导入小说后显示人物卡、关系、地点、伏笔和术语表。</p>}
-            </div>
-          </section>
-
-          <section className="panel chapter-list-panel">
-            <div className="panel-heading">
-              <h2>章节</h2>
-            </div>
-            <div className="chapter-list">
-              {detail?.chapters.map((chapter) => (
-                <button
-                  key={chapter.id}
-                  className={selectedChapter?.id === chapter.id ? "chapter-item active" : "chapter-item"}
-                  onClick={() => setSelectedChapterId(chapter.id)}
-                >
-                  <span>{chapter.index}. {chapter.title}</span>
-                  <small>
-                    分析 {statusText[chapter.analysis_status] ?? chapter.analysis_status} · 改写{" "}
-                    {statusText[chapter.rewrite_status] ?? chapter.rewrite_status}
-                  </small>
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel compare-panel">
-            <div className="panel-heading">
-              <h2>{selectedChapter?.title ?? "原文 / 改写"}</h2>
-            </div>
-            {selectedChapter ? (
-              <div className="compare-grid">
-                <article>
-                  <h3>原文</h3>
-                  <pre>{selectedChapter.original_text}</pre>
-                </article>
-                <article>
-                  <h3>改写稿</h3>
-                  <pre>{selectedChapter.rewrite_text || "尚未改写。"}</pre>
-                </article>
-                <article className="analysis-output">
-                  <h3>分析 JSON</h3>
-                  <pre>{selectedChapter.analysis_json || "尚未分析。"}</pre>
-                </article>
+              <div className="asset-stack">
+                {detail?.canon_assets.map((asset) => (
+                  <label key={asset.kind}>
+                    {asset.kind}
+                    <textarea value={asset.content} onChange={(event) => updateCanon(asset.kind, event.target.value)} placeholder="分析后会自动生成，也可以手动补充。" />
+                  </label>
+                ))}
+                {!detail && <p className="muted">导入小说后显示人物卡、关系、地点、伏笔和术语表。</p>}
               </div>
-            ) : (
-              <p className="muted">选择章节后查看内容。</p>
-            )}
-          </section>
-        </div>
+            </section>
+
+            <section className="panel chapter-list-panel">
+              <div className="panel-heading">
+                <h2>章节</h2>
+              </div>
+              <div className="chapter-list">
+                {detail?.chapters.map((chapter) => (
+                  <button
+                    key={chapter.id}
+                    className={selectedChapter?.id === chapter.id ? "chapter-item active" : "chapter-item"}
+                    onClick={() => setSelectedChapterId(chapter.id)}
+                  >
+                    <span>
+                      {chapter.index}. {chapter.title}
+                    </span>
+                    <small>
+                      分析 {statusText[chapter.analysis_status] ?? chapter.analysis_status} · 改写{" "}
+                      {statusText[chapter.rewrite_status] ?? chapter.rewrite_status}
+                    </small>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel compare-panel">
+              <div className="panel-heading">
+                <h2>{selectedChapter?.title ?? "原文 / 改写"}</h2>
+              </div>
+              {selectedChapter ? (
+                <div className="compare-grid">
+                  <article>
+                    <h3>原文</h3>
+                    <pre>{selectedChapter.original_text}</pre>
+                  </article>
+                  <article>
+                    <h3>改写稿</h3>
+                    <pre>{selectedChapter.rewrite_text || "尚未改写。"}</pre>
+                  </article>
+                  <article className="analysis-output">
+                    <h3>分析 JSON</h3>
+                    <pre>{selectedChapter.analysis_json || "尚未分析。"}</pre>
+                  </article>
+                </div>
+              ) : (
+                <p className="muted">选择章节后查看内容。</p>
+              )}
+            </section>
+          </div>
+        )}
       </section>
     </main>
   );
