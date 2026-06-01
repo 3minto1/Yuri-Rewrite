@@ -77,7 +77,32 @@ pre {
 .app-shell {
   display: grid;
   grid-template-columns: 272px 1fr;
+  grid-template-rows: 42px 1fr;
   height: 100vh;
+}
+
+.app-menu {
+  align-items: center;
+  background: #ffffff;
+  border-bottom: 1px solid #ded9ce;
+  display: flex;
+  gap: 6px;
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 0 18px;
+}
+
+.app-menu-item {
+  background: transparent;
+  border-color: transparent;
+  color: #242426;
+  min-height: 30px;
+}
+
+.app-menu-item.active,
+.app-menu-item:hover:not(:disabled) {
+  background: #f7f4ed;
+  border-color: #d8d5cd;
 }
 
 .sidebar {
@@ -551,6 +576,75 @@ label {
 
 .compare-panel {
   min-height: 420px;
+}
+
+.analysis-panel {
+  min-height: 360px;
+}
+
+.analysis-panel pre {
+  background: #f7f4ed;
+  border: 1px solid #e2ded5;
+  border-radius: 7px;
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.compare-page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 14px 22px 22px;
+}
+
+.compare-page-toolbar {
+  align-items: center;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.compare-page-toolbar label {
+  max-width: 520px;
+  width: 100%;
+}
+
+.large-compare-grid {
+  display: grid;
+  flex: 1;
+  gap: 14px;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+}
+
+.large-compare-grid article {
+  background: #fff;
+  border: 1px solid #ded9ce;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.large-compare-grid h2 {
+  background: #f7f4ed;
+  border-bottom: 1px solid #e2ded5;
+  font-size: 16px;
+  letter-spacing: 0;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+.large-compare-grid pre {
+  flex: 1;
+  font-size: 16px;
+  line-height: 1.8;
+  overflow: auto;
+  padding: 18px;
 }
 
 .compare-grid {

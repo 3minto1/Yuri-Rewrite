@@ -131,7 +131,7 @@ export default function App() {
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
-  const [activeView, setActiveView] = useState<"workspace" | "logs" | "settings">("workspace");
+  const [activeView, setActiveView] = useState<"workspace" | "compare" | "logs" | "settings">("workspace");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [job, setJob] = useState<Job | null>(null);
@@ -412,6 +412,16 @@ export default function App() {
 
   return (
     <main className="app-shell">
+      <nav className="app-menu">
+        <button
+          className={activeView === "compare" ? "app-menu-item active" : "app-menu-item"}
+          onClick={() => setActiveView("compare")}
+          disabled={!detail}
+        >
+          对比
+        </button>
+      </nav>
+
       <aside className="sidebar">
         <div className="brand">
           <Sparkles size={22} />
@@ -513,15 +523,25 @@ export default function App() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <h1>{activeView === "logs" ? "日志" : activeView === "settings" ? "设置" : detail?.novel.title ?? "工作台"}</h1>
+            <h1>
+              {activeView === "logs"
+                ? "日志"
+                : activeView === "settings"
+                  ? "设置"
+                  : activeView === "compare"
+                    ? "对比"
+                    : detail?.novel.title ?? "工作台"}
+            </h1>
             <p>
               {activeView === "logs"
                 ? "查看 AI 调用的思考过程与原始输出"
                 : activeView === "settings"
                   ? "配置导出目录"
-                  : detail
-                    ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}`
-                    : "导入 TXT 后开始分析和改写"}
+                  : activeView === "compare"
+                    ? "左侧原文，右侧改写稿"
+                    : detail
+                      ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}`
+                      : "导入 TXT 后开始分析和改写"}
             </p>
           </div>
           {activeView === "workspace" && (
@@ -617,6 +637,37 @@ export default function App() {
                 </button>
               </div>
             </section>
+          </div>
+        )}
+
+        {activeView === "compare" && (
+          <div className="compare-page">
+            <div className="compare-page-toolbar">
+              <label>
+                章节
+                <select value={selectedChapterId} onChange={(event) => setSelectedChapterId(event.target.value)}>
+                  {detail?.chapters.map((chapter) => (
+                    <option key={chapter.id} value={chapter.id}>
+                      {chapter.index}. {chapter.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {selectedChapter ? (
+              <div className="large-compare-grid">
+                <article>
+                  <h2>原文</h2>
+                  <pre>{selectedChapter.original_text}</pre>
+                </article>
+                <article>
+                  <h2>改写稿</h2>
+                  <pre>{selectedChapter.rewrite_text || "尚未改写。"}</pre>
+                </article>
+              </div>
+            ) : (
+              <p className="muted">请选择章节。</p>
+            )}
           </div>
         )}
 
@@ -736,28 +787,11 @@ export default function App() {
               </div>
             </section>
 
-            <section className="panel compare-panel">
+            <section className="panel analysis-panel">
               <div className="panel-heading">
-                <h2>{selectedChapter?.title ?? "原文 / 改写"}</h2>
+                <h2>{selectedChapter?.title ?? "分析 JSON"}</h2>
               </div>
-              {selectedChapter ? (
-                <div className="compare-grid">
-                  <article>
-                    <h3>原文</h3>
-                    <pre>{selectedChapter.original_text}</pre>
-                  </article>
-                  <article>
-                    <h3>改写稿</h3>
-                    <pre>{selectedChapter.rewrite_text || "尚未改写。"}</pre>
-                  </article>
-                  <article className="analysis-output">
-                    <h3>分析 JSON</h3>
-                    <pre>{selectedChapter.analysis_json || "尚未分析。"}</pre>
-                  </article>
-                </div>
-              ) : (
-                <p className="muted">选择章节后查看内容。</p>
-              )}
+              <pre>{selectedChapter?.analysis_json || "选择章节后查看分析结果。"}</pre>
             </section>
           </div>
         )}
