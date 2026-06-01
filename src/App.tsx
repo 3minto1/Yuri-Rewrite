@@ -3,14 +3,17 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   BookOpen,
   CheckCircle2,
+  ClipboardList,
   Download,
   FilePlus2,
   KeyRound,
   Loader2,
+  MoreHorizontal,
   Play,
   RefreshCw,
   Save,
-  Sparkles
+  Sparkles,
+  Trash2
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -69,6 +72,17 @@ type Job = {
   message: string;
 };
 
+type AiLog = {
+  id: string;
+  novel_id?: string | null;
+  profile_id: string;
+  action: string;
+  chapter_title?: string | null;
+  status: string;
+  content: string;
+  created_at: string;
+};
+
 type ProfileDraft = {
   id?: string;
   name: string;
@@ -105,6 +119,8 @@ export default function App() {
   const [profileDraft, setProfileDraft] = useState<ProfileDraft>(emptyProfile);
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [selectedChapterId, setSelectedChapterId] = useState("");
+  const [openNovelMenuId, setOpenNovelMenuId] = useState("");
+  const [logs, setLogs] = useState<AiLog[]>([]);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [job, setJob] = useState<Job | null>(null);
@@ -117,6 +133,10 @@ export default function App() {
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    void refreshLogs();
+  }, [detail?.novel.id]);
 
   useEffect(() => {
     const profile = profiles.find((item) => item.id === selectedProfileId);
@@ -145,12 +165,20 @@ export default function App() {
     if (!detail && novelRows[0]) {
       await loadNovel(novelRows[0].id);
     }
+    await refreshLogs();
   }
 
   async function loadNovel(novelId: string) {
     const next = await invoke<NovelDetail>("get_novel_detail", { novelId });
     setDetail(next);
     setSelectedChapterId(next.chapters[0]?.id ?? "");
+    setOpenNovelMenuId("");
+    await refreshLogs(next.novel.id);
+  }
+
+  async function refreshLogs(novelId = detail?.novel.id) {
+    const rows = await invoke<AiLog[]>("list_ai_logs", { novelId: novelId ?? null });
+    setLogs(rows);
   }
 
   async function importTxt() {
@@ -166,6 +194,33 @@ export default function App() {
       await refreshAll();
       await loadNovel(novel.id);
       setNotice(`已导入《${novel.title}》。`);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deleteNovel(novel: Novel) {
+    const confirmed = window.confirm(`删除《${novel.title}》及其本地分析、改写和日志数据？`);
+    if (!confirmed) return;
+    setBusy("delete-novel");
+    setNotice("");
+    try {
+      await invoke<void>("delete_novel", { novelId: novel.id });
+      const remaining = await invoke<Novel[]>("list_novels");
+      setNovels(remaining);
+      setOpenNovelMenuId("");
+      if (detail?.novel.id === novel.id) {
+        if (remaining[0]) {
+          await loadNovel(remaining[0].id);
+        } else {
+          setDetail(null);
+          setSelectedChapterId("");
+          setLogs([]);
+        }
+      }
+      setNotice(`已删除《${novel.title}》。`);
     } catch (error) {
       setNotice(String(error));
     } finally {
@@ -212,6 +267,7 @@ export default function App() {
       const result = await invoke<{ ok: boolean; message: string }>("test_model_profile", {
         profileId: selectedProfileId
       });
+      await refreshLogs();
       setNotice(result.ok ? `连接成功：${result.message}` : `连接失败：${result.message}`);
     } catch (error) {
       setNotice(String(error));
@@ -253,6 +309,7 @@ export default function App() {
       });
       setJob(result);
       await loadNovel(detail.novel.id);
+      await refreshLogs(detail.novel.id);
       setNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
       setNotice(String(error));
@@ -308,14 +365,30 @@ export default function App() {
           <div className="section-label">小说</div>
           <div className="novel-list">
             {novels.map((novel) => (
-              <button
-                className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"}
-                key={novel.id}
-                onClick={() => loadNovel(novel.id)}
-              >
-                <BookOpen size={16} />
-                <span>{novel.title}</span>
-              </button>
+              <div className="novel-row" key={novel.id}>
+                <button
+                  className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"}
+                  onClick={() => loadNovel(novel.id)}
+                >
+                  <BookOpen size={16} />
+                  <span>{novel.title}</span>
+                </button>
+                <button
+                  className="icon-button menu-trigger"
+                  aria-label={`打开《${novel.title}》菜单`}
+                  onClick={() => setOpenNovelMenuId(openNovelMenuId === novel.id ? "" : novel.id)}
+                >
+                  <MoreHorizontal size={17} />
+                </button>
+                {openNovelMenuId === novel.id && (
+                  <div className="context-menu">
+                    <button onClick={() => deleteNovel(novel)} disabled={busy === "delete-novel"}>
+                      <Trash2 size={15} />
+                      删除当前小说
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
             {novels.length === 0 && <p className="muted">尚未导入小说。</p>}
           </div>
@@ -327,10 +400,28 @@ export default function App() {
             <option value="">未选择</option>
             {profiles.map((profile) => (
               <option key={profile.id} value={profile.id}>
-                {profile.name} · {profile.model}
+                {profile.model}
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="side-section log-section">
+          <div className="section-label">日志</div>
+          <div className="log-list">
+            {logs.map((log) => (
+              <article className={`log-item ${log.status}`} key={log.id}>
+                <header>
+                  <ClipboardList size={14} />
+                  <span>{log.action}</span>
+                  <time>{new Date(log.created_at).toLocaleTimeString()}</time>
+                </header>
+                {log.chapter_title && <strong>{log.chapter_title}</strong>}
+                <pre>{log.content}</pre>
+              </article>
+            ))}
+            {logs.length === 0 && <p className="muted">暂无 AI 调用日志。</p>}
+          </div>
         </div>
       </aside>
 

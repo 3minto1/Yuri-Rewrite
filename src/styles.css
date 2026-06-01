@@ -87,6 +87,7 @@ pre {
   flex-direction: column;
   gap: 22px;
   min-width: 0;
+  overflow: hidden;
   padding: 22px 18px;
 }
 
@@ -125,6 +126,7 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-height: 0;
 }
 
 .section-label {
@@ -140,6 +142,13 @@ pre {
   gap: 8px;
 }
 
+.novel-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 36px;
+  gap: 6px;
+}
+
 .novel-item,
 .chapter-item {
   justify-content: flex-start;
@@ -151,6 +160,7 @@ pre {
   background: transparent;
   border-color: #49463f;
   color: #f4efe6;
+  width: 100%;
 }
 
 .novel-item span,
@@ -164,6 +174,95 @@ pre {
   background: #f4efe6;
   border-color: #f4efe6;
   color: #242422;
+}
+
+.icon-button {
+  min-height: 36px;
+  padding: 0;
+  width: 36px;
+}
+
+.menu-trigger {
+  background: transparent;
+  border-color: #49463f;
+  color: #f4efe6;
+}
+
+.context-menu {
+  background: #fff;
+  border: 1px solid #ded9ce;
+  border-radius: 7px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
+  min-width: 154px;
+  padding: 6px;
+  position: absolute;
+  right: 0;
+  top: 40px;
+  z-index: 20;
+}
+
+.context-menu button {
+  border-color: transparent;
+  color: #8f2d24;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.log-section {
+  flex: 1;
+}
+
+.log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.log-item {
+  background: #312f2b;
+  border: 1px solid #4a463f;
+  border-radius: 7px;
+  color: #f4efe6;
+  padding: 9px;
+}
+
+.log-item.error {
+  border-color: #a65a52;
+}
+
+.log-item header {
+  align-items: center;
+  color: #d4ccbd;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 14px 1fr auto;
+  margin-bottom: 6px;
+}
+
+.log-item time {
+  color: #a99f90;
+  font-size: 11px;
+}
+
+.log-item strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-item pre {
+  color: #e9e1d4;
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 150px;
+  overflow: auto;
 }
 
 .workspace {

@@ -102,6 +102,18 @@ struct Job {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct AiLog {
+    id: String,
+    novel_id: Option<String>,
+    profile_id: String,
+    action: String,
+    chapter_title: Option<String>,
+    status: String,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct ExportResult {
     path: String,
 }
@@ -132,9 +144,11 @@ pub fn run() {
             import_txt,
             list_novels,
             get_novel_detail,
+            delete_novel,
             save_model_profile,
             list_model_profiles,
             test_model_profile,
+            list_ai_logs,
             update_canon_assets,
             start_analysis,
             start_rewrite,
@@ -201,8 +215,21 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS ai_logs (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT,
+            profile_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            chapter_title TEXT,
+            status TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id, chapter_index);
         CREATE INDEX IF NOT EXISTS idx_jobs_novel ON jobs(novel_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_ai_logs_novel ON ai_logs(novel_id, created_at);
         "#,
     )?;
     ensure_column(conn, "model_profiles", "api_key", "TEXT")?;
@@ -295,6 +322,22 @@ fn get_novel_detail(novel_id: String, state: State<AppState>) -> Result<NovelDet
 }
 
 #[tauri::command]
+fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.execute("DELETE FROM chapters WHERE novel_id = ?1", params![novel_id])
+        .map_err(to_string)?;
+    conn.execute("DELETE FROM canon_assets WHERE novel_id = ?1", params![novel_id])
+        .map_err(to_string)?;
+    conn.execute("DELETE FROM jobs WHERE novel_id = ?1", params![novel_id])
+        .map_err(to_string)?;
+    conn.execute("DELETE FROM ai_logs WHERE novel_id = ?1", params![novel_id])
+        .map_err(to_string)?;
+    conn.execute("DELETE FROM novels WHERE id = ?1", params![novel_id])
+        .map_err(to_string)?;
+    Ok(())
+}
+
+#[tauri::command]
 fn save_model_profile(input: ModelProfileInput, state: State<AppState>) -> Result<ModelProfile, String> {
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let updated_at = Utc::now().to_rfc3339();
@@ -378,6 +421,36 @@ fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelProfile>, Stri
 }
 
 #[tauri::command]
+fn list_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<Vec<AiLog>, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    if let Some(novel_id) = novel_id {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, created_at FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL ORDER BY created_at DESC LIMIT 80",
+            )
+            .map_err(to_string)?;
+        let logs = stmt
+            .query_map(params![novel_id], row_to_ai_log)
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+        Ok(logs)
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, created_at FROM ai_logs ORDER BY created_at DESC LIMIT 80",
+            )
+            .map_err(to_string)?;
+        let logs = stmt
+            .query_map([], row_to_ai_log)
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+        Ok(logs)
+    }
+}
+
+#[tauri::command]
 async fn test_model_profile(profile_id: String, state: State<'_, AppState>) -> Result<ModelTestResult, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
@@ -390,14 +463,20 @@ async fn test_model_profile(profile_id: String, state: State<'_, AppState>) -> R
     )
     .await
     {
-        Ok(text) => Ok(ModelTestResult {
-            ok: true,
-            message: text,
-        }),
-        Err(error) => Ok(ModelTestResult {
-            ok: false,
-            message: error,
-        }),
+        Ok(text) => {
+            append_ai_log(&state, None, &profile.id, "测试模型", None, "success", &text)?;
+            Ok(ModelTestResult {
+                ok: true,
+                message: text,
+            })
+        }
+        Err(error) => {
+            append_ai_log(&state, None, &profile.id, "测试模型", None, "error", &error)?;
+            Ok(ModelTestResult {
+                ok: false,
+                message: error,
+            })
+        }
     }
 }
 
@@ -455,6 +534,15 @@ async fn start_analysis(
         {
             Ok(text) => {
                 let normalized = normalize_jsonish(&text);
+                append_ai_log(
+                    &state,
+                    Some(&novel_id),
+                    &profile.id,
+                    "章节分析",
+                    Some(&chapter.title),
+                    "success",
+                    &normalized,
+                )?;
                 let conn = state.conn.lock().map_err(to_string)?;
                 conn.execute(
                     "UPDATE chapters SET analysis_json = ?1, analysis_status = 'completed' WHERE id = ?2",
@@ -464,6 +552,15 @@ async fn start_analysis(
                 merge_analysis_into_canon(&conn, &novel_id).map_err(to_string)?;
             }
             Err(error) => {
+                append_ai_log(
+                    &state,
+                    Some(&novel_id),
+                    &profile.id,
+                    "章节分析",
+                    Some(&chapter.title),
+                    "error",
+                    &error,
+                )?;
                 set_chapter_status(&state, &chapter.id, "analysis_status", "failed")?;
                 update_job(&state, &job.id, "failed", chapter.index, &error)?;
                 job = get_job(job.id.clone(), state)?;
@@ -510,6 +607,15 @@ async fn start_rewrite(
         .await
         {
             Ok(text) => {
+                append_ai_log(
+                    &state,
+                    Some(&novel_id),
+                    &profile.id,
+                    "章节改写",
+                    Some(&chapter.title),
+                    "success",
+                    text.trim(),
+                )?;
                 let conn = state.conn.lock().map_err(to_string)?;
                 conn.execute(
                     "UPDATE chapters SET rewrite_text = ?1, rewrite_status = 'completed' WHERE id = ?2",
@@ -518,6 +624,15 @@ async fn start_rewrite(
                 .map_err(to_string)?;
             }
             Err(error) => {
+                append_ai_log(
+                    &state,
+                    Some(&novel_id),
+                    &profile.id,
+                    "章节改写",
+                    Some(&chapter.title),
+                    "error",
+                    &error,
+                )?;
                 set_chapter_status(&state, &chapter.id, "rewrite_status", "failed")?;
                 update_job(&state, &job.id, "failed", chapter.index, &error)?;
                 job = get_job(job.id.clone(), state)?;
@@ -1015,6 +1130,46 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
+}
+
+fn row_to_ai_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiLog> {
+    Ok(AiLog {
+        id: row.get(0)?,
+        novel_id: row.get(1)?,
+        profile_id: row.get(2)?,
+        action: row.get(3)?,
+        chapter_title: row.get(4)?,
+        status: row.get(5)?,
+        content: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+fn append_ai_log(
+    state: &State<'_, AppState>,
+    novel_id: Option<&str>,
+    profile_id: &str,
+    action: &str,
+    chapter_title: Option<&str>,
+    status: &str,
+    content: &str,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.execute(
+        "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            Uuid::new_v4().to_string(),
+            novel_id,
+            profile_id,
+            action,
+            chapter_title,
+            status,
+            truncate_text(content, 12_000),
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(to_string)?;
+    Ok(())
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
