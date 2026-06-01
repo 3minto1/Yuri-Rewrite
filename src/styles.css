@@ -265,6 +265,13 @@ pre {
   margin: 0;
 }
 
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .form-grid {
   display: grid;
   gap: 10px;

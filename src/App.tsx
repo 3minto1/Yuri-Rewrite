@@ -351,10 +351,16 @@ export default function App() {
           <section className="panel model-panel">
             <div className="panel-heading">
               <h2>模型配置</h2>
-              <button onClick={saveProfile} disabled={busy === "profile"}>
-                {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-                保存
-              </button>
+              <div className="panel-actions">
+                <button onClick={testProfile} disabled={!selectedProfileId || busy === "test"}>
+                  {busy === "test" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
+                  测试模型
+                </button>
+                <button onClick={saveProfile} disabled={busy === "profile"}>
+                  {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                  保存
+                </button>
+              </div>
             </div>
             <div className="form-grid">
               <label>
@@ -419,10 +425,6 @@ export default function App() {
                 />
               </label>
             </div>
-            <button className="inline-action" onClick={testProfile} disabled={!selectedProfileId || busy === "test"}>
-              {busy === "test" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
-              测试当前模型
-            </button>
           </section>
 
           <section className="panel canon-panel">
