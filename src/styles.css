@@ -83,26 +83,30 @@ pre {
 
 .app-menu {
   align-items: center;
-  background: #ffffff;
-  border-bottom: 1px solid #ded9ce;
+  background:
+    linear-gradient(90deg, rgba(184, 87, 80, 0.2), transparent 34%),
+    #252422;
+  border-bottom: 1px solid #3a3731;
   display: flex;
-  gap: 6px;
+  gap: 8px;
   grid-column: 1 / -1;
   min-width: 0;
-  padding: 0 18px;
+  padding: 0 20px;
 }
 
 .app-menu-item {
-  background: transparent;
-  border-color: transparent;
-  color: #242426;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: #49463f;
+  color: #f4efe6;
   min-height: 30px;
+  padding: 0 16px;
 }
 
 .app-menu-item.active,
 .app-menu-item:hover:not(:disabled) {
-  background: #f7f4ed;
-  border-color: #d8d5cd;
+  background: #f4efe6;
+  border-color: #f4efe6;
+  color: #242422;
 }
 
 .sidebar {
@@ -576,19 +580,6 @@ label {
 
 .compare-panel {
   min-height: 420px;
-}
-
-.analysis-panel {
-  min-height: 360px;
-}
-
-.analysis-panel pre {
-  background: #f7f4ed;
-  border: 1px solid #e2ded5;
-  border-radius: 7px;
-  flex: 1;
-  overflow: auto;
-  padding: 12px;
 }
 
 .compare-page {

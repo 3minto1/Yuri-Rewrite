@@ -787,12 +787,6 @@ export default function App() {
               </div>
             </section>
 
-            <section className="panel analysis-panel">
-              <div className="panel-heading">
-                <h2>{selectedChapter?.title ?? "分析 JSON"}</h2>
-              </div>
-              <pre>{selectedChapter?.analysis_json || "选择章节后查看分析结果。"}</pre>
-            </section>
           </div>
         )}
       </section>
