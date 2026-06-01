@@ -88,6 +88,8 @@ const emptyProfile: ProfileDraft = {
   api_key: ""
 };
 
+const savedApiKeyMask = "********";
+
 const statusText: Record<string, string> = {
   pending: "待处理",
   running: "进行中",
@@ -115,6 +117,20 @@ export default function App() {
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    const profile = profiles.find((item) => item.id === selectedProfileId);
+    if (!profile) return;
+    setProfileDraft({
+      id: profile.id,
+      name: profile.name,
+      provider: profile.provider,
+      base_url: profile.base_url,
+      model: profile.model,
+      temperature: profile.temperature,
+      api_key: profile.has_api_key ? savedApiKeyMask : ""
+    });
+  }, [profiles, selectedProfileId]);
 
   async function refreshAll() {
     const [novelRows, profileRows] = await Promise.all([
@@ -161,11 +177,19 @@ export default function App() {
     setBusy("profile");
     setNotice("");
     try {
-      const saved = await invoke<ModelProfile>("save_model_profile", { input: profileDraft });
+      const input = {
+        ...profileDraft,
+        api_key: profileDraft.api_key === savedApiKeyMask ? undefined : profileDraft.api_key
+      };
+      const saved = await invoke<ModelProfile>("save_model_profile", { input });
       setSelectedProfileId(saved.id);
-      setProfileDraft({ ...profileDraft, id: saved.id, api_key: "" });
+      setProfileDraft({
+        ...profileDraft,
+        id: saved.id,
+        api_key: saved.has_api_key ? savedApiKeyMask : ""
+      });
       await refreshAll();
-      setNotice("模型配置已保存。");
+      setNotice(saved.has_api_key ? "模型配置和 API Key 已保存。" : "模型配置已保存，尚未保存 API Key。");
     } catch (error) {
       setNotice(String(error));
     } finally {
@@ -421,6 +445,12 @@ export default function App() {
                 <input
                   type="password"
                   value={profileDraft.api_key}
+                  placeholder={selectedProfileId ? "留空则不保存 Key" : "填写 API Key 后保存"}
+                  onFocus={() => {
+                    if (profileDraft.api_key === savedApiKeyMask) {
+                      setProfileDraft({ ...profileDraft, api_key: "" });
+                    }
+                  }}
                   onChange={(event) => setProfileDraft({ ...profileDraft, api_key: event.target.value })}
                 />
               </label>

@@ -185,6 +185,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             base_url TEXT NOT NULL,
             model TEXT NOT NULL,
             temperature REAL NOT NULL,
+            api_key TEXT,
             updated_at TEXT NOT NULL
         );
 
@@ -203,7 +204,23 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id, chapter_index);
         CREATE INDEX IF NOT EXISTS idx_jobs_novel ON jobs(novel_id, created_at);
         "#,
-    )
+    )?;
+    ensure_column(conn, "model_profiles", "api_key", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|name| name == column) {
+        conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_type),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -281,6 +298,16 @@ fn get_novel_detail(novel_id: String, state: State<AppState>) -> Result<NovelDet
 fn save_model_profile(input: ModelProfileInput, state: State<AppState>) -> Result<ModelProfile, String> {
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let updated_at = Utc::now().to_rfc3339();
+    let api_key = input
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "********")
+        .map(str::to_string);
+    let conn = state.conn.lock().map_err(to_string)?;
+    if let Some(value) = &api_key {
+        let _ = write_api_key(&id, value);
+    }
     let profile = ModelProfile {
         id: id.clone(),
         name: input.name,
@@ -288,29 +315,22 @@ fn save_model_profile(input: ModelProfileInput, state: State<AppState>) -> Resul
         base_url: input.base_url,
         model: input.model,
         temperature: input.temperature,
-        has_api_key: input.api_key.as_ref().is_some_and(|value| !value.trim().is_empty())
-            || read_api_key(&id).is_ok(),
+        has_api_key: api_key.is_some() || stored_api_key_exists(&conn, &id),
         updated_at,
     };
 
-    if let Some(api_key) = input.api_key {
-        if !api_key.trim().is_empty() {
-            write_api_key(&id, &api_key)?;
-        }
-    }
-
-    let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
         r#"
-        INSERT INTO model_profiles (id, name, provider, base_url, model, temperature, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        INSERT INTO model_profiles (id, name, provider, base_url, model, temperature, updated_at, api_key)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             provider = excluded.provider,
             base_url = excluded.base_url,
             model = excluded.model,
             temperature = excluded.temperature,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            api_key = COALESCE(excluded.api_key, model_profiles.api_key)
         "#,
         params![
             profile.id,
@@ -319,7 +339,8 @@ fn save_model_profile(input: ModelProfileInput, state: State<AppState>) -> Resul
             profile.base_url,
             profile.model,
             profile.temperature,
-            profile.updated_at
+            profile.updated_at,
+            api_key
         ],
     )
     .map_err(to_string)?;
@@ -332,13 +353,15 @@ fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelProfile>, Stri
     let conn = state.conn.lock().map_err(to_string)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, provider, base_url, model, temperature, updated_at FROM model_profiles ORDER BY updated_at DESC",
+            "SELECT id, name, provider, base_url, model, temperature, updated_at, api_key FROM model_profiles ORDER BY updated_at DESC",
         )
         .map_err(to_string)?;
     let profiles = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
+        let db_api_key: Option<String> = row.get(7)?;
         Ok(ModelProfile {
-            has_api_key: read_api_key(&id).is_ok(),
+            has_api_key: read_api_key(&id).is_ok()
+                || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
             id,
             name: row.get(1)?,
             provider: row.get(2)?,
@@ -357,7 +380,7 @@ fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelProfile>, Stri
 #[tauri::command]
 async fn test_model_profile(profile_id: String, state: State<'_, AppState>) -> Result<ModelTestResult, String> {
     let profile = load_model_profile(&state, &profile_id)?;
-    let api_key = read_api_key(&profile.id)?;
+    let api_key = read_stored_api_key(&state, &profile.id)?;
     match generate_text(
         &state.client,
         &profile,
@@ -409,7 +432,7 @@ async fn start_analysis(
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
-    let api_key = read_api_key(&profile.id)?;
+    let api_key = read_stored_api_key(&state, &profile.id)?;
     let chapters = {
         let conn = state.conn.lock().map_err(to_string)?;
         load_chapters(&conn, &novel_id)?
@@ -460,7 +483,7 @@ async fn start_rewrite(
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
-    let api_key = read_api_key(&profile.id)?;
+    let api_key = read_stored_api_key(&state, &profile.id)?;
     let (chapters, canon_assets) = {
         let conn = state.conn.lock().map_err(to_string)?;
         (load_chapters(&conn, &novel_id)?, load_canon_assets(&conn, &novel_id)?)
@@ -656,12 +679,14 @@ fn load_canon_assets(conn: &Connection, novel_id: &str) -> Result<Vec<CanonAsset
 fn load_model_profile(state: &State<'_, AppState>, profile_id: &str) -> Result<ModelProfile, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     conn.query_row(
-        "SELECT id, name, provider, base_url, model, temperature, updated_at FROM model_profiles WHERE id = ?1",
+        "SELECT id, name, provider, base_url, model, temperature, updated_at, api_key FROM model_profiles WHERE id = ?1",
         params![profile_id],
         |row| {
             let id: String = row.get(0)?;
+            let db_api_key: Option<String> = row.get(7)?;
             Ok(ModelProfile {
-                has_api_key: read_api_key(&id).is_ok(),
+                has_api_key: read_api_key(&id).is_ok()
+                    || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
                 id,
                 name: row.get(1)?,
                 provider: row.get(2)?,
@@ -898,6 +923,38 @@ fn read_api_key(profile_id: &str) -> Result<String, String> {
 fn write_api_key(profile_id: &str, api_key: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, profile_id).map_err(to_string)?;
     entry.set_password(api_key).map_err(to_string)
+}
+
+fn read_stored_api_key(state: &State<'_, AppState>, profile_id: &str) -> Result<String, String> {
+    if let Ok(api_key) = read_api_key(profile_id) {
+        if !api_key.trim().is_empty() {
+            return Ok(api_key);
+        }
+    }
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.query_row(
+        "SELECT api_key FROM model_profiles WHERE id = ?1",
+        params![profile_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .map_err(to_string)?
+    .filter(|value| !value.trim().is_empty())
+    .ok_or_else(|| "未保存 API Key，请填写 API Key 后点击保存。".to_string())
+}
+
+fn stored_api_key_exists(conn: &Connection, profile_id: &str) -> bool {
+    if read_api_key(profile_id).is_ok() {
+        return true;
+    }
+    conn.query_row(
+        "SELECT api_key FROM model_profiles WHERE id = ?1",
+        params![profile_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .as_deref()
+    .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn row_to_novel(row: &rusqlite::Row<'_>) -> rusqlite::Result<Novel> {
