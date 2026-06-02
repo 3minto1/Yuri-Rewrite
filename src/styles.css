@@ -95,11 +95,18 @@ pre {
 }
 
 .app-menu-item {
+  align-items: center;
   background: rgba(255, 255, 255, 0.06);
   border-color: #49463f;
   color: #f4efe6;
+  display: inline-flex;
+  gap: 8px;
   min-height: 30px;
   padding: 0 16px;
+}
+
+.app-menu-spacer {
+  flex: 1;
 }
 
 .app-menu-item.active,

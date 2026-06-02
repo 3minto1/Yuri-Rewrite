@@ -6,14 +6,18 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::Mutex,
 };
 use tauri::{Manager, State};
 use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "YuriRewrite";
+const GITHUB_REPOSITORY_URL: &str = "https://github.com/3minto1/Yuri-Rewrite";
+const GITHUB_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/3minto1/Yuri-Rewrite/releases/latest";
 
 struct AppState {
     conn: Mutex<Connection>,
@@ -156,6 +160,23 @@ struct ExportResult {
     path: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateCheckResult {
+    current_version: String,
+    latest_version: String,
+    latest_tag: String,
+    is_latest: bool,
+    release_url: String,
+    asset_name: String,
+    asset_download_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateDownloadResult {
+    path: String,
+    version: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CanonAssetInput {
     kind: String,
@@ -165,6 +186,14 @@ struct CanonAssetInput {
 struct SplitResult {
     chapters: Vec<Chapter>,
     detected_chapters: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedChapterRewrite {
+    id: String,
+    index: i64,
+    title: String,
+    text: String,
 }
 
 pub fn run() {
@@ -203,7 +232,10 @@ pub fn run() {
             start_analysis,
             start_rewrite,
             get_job,
-            export_novel
+            export_novel,
+            open_github_url,
+            check_for_updates,
+            download_latest_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuri Rewrite");
@@ -316,18 +348,31 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     ensure_column(conn, "model_profiles", "api_key", "TEXT")?;
     ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
-    ensure_column(conn, "novel_settings", "advanced_settings", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        conn,
+        "novel_settings",
+        "advanced_settings",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     Ok(())
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str) -> rusqlite::Result<()> {
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;
     if !columns.iter().any(|name| name == column) {
         conn.execute(
-            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_type),
+            &format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                table, column, column_type
+            ),
             [],
         )?;
     }
@@ -368,8 +413,14 @@ fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String
         .map_err(to_string)?;
     }
 
-    create_chapter_batches(&conn, &state.data_dir, &novel.id, &split.chapters, split.detected_chapters)
-        .map_err(to_string)?;
+    create_chapter_batches(
+        &conn,
+        &state.data_dir,
+        &novel.id,
+        &split.chapters,
+        split.detected_chapters,
+    )
+    .map_err(to_string)?;
     seed_canon_assets(&conn, &novel.id).map_err(to_string)?;
     Ok(novel)
 }
@@ -422,14 +473,26 @@ fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(), String> 
     if batch_dir.exists() {
         fs::remove_dir_all(&batch_dir).map_err(to_string)?;
     }
-    conn.execute("DELETE FROM novel_settings WHERE novel_id = ?1", params![novel_id])
-        .map_err(to_string)?;
-    conn.execute("DELETE FROM chapter_batches WHERE novel_id = ?1", params![novel_id])
-        .map_err(to_string)?;
-    conn.execute("DELETE FROM chapters WHERE novel_id = ?1", params![novel_id])
-        .map_err(to_string)?;
-    conn.execute("DELETE FROM canon_assets WHERE novel_id = ?1", params![novel_id])
-        .map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM novel_settings WHERE novel_id = ?1",
+        params![novel_id],
+    )
+    .map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM chapter_batches WHERE novel_id = ?1",
+        params![novel_id],
+    )
+    .map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM chapters WHERE novel_id = ?1",
+        params![novel_id],
+    )
+    .map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM canon_assets WHERE novel_id = ?1",
+        params![novel_id],
+    )
+    .map_err(to_string)?;
     conn.execute("DELETE FROM jobs WHERE novel_id = ?1", params![novel_id])
         .map_err(to_string)?;
     conn.execute("DELETE FROM ai_logs WHERE novel_id = ?1", params![novel_id])
@@ -440,7 +503,10 @@ fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn save_model_profile(input: ModelProfileInput, state: State<AppState>) -> Result<ModelProfile, String> {
+fn save_model_profile(
+    input: ModelProfileInput,
+    state: State<AppState>,
+) -> Result<ModelProfile, String> {
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let updated_at = Utc::now().to_rfc3339();
     let api_key = input
@@ -496,10 +562,16 @@ fn save_model_profile(input: ModelProfileInput, state: State<AppState>) -> Resul
 #[tauri::command]
 fn delete_model_profile(profile_id: String, state: State<AppState>) -> Result<(), String> {
     let conn = state.conn.lock().map_err(to_string)?;
-    conn.execute("DELETE FROM model_profiles WHERE id = ?1", params![profile_id])
-        .map_err(to_string)?;
-    conn.execute("DELETE FROM ai_logs WHERE profile_id = ?1", params![profile_id])
-        .map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM model_profiles WHERE id = ?1",
+        params![profile_id],
+    )
+    .map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM ai_logs WHERE profile_id = ?1",
+        params![profile_id],
+    )
+    .map_err(to_string)?;
     let _ = delete_api_key(&profile_id);
     Ok(())
 }
@@ -512,24 +584,25 @@ fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelProfile>, Stri
             "SELECT id, name, provider, base_url, model, temperature, updated_at, api_key FROM model_profiles ORDER BY updated_at DESC",
         )
         .map_err(to_string)?;
-    let profiles = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let db_api_key: Option<String> = row.get(7)?;
-        Ok(ModelProfile {
-            has_api_key: read_api_key(&id).is_ok()
-                || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
-            id,
-            name: row.get(1)?,
-            provider: row.get(2)?,
-            base_url: row.get(3)?,
-            model: row.get(4)?,
-            temperature: row.get(5)?,
-            updated_at: row.get(6)?,
+    let profiles = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let db_api_key: Option<String> = row.get(7)?;
+            Ok(ModelProfile {
+                has_api_key: read_api_key(&id).is_ok()
+                    || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
+                id,
+                name: row.get(1)?,
+                provider: row.get(2)?,
+                base_url: row.get(3)?,
+                model: row.get(4)?,
+                temperature: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
         })
-    })
-    .map_err(to_string)?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(to_string)?;
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
     Ok(profiles)
 }
 
@@ -595,7 +668,12 @@ fn get_app_settings(state: State<AppState>) -> Result<AppSettings, String> {
 #[tauri::command]
 fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<AppSettings, String> {
     let conn = state.conn.lock().map_err(to_string)?;
-    if let Some(export_dir) = settings.export_dir.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(export_dir) = settings
+        .export_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         fs::create_dir_all(export_dir).map_err(to_string)?;
         conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('export_dir', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -613,7 +691,10 @@ fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<Ap
 }
 
 #[tauri::command]
-fn get_novel_settings(novel_id: String, state: State<AppState>) -> Result<Option<NovelSettings>, String> {
+fn get_novel_settings(
+    novel_id: String,
+    state: State<AppState>,
+) -> Result<Option<NovelSettings>, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     load_novel_settings(&conn, &novel_id)
 }
@@ -679,13 +760,19 @@ fn save_novel_settings(
 }
 
 #[tauri::command]
-fn list_chapter_batches(novel_id: String, state: State<AppState>) -> Result<Vec<ChapterBatch>, String> {
+fn list_chapter_batches(
+    novel_id: String,
+    state: State<AppState>,
+) -> Result<Vec<ChapterBatch>, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     load_chapter_batches(&conn, &novel_id)
 }
 
 #[tauri::command]
-async fn test_model_profile(profile_id: String, state: State<'_, AppState>) -> Result<ModelTestResult, String> {
+async fn test_model_profile(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> Result<ModelTestResult, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
     match generate_text(
@@ -715,7 +802,17 @@ async fn test_model_profile(profile_id: String, state: State<'_, AppState>) -> R
             })
         }
         Err(error) => {
-            append_ai_log(&state, None, &profile.id, "测试模型", None, "error", &error, None, None)?;
+            append_ai_log(
+                &state,
+                None,
+                &profile.id,
+                "测试模型",
+                None,
+                "error",
+                &error,
+                None,
+                None,
+            )?;
             Ok(ModelTestResult {
                 ok: false,
                 message: error,
@@ -768,7 +865,13 @@ async fn start_analysis(
     let mut job = create_job(&state, &novel_id, "analysis", total)?;
 
     for chapter in chapters {
-        update_job(&state, &job.id, "running", chapter.index, &format!("正在分析 {}", chapter.title))?;
+        update_job(
+            &state,
+            &job.id,
+            "running",
+            chapter.index,
+            &format!("正在分析 {}", chapter.title),
+        )?;
         set_chapter_status(&state, &chapter.id, "analysis_status", "running")?;
         let prompt = build_analysis_prompt(&chapter);
         match generate_text(
@@ -846,6 +949,200 @@ async fn start_rewrite(
     if chapters.is_empty() {
         return Err("当前批次没有已完成分析的内容，请先分析该批次。".to_string());
     }
+
+    let total = chapters.len() as i64;
+    let mut job = create_job(&state, &novel_id, "rewrite", total)?;
+    let canon_text = canon_assets
+        .iter()
+        .map(|asset| format!("## {}\n{}", asset.kind, asset.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let batch_label = format_batch_label(&chapters);
+
+    for chapter in &chapters {
+        set_chapter_status(&state, &chapter.id, "rewrite_status", "running")?;
+    }
+
+    update_job(
+        &state,
+        &job.id,
+        "running",
+        0,
+        &format!("正在批次改写 {}", batch_label),
+    )?;
+    let rewrite_prompt =
+        build_batch_rewrite_prompt_with_settings(&chapters, &canon_text, &settings);
+    let rewrite_output = match generate_text(
+        &state.client,
+        &profile,
+        &api_key,
+        "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须保留用户提供的章节边界标记，只输出完整批次正文。",
+        &rewrite_prompt,
+    )
+    .await
+    {
+        Ok(output) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次改写",
+                Some(&batch_label),
+                "success",
+                output.text.trim(),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            output
+        }
+        Err(error) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次改写",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(&state, &chapters)?;
+            update_job(&state, &job.id, "failed", 0, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
+        }
+    };
+
+    let parsed_rewrite = match parse_batch_rewrite_output(&rewrite_output.text, &chapters) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次改写解析",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(&state, &chapters)?;
+            update_job(&state, &job.id, "failed", 0, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
+        }
+    };
+
+    update_job(
+        &state,
+        &job.id,
+        "running",
+        total,
+        &format!("正在复检修正 {}", batch_label),
+    )?;
+    let review_prompt =
+        build_batch_review_prompt_with_settings(&chapters, &parsed_rewrite, &settings);
+    let review_output = match generate_text(
+        &state.client,
+        &profile,
+        &api_key,
+        "你是中文小说改写质检与修正助手。检查并修正改写稿中的姓名、代词、称谓、设定和逻辑问题，必须保留章节边界标记，只输出修正后的完整批次正文。",
+        &review_prompt,
+    )
+    .await
+    {
+        Ok(output) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次复检修正",
+                Some(&batch_label),
+                "success",
+                output.text.trim(),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            output
+        }
+        Err(error) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次复检修正",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(&state, &chapters)?;
+            update_job(&state, &job.id, "failed", total, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
+        }
+    };
+
+    let corrected_rewrite = match parse_batch_rewrite_output(&review_output.text, &chapters) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次复检解析",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(&state, &chapters)?;
+            update_job(&state, &job.id, "failed", total, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
+        }
+    };
+
+    {
+        let conn = state.conn.lock().map_err(to_string)?;
+        for rewrite in corrected_rewrite {
+            conn.execute(
+                "UPDATE chapters SET rewrite_text = ?1, rewrite_status = 'completed' WHERE id = ?2",
+                params![rewrite.text.trim(), rewrite.id],
+            )
+            .map_err(to_string)?;
+        }
+    }
+
+    update_job(&state, &job.id, "completed", total, "改写与复检完成")?;
+    get_job(job.id, state)
+}
+
+#[allow(dead_code)]
+async fn start_rewrite_legacy(
+    novel_id: String,
+    profile_id: String,
+    batch_id: String,
+    state: State<'_, AppState>,
+) -> Result<Job, String> {
+    let profile = load_model_profile(&state, &profile_id)?;
+    let api_key = read_stored_api_key(&state, &profile.id)?;
+    let (chapters, canon_assets, settings) = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        let settings = require_novel_settings(&conn, &novel_id)?;
+        let chapters = load_chapters_for_batch(&conn, &novel_id, &batch_id)?
+            .into_iter()
+            .filter(|chapter| chapter.analysis_status == "completed")
+            .collect::<Vec<_>>();
+        (chapters, load_canon_assets(&conn, &novel_id)?, settings)
+    };
+    if chapters.is_empty() {
+        return Err("当前批次没有已完成分析的内容，请先分析该批次。".to_string());
+    }
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
     let canon_text = canon_assets
@@ -855,7 +1152,13 @@ async fn start_rewrite(
         .join("\n\n");
 
     for chapter in chapters {
-        update_job(&state, &job.id, "running", chapter.index, &format!("正在改写 {}", chapter.title))?;
+        update_job(
+            &state,
+            &job.id,
+            "running",
+            chapter.index,
+            &format!("正在改写 {}", chapter.title),
+        )?;
         set_chapter_status(&state, &chapter.id, "rewrite_status", "running")?;
         let prompt = build_rewrite_prompt_with_settings(&chapter, &canon_text, &settings);
         match generate_text(
@@ -922,7 +1225,14 @@ fn get_job(job_id: String, state: State<AppState>) -> Result<Job, String> {
 }
 
 #[tauri::command]
-fn export_novel(novel_id: String, format: String, state: State<AppState>) -> Result<ExportResult, String> {
+fn export_novel(
+    novel_id: String,
+    format: String,
+    state: State<AppState>,
+) -> Result<ExportResult, String> {
+    if format != "txt" {
+        return Err("当前仅支持导出 TXT。".to_string());
+    }
     let conn = state.conn.lock().map_err(to_string)?;
     let novel = conn
         .query_row(
@@ -932,6 +1242,7 @@ fn export_novel(novel_id: String, format: String, state: State<AppState>) -> Res
         )
         .map_err(to_string)?;
     let chapters = load_chapters(&conn, &novel.id)?;
+    let body = build_rewritten_export_body(&chapters)?;
     let configured_export_dir = conn
         .query_row(
             "SELECT value FROM app_settings WHERE key = 'export_dir'",
@@ -941,26 +1252,226 @@ fn export_novel(novel_id: String, format: String, state: State<AppState>) -> Res
         .ok()
         .filter(|value| !value.trim().is_empty());
     let safe_title = sanitize_file_name(&novel.title);
-    let extension = if format == "markdown" { "md" } else { "txt" };
+    let extension = "txt";
     let output_dir = configured_export_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| state.data_dir.join("exports"));
     fs::create_dir_all(&output_dir).map_err(to_string)?;
     let output_path = output_dir.join(format!("{}-rewrite.{}", safe_title, extension));
-    let mut body = String::new();
-    for chapter in chapters {
-        if format == "markdown" {
-            body.push_str(&format!("# {}\n\n", chapter.title));
-        } else {
-            body.push_str(&format!("{}\n\n", chapter.title));
-        }
-        body.push_str(chapter.rewrite_text.as_deref().unwrap_or(&chapter.original_text));
-        body.push_str("\n\n");
-    }
     fs::write(&output_path, body).map_err(to_string)?;
     Ok(ExportResult {
         path: output_path.to_string_lossy().to_string(),
     })
+}
+
+#[tauri::command]
+fn open_github_url() -> Result<(), String> {
+    open_url_in_default_browser(GITHUB_REPOSITORY_URL)
+}
+
+#[tauri::command]
+async fn check_for_updates(state: State<'_, AppState>) -> Result<UpdateCheckResult, String> {
+    fetch_latest_update(&state.client).await
+}
+
+#[tauri::command]
+async fn download_latest_update(
+    state: State<'_, AppState>,
+) -> Result<UpdateDownloadResult, String> {
+    let update = fetch_latest_update(&state.client).await?;
+    let response = state
+        .client
+        .get(&update.asset_download_url)
+        .header("User-Agent", "YuriRewrite")
+        .send()
+        .await
+        .map_err(to_string)?;
+    let status = response.status();
+    let bytes = response.bytes().await.map_err(to_string)?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&bytes);
+        return Err(format!(
+            "下载失败 HTTP {}: {}",
+            status,
+            compact_error_body(&body)
+        ));
+    }
+
+    let output_dir = resolve_update_download_dir(&state)?;
+    fs::create_dir_all(&output_dir).map_err(to_string)?;
+    let output_path = output_dir.join(sanitize_file_name(&update.asset_name));
+    fs::write(&output_path, bytes).map_err(to_string)?;
+    Ok(UpdateDownloadResult {
+        path: output_path.to_string_lossy().to_string(),
+        version: update.latest_version,
+    })
+}
+
+fn build_rewritten_export_body(chapters: &[Chapter]) -> Result<String, String> {
+    let rewritten_chapters = chapters
+        .iter()
+        .filter(|chapter| {
+            chapter.rewrite_status == "completed"
+                && chapter
+                    .rewrite_text
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if rewritten_chapters.is_empty() {
+        return Err("没有已完成改写的章节可导出。".to_string());
+    }
+
+    let mut body = String::new();
+    for chapter in rewritten_chapters {
+        body.push_str(&format!("{}\n\n", chapter.title));
+        body.push_str(chapter.rewrite_text.as_deref().unwrap_or_default().trim());
+        body.push_str("\n\n");
+    }
+    Ok(body)
+}
+
+async fn fetch_latest_update(client: &Client) -> Result<UpdateCheckResult, String> {
+    let response = client
+        .get(GITHUB_LATEST_RELEASE_API)
+        .header("User-Agent", "YuriRewrite")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(to_string)?;
+    let (value, _) = response_json_or_error(response).await?;
+    let latest_tag = value["tag_name"]
+        .as_str()
+        .ok_or_else(|| "GitHub 最新发布信息缺少 tag_name。".to_string())?
+        .to_string();
+    let latest_version = normalize_release_version(&latest_tag);
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let release_url = value["html_url"]
+        .as_str()
+        .unwrap_or(GITHUB_REPOSITORY_URL)
+        .to_string();
+    let (asset_name, asset_download_url) = select_portable_zip_asset(&value)?;
+
+    Ok(UpdateCheckResult {
+        current_version: current_version.clone(),
+        latest_version: latest_version.clone(),
+        latest_tag,
+        is_latest: !is_newer_version(&latest_version, &current_version),
+        release_url,
+        asset_name,
+        asset_download_url,
+    })
+}
+
+fn select_portable_zip_asset(value: &serde_json::Value) -> Result<(String, String), String> {
+    let assets = value["assets"]
+        .as_array()
+        .ok_or_else(|| "GitHub 最新发布信息缺少 assets。".to_string())?;
+    let selected = assets
+        .iter()
+        .filter_map(|asset| {
+            let name = asset["name"].as_str()?;
+            let url = asset["browser_download_url"].as_str()?;
+            Some((name, url))
+        })
+        .find(|(name, _)| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".zip") && lower.contains("windows") && lower.contains("x64")
+        })
+        .or_else(|| {
+            assets
+                .iter()
+                .filter_map(|asset| {
+                    let name = asset["name"].as_str()?;
+                    let url = asset["browser_download_url"].as_str()?;
+                    Some((name, url))
+                })
+                .find(|(name, _)| name.to_ascii_lowercase().ends_with(".zip"))
+        })
+        .ok_or_else(|| "最新发布中没有可下载的 zip 压缩包。".to_string())?;
+
+    Ok((selected.0.to_string(), selected.1.to_string()))
+}
+
+fn normalize_release_version(version: &str) -> String {
+    version
+        .trim()
+        .trim_start_matches('v')
+        .trim_start_matches('V')
+        .to_string()
+}
+
+fn is_newer_version(candidate: &str, current: &str) -> bool {
+    let candidate_parts = version_number_parts(candidate);
+    let current_parts = version_number_parts(current);
+    let max_len = candidate_parts.len().max(current_parts.len()).max(1);
+    for idx in 0..max_len {
+        let left = *candidate_parts.get(idx).unwrap_or(&0);
+        let right = *current_parts.get(idx).unwrap_or(&0);
+        if left != right {
+            return left > right;
+        }
+    }
+    false
+}
+
+fn version_number_parts(version: &str) -> Vec<u64> {
+    normalize_release_version(version)
+        .split(|ch| ch == '.' || ch == '-' || ch == '+')
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn resolve_update_download_dir(state: &State<'_, AppState>) -> Result<PathBuf, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    if let Some(path) = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'export_dir'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(default_download_dir().unwrap_or_else(|| state.data_dir.join("updates")))
+}
+
+fn default_download_dir() -> Option<PathBuf> {
+    env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|home| home.join("Downloads"))
+        .filter(|path| path.exists())
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("Downloads"))
+                .filter(|path| path.exists())
+        })
+}
+
+fn open_url_in_default_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let status = Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()
+        .map_err(to_string)?;
+
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open").arg(url).status().map_err(to_string)?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = Command::new("xdg-open")
+        .arg(url)
+        .status()
+        .map_err(to_string)?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("无法打开链接：{}", url))
+    }
 }
 
 fn decode_text(bytes: &[u8]) -> (String, String) {
@@ -1063,12 +1574,8 @@ fn create_chapter_batches(
     let now = Utc::now().to_rfc3339();
 
     for (idx, chunk) in chapters.chunks(batch_size).enumerate() {
-        let first = chunk
-            .first()
-            .ok_or_else(|| "批次内容为空。".to_string())?;
-        let last = chunk
-            .last()
-            .ok_or_else(|| "批次内容为空。".to_string())?;
+        let first = chunk.first().ok_or_else(|| "批次内容为空。".to_string())?;
+        let last = chunk.last().ok_or_else(|| "批次内容为空。".to_string())?;
         let batch_index = (idx + 1) as i64;
         let label = if detected_chapters {
             format!("{}-{}章", first.index, last.index)
@@ -1106,14 +1613,19 @@ fn load_chapters(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter>, Stri
             "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, analysis_status, rewrite_status FROM chapters WHERE novel_id = ?1 ORDER BY chapter_index",
         )
         .map_err(to_string)?;
-    let chapters = stmt.query_map(params![novel_id], row_to_chapter)
+    let chapters = stmt
+        .query_map(params![novel_id], row_to_chapter)
         .map_err(to_string)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_string)?;
     Ok(chapters)
 }
 
-fn load_chapters_for_batch(conn: &Connection, novel_id: &str, batch_id: &str) -> Result<Vec<Chapter>, String> {
+fn load_chapters_for_batch(
+    conn: &Connection,
+    novel_id: &str,
+    batch_id: &str,
+) -> Result<Vec<Chapter>, String> {
     let batch = conn
         .query_row(
             "SELECT id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at FROM chapter_batches WHERE id = ?1 AND novel_id = ?2",
@@ -1127,7 +1639,10 @@ fn load_chapters_for_batch(conn: &Connection, novel_id: &str, batch_id: &str) ->
         )
         .map_err(to_string)?;
     let chapters = stmt
-        .query_map(params![novel_id, batch.start_chapter, batch.end_chapter], row_to_chapter)
+        .query_map(
+            params![novel_id, batch.start_chapter, batch.end_chapter],
+            row_to_chapter,
+        )
         .map_err(to_string)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_string)?;
@@ -1162,8 +1677,8 @@ fn load_novel_settings(conn: &Connection, novel_id: &str) -> Result<Option<Novel
 }
 
 fn require_novel_settings(conn: &Connection, novel_id: &str) -> Result<NovelSettings, String> {
-    let settings = load_novel_settings(conn, novel_id)?
-        .ok_or_else(|| "请先填写设定".to_string())?;
+    let settings =
+        load_novel_settings(conn, novel_id)?.ok_or_else(|| "请先填写设定".to_string())?;
     if settings.protagonist_name.trim().is_empty()
         || settings.bust.trim().is_empty()
         || settings.body_type.trim().is_empty()
@@ -1177,21 +1692,25 @@ fn load_canon_assets(conn: &Connection, novel_id: &str) -> Result<Vec<CanonAsset
     let mut stmt = conn
         .prepare("SELECT novel_id, kind, content, updated_at FROM canon_assets WHERE novel_id = ?1 ORDER BY kind")
         .map_err(to_string)?;
-    let assets = stmt.query_map(params![novel_id], |row| {
-        Ok(CanonAsset {
-            novel_id: row.get(0)?,
-            kind: row.get(1)?,
-            content: row.get(2)?,
-            updated_at: row.get(3)?,
+    let assets = stmt
+        .query_map(params![novel_id], |row| {
+            Ok(CanonAsset {
+                novel_id: row.get(0)?,
+                kind: row.get(1)?,
+                content: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
         })
-    })
-    .map_err(to_string)?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(to_string)?;
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
     Ok(assets)
 }
 
-fn load_model_profile(state: &State<'_, AppState>, profile_id: &str) -> Result<ModelProfile, String> {
+fn load_model_profile(
+    state: &State<'_, AppState>,
+    profile_id: &str,
+) -> Result<ModelProfile, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     conn.query_row(
         "SELECT id, name, provider, base_url, model, temperature, updated_at, api_key FROM model_profiles WHERE id = ?1",
@@ -1286,7 +1805,12 @@ async fn generate_gemini(
     } else {
         profile.base_url.trim().trim_end_matches('/').to_string()
     };
-    let endpoint = format!("{}/models/{}:generateContent?key={}", base, profile.model.trim(), api_key.trim());
+    let endpoint = format!(
+        "{}/models/{}:generateContent?key={}",
+        base,
+        profile.model.trim(),
+        api_key.trim()
+    );
     let payload = json!({
         "contents": [
             {
@@ -1332,7 +1856,9 @@ async fn generate_gemini(
     })
 }
 
-async fn response_json_or_error(response: reqwest::Response) -> Result<(serde_json::Value, String), String> {
+async fn response_json_or_error(
+    response: reqwest::Response,
+) -> Result<(serde_json::Value, String), String> {
     let status = response.status();
     let body = response.text().await.map_err(to_string)?;
     if !status.is_success() {
@@ -1371,7 +1897,11 @@ fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
     let additional = if settings.advanced_settings.trim().is_empty() {
         additional
     } else {
-        format!("{}\n\n高级设定：{}", additional, settings.advanced_settings.trim())
+        format!(
+            "{}\n\n高级设定：{}",
+            additional,
+            settings.advanced_settings.trim()
+        )
     };
     format!(
         r#"小说基本设定：
@@ -1386,11 +1916,142 @@ fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
 3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
 4. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
 5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。"#,
-        settings.protagonist_name,
-        additional,
-        settings.bust,
-        settings.body_type
+        settings.protagonist_name, additional, settings.bust, settings.body_type
     )
+}
+
+fn format_batch_label(chapters: &[Chapter]) -> String {
+    match (chapters.first(), chapters.last()) {
+        (Some(first), Some(last)) if first.index == last.index => format!("第{}章", first.index),
+        (Some(first), Some(last)) => format!("第{}-{}章", first.index, last.index),
+        _ => "空批次".to_string(),
+    }
+}
+
+fn chapter_start_marker(chapter: &Chapter) -> String {
+    format!(
+        "<<<YURI_REWRITE_CHAPTER_START index={} id={}>>>",
+        chapter.index, chapter.id
+    )
+}
+
+fn chapter_end_marker(chapter: &Chapter) -> String {
+    format!(
+        "<<<YURI_REWRITE_CHAPTER_END index={} id={}>>>",
+        chapter.index, chapter.id
+    )
+}
+
+fn build_batch_chapter_text(chapters: &[Chapter], use_rewrite_text: bool) -> String {
+    chapters
+        .iter()
+        .map(|chapter| {
+            let text = if use_rewrite_text {
+                chapter
+                    .rewrite_text
+                    .as_deref()
+                    .unwrap_or(&chapter.original_text)
+            } else {
+                &chapter.original_text
+            };
+            format!(
+                "{}\n标题：{}\n正文：\n{}\n{}",
+                chapter_start_marker(chapter),
+                chapter.title,
+                text.trim(),
+                chapter_end_marker(chapter)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn build_batch_rewrite_text(chapters: &[Chapter], rewrites: &[ParsedChapterRewrite]) -> String {
+    chapters
+        .iter()
+        .zip(rewrites.iter())
+        .map(|(chapter, rewrite)| {
+            debug_assert_eq!(chapter.id, rewrite.id);
+            debug_assert_eq!(chapter.index, rewrite.index);
+            format!(
+                "{}\n标题：{}\n正文：\n{}\n{}",
+                chapter_start_marker(chapter),
+                rewrite.title,
+                rewrite.text.trim(),
+                chapter_end_marker(chapter)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn parse_batch_rewrite_output(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let mut cursor = output.replace("\r\n", "\n").replace('\r', "\n");
+    let mut parsed = Vec::with_capacity(expected_chapters.len());
+
+    for chapter in expected_chapters {
+        let start_marker = chapter_start_marker(chapter);
+        let end_marker = chapter_end_marker(chapter);
+        let start_pos = cursor
+            .find(&start_marker)
+            .ok_or_else(|| format!("AI 输出缺少章节开始标记：{}", start_marker))?;
+        if !cursor[..start_pos].trim().is_empty() {
+            return Err(format!(
+                "AI 输出在章节 {} 开始标记前包含多余内容。",
+                chapter.index
+            ));
+        }
+        let after_start = cursor[start_pos + start_marker.len()..].to_string();
+        let end_pos = after_start
+            .find(&end_marker)
+            .ok_or_else(|| format!("AI 输出缺少章节结束标记：{}", end_marker))?;
+        let block = &after_start[..end_pos];
+        let text = clean_rewrite_block(block);
+        if text.trim().is_empty() {
+            return Err(format!("章节 {} 的改写正文为空。", chapter.index));
+        }
+        parsed.push(ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text,
+        });
+        cursor = after_start[end_pos + end_marker.len()..].to_string();
+    }
+
+    if !cursor.trim().is_empty() {
+        return Err("AI 输出在最后一个章节结束标记后包含多余内容。".to_string());
+    }
+    Ok(parsed)
+}
+
+fn clean_rewrite_block(block: &str) -> String {
+    let mut lines = block.trim().lines().collect::<Vec<_>>();
+    if lines.first().is_some_and(|line| {
+        line.trim_start().starts_with("标题：") || line.trim_start().starts_with("标题:")
+    }) {
+        lines.remove(0);
+    }
+    if lines
+        .first()
+        .is_some_and(|line| matches!(line.trim(), "正文：" | "正文:" | "正文"))
+    {
+        lines.remove(0);
+    }
+    lines.join("\n").trim().to_string()
+}
+
+fn mark_chapters_rewrite_failed(
+    state: &State<'_, AppState>,
+    chapters: &[Chapter],
+) -> Result<(), String> {
+    for chapter in chapters {
+        set_chapter_status(state, &chapter.id, "rewrite_status", "failed")?;
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1419,7 +2080,71 @@ fn build_analysis_prompt_with_settings(chapter: &Chapter, settings: &NovelSettin
     )
 }
 
-fn build_rewrite_prompt_with_settings(chapter: &Chapter, canon_text: &str, settings: &NovelSettings) -> String {
+fn build_batch_rewrite_prompt_with_settings(
+    chapters: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+) -> String {
+    format!(
+        r#"改写要求：
+1. 将原本男女性别叙事自然改写为双女主百合叙事。
+2. 采用中度再创作：保留主线、冲突、章节顺序和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
+3. 清除所有原男性主角痕迹，包括代词、身体描述、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
+4. 主角姓名必须按同音或近音原则女性化，优先保留姓氏；例如萧炎改为萧妍，李火旺改为李火婉。其他指定姓名只在文本中实际出现时女性化。
+5. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
+6. 输入是一整个批次，必须一次性改写完整批次，不要逐章分开回答。
+7. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只改写正文内容。
+8. 只输出改写后的完整批次正文，不要解释、不要 Markdown 包裹。
+
+{}
+
+一致性资产：
+{}
+
+原批次：
+{}"#,
+        build_novel_settings_prompt(settings),
+        canon_text,
+        build_batch_chapter_text(chapters, false)
+    )
+}
+
+fn build_batch_review_prompt_with_settings(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> String {
+    format!(
+        r#"请复检并自动修正以下批次改写稿。
+
+重点检查：
+1. 主角姓名是否已按规则女性化，且全批次一致。
+2. 其他指定姓名只在出现时女性化，且前后一致。
+3. 人称代词、称谓、身体描写、社会称呼和互动细节是否仍残留男性主角痕迹。
+4. 身材、体型和高级设定是否被遵守。
+5. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。
+
+输出要求：
+1. 如果发现问题，直接在正文中修正。
+2. 如果没有问题，原样输出改写稿。
+3. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只修正文内容。
+4. 只输出修正后的完整批次正文，不要解释、不要 Markdown 包裹。
+
+{}
+
+待复检改写稿：
+{}"#,
+        build_novel_settings_prompt(settings),
+        build_batch_rewrite_text(chapters, rewrites)
+    )
+}
+
+#[allow(dead_code)]
+fn build_rewrite_prompt_with_settings(
+    chapter: &Chapter,
+    canon_text: &str,
+    settings: &NovelSettings,
+) -> String {
     format!(
         r#"改写要求：
 1. 将原本男女主叙事自然改写为双女主百合叙事。
@@ -1447,6 +2172,35 @@ fn build_rewrite_prompt_with_settings(chapter: &Chapter, canon_text: &str, setti
 
 #[allow(dead_code)]
 fn build_analysis_prompt(chapter: &Chapter) -> String {
+    format!(
+        r#"请只基于原文分析以下章节，并输出合法 JSON：
+{{
+  "outline": "本章原文大纲",
+  "characters": ["原文人物、别名、身份、外貌、性格、动机、能力或状态变化"],
+  "relationships": ["原文人物关系与关系变化"],
+  "locations": ["原文地点、场景和空间关系"],
+  "foreshadowing": ["原文伏笔、悬念、回收或关键信息"],
+  "terms": ["原文术语、组织、物品、功法、系统规则等"],
+  "names": ["原文出现的人名、称谓、别名和指代对象"]
+}}
+
+要求：
+1. 只提取和维护原文一致性资产。
+2. 不要提出任何后续处理方向。
+3. 不要补充原文没有的信息，不要改变原文人物、姓名、关系或剧情。
+4. 只输出 JSON，不要 Markdown。
+
+章节标题：{}
+
+章节正文：
+{}"#,
+        chapter.title,
+        truncate_text(&chapter.original_text, 30_000)
+    )
+}
+
+#[allow(dead_code)]
+fn build_analysis_prompt_legacy(chapter: &Chapter) -> String {
     format!(
         r#"请分析以下章节，并输出 JSON：
 {{
@@ -1505,11 +2259,41 @@ fn merge_analysis_into_canon_assets(conn: &Connection, novel_id: &str) -> rusqli
         .join("\n\n");
     let now = Utc::now().to_rfc3339();
     upsert_canon_asset(conn, novel_id, "AI分析汇总", &analyses, &now)?;
-    upsert_canon_asset(conn, novel_id, "人物卡", &collect_analysis_field(&rows, "characters"), &now)?;
-    upsert_canon_asset(conn, novel_id, "人物关系", &collect_analysis_field(&rows, "relationships"), &now)?;
-    upsert_canon_asset(conn, novel_id, "地点", &collect_analysis_field(&rows, "locations"), &now)?;
-    upsert_canon_asset(conn, novel_id, "伏笔", &collect_analysis_field(&rows, "foreshadowing"), &now)?;
-    upsert_canon_asset(conn, novel_id, "术语表", &collect_analysis_terms(&rows), &now)?;
+    upsert_canon_asset(
+        conn,
+        novel_id,
+        "人物卡",
+        &collect_analysis_field(&rows, "characters"),
+        &now,
+    )?;
+    upsert_canon_asset(
+        conn,
+        novel_id,
+        "人物关系",
+        &collect_analysis_field(&rows, "relationships"),
+        &now,
+    )?;
+    upsert_canon_asset(
+        conn,
+        novel_id,
+        "地点",
+        &collect_analysis_field(&rows, "locations"),
+        &now,
+    )?;
+    upsert_canon_asset(
+        conn,
+        novel_id,
+        "伏笔",
+        &collect_analysis_field(&rows, "foreshadowing"),
+        &now,
+    )?;
+    upsert_canon_asset(
+        conn,
+        novel_id,
+        "术语表",
+        &collect_analysis_terms(&rows),
+        &now,
+    )?;
     Ok(())
 }
 
@@ -1586,12 +2370,17 @@ fn json_field_to_text(value: &serde_json::Value) -> String {
             .map(|text| format!("- {}", text))
             .collect::<Vec<_>>()
             .join("\n"),
-        serde_json::Value::Object(_) => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        serde_json::Value::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
         _ => value.to_string(),
     }
 }
 
-fn fill_empty_canon_assets_from_analysis(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> {
+fn fill_empty_canon_assets_from_analysis(
+    conn: &Connection,
+    novel_id: &str,
+) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT title, analysis_json FROM chapters WHERE novel_id = ?1 AND analysis_json IS NOT NULL ORDER BY chapter_index",
     )?;
@@ -1611,11 +2400,41 @@ fn fill_empty_canon_assets_from_analysis(conn: &Connection, novel_id: &str) -> r
         .join("\n\n");
     let now = Utc::now().to_rfc3339();
     upsert_empty_canon_asset(conn, novel_id, "AI分析汇总", &analyses, &now)?;
-    upsert_empty_canon_asset(conn, novel_id, "人物卡", &collect_analysis_field(&rows, "characters"), &now)?;
-    upsert_empty_canon_asset(conn, novel_id, "人物关系", &collect_analysis_field(&rows, "relationships"), &now)?;
-    upsert_empty_canon_asset(conn, novel_id, "地点", &collect_analysis_field(&rows, "locations"), &now)?;
-    upsert_empty_canon_asset(conn, novel_id, "伏笔", &collect_analysis_field(&rows, "foreshadowing"), &now)?;
-    upsert_empty_canon_asset(conn, novel_id, "术语表", &collect_analysis_terms(&rows), &now)?;
+    upsert_empty_canon_asset(
+        conn,
+        novel_id,
+        "人物卡",
+        &collect_analysis_field(&rows, "characters"),
+        &now,
+    )?;
+    upsert_empty_canon_asset(
+        conn,
+        novel_id,
+        "人物关系",
+        &collect_analysis_field(&rows, "relationships"),
+        &now,
+    )?;
+    upsert_empty_canon_asset(
+        conn,
+        novel_id,
+        "地点",
+        &collect_analysis_field(&rows, "locations"),
+        &now,
+    )?;
+    upsert_empty_canon_asset(
+        conn,
+        novel_id,
+        "伏笔",
+        &collect_analysis_field(&rows, "foreshadowing"),
+        &now,
+    )?;
+    upsert_empty_canon_asset(
+        conn,
+        novel_id,
+        "术语表",
+        &collect_analysis_terms(&rows),
+        &now,
+    )?;
     Ok(())
 }
 
@@ -1655,7 +2474,11 @@ fn merge_analysis_into_canon(conn: &Connection, novel_id: &str) -> rusqlite::Res
     )?;
     let analyses = stmt
         .query_map(params![novel_id], |row| {
-            Ok(format!("## {}\n{}", row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok(format!(
+                "## {}\n{}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?
         .join("\n\n");
@@ -1671,7 +2494,12 @@ fn merge_analysis_into_canon(conn: &Connection, novel_id: &str) -> rusqlite::Res
     Ok(())
 }
 
-fn create_job(state: &State<'_, AppState>, novel_id: &str, job_type: &str, total: i64) -> Result<Job, String> {
+fn create_job(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    job_type: &str,
+    total: i64,
+) -> Result<Job, String> {
     let now = Utc::now().to_rfc3339();
     let job = Job {
         id: Uuid::new_v4().to_string(),
@@ -1932,6 +2760,100 @@ fn to_string<E: std::fmt::Display>(error: E) -> String {
 mod tests {
     use super::*;
 
+    fn sample_chapter(index: i64, title: &str, original_text: &str) -> Chapter {
+        Chapter {
+            id: format!("chapter-{index}"),
+            novel_id: "novel-1".to_string(),
+            index,
+            title: title.to_string(),
+            original_text: original_text.to_string(),
+            analysis_json: None,
+            rewrite_text: None,
+            analysis_status: "completed".to_string(),
+            rewrite_status: "pending".to_string(),
+        }
+    }
+
+    #[test]
+    fn batch_rewrite_markers_round_trip() {
+        let chapters = vec![
+            sample_chapter(1, "第一章", "原文一"),
+            sample_chapter(2, "第二章", "原文二"),
+        ];
+        let output = format!(
+            "{}\n标题：第一章\n正文：\n改写一\n{}\n\n{}\n标题：第二章\n正文：\n改写二\n{}",
+            chapter_start_marker(&chapters[0]),
+            chapter_end_marker(&chapters[0]),
+            chapter_start_marker(&chapters[1]),
+            chapter_end_marker(&chapters[1])
+        );
+
+        let parsed = parse_batch_rewrite_output(&output, &chapters).expect("valid batch output");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "chapter-1");
+        assert_eq!(parsed[0].index, 1);
+        assert_eq!(parsed[0].text, "改写一");
+        assert_eq!(parsed[1].id, "chapter-2");
+        assert_eq!(parsed[1].index, 2);
+        assert_eq!(parsed[1].text, "改写二");
+    }
+
+    #[test]
+    fn batch_rewrite_parser_rejects_missing_or_out_of_order_markers() {
+        let chapters = vec![
+            sample_chapter(1, "第一章", "原文一"),
+            sample_chapter(2, "第二章", "原文二"),
+        ];
+        let missing_second = format!(
+            "{}\n正文：\n改写一\n{}",
+            chapter_start_marker(&chapters[0]),
+            chapter_end_marker(&chapters[0])
+        );
+        assert!(parse_batch_rewrite_output(&missing_second, &chapters).is_err());
+
+        let out_of_order = format!(
+            "{}\n正文：\n改写二\n{}\n\n{}\n正文：\n改写一\n{}",
+            chapter_start_marker(&chapters[1]),
+            chapter_end_marker(&chapters[1]),
+            chapter_start_marker(&chapters[0]),
+            chapter_end_marker(&chapters[0])
+        );
+        assert!(parse_batch_rewrite_output(&out_of_order, &chapters).is_err());
+    }
+
+    #[test]
+    fn export_body_contains_only_completed_rewrites() {
+        let mut completed = sample_chapter(1, "第一章", "不应导出的原文一");
+        completed.rewrite_status = "completed".to_string();
+        completed.rewrite_text = Some("已改写正文一".to_string());
+
+        let mut pending = sample_chapter(2, "第二章", "不应导出的原文二");
+        pending.rewrite_text = Some("未完成改写也不导出".to_string());
+
+        let body =
+            build_rewritten_export_body(&[completed, pending]).expect("has completed rewrite");
+
+        assert!(body.contains("第一章"));
+        assert!(body.contains("已改写正文一"));
+        assert!(!body.contains("第二章"));
+        assert!(!body.contains("不应导出的原文"));
+        assert!(!body.contains("未完成改写也不导出"));
+    }
+
+    #[test]
+    fn analysis_prompt_does_not_include_rewrite_instructions() {
+        let chapter = sample_chapter(1, "第一章", "萧炎走进大厅。");
+        let prompt = build_analysis_prompt(&chapter);
+
+        for forbidden in ["百合", "改写", "女性化", "代词替换", "双女主"] {
+            assert!(
+                !prompt.contains(forbidden),
+                "prompt contains forbidden term: {forbidden}"
+            );
+        }
+    }
+
     #[test]
     fn chapter_heading_regex_covers_common_toc_rules() {
         let heading_re = chapter_heading_regex();
@@ -1955,7 +2877,10 @@ mod tests {
             "=== 起 ===",
             "番外篇 她们后来",
         ] {
-            assert!(heading_re.is_match(title), "expected heading match: {title}");
+            assert!(
+                heading_re.is_match(title),
+                "expected heading match: {title}"
+            );
         }
     }
 }

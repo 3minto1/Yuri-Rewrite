@@ -7,6 +7,7 @@ import {
   Download,
   FilePlus2,
   FolderOpen,
+  Github,
   KeyRound,
   Loader2,
   MoreHorizontal,
@@ -114,6 +115,21 @@ type AppSettings = {
   export_dir?: string | null;
 };
 
+type UpdateCheckResult = {
+  current_version: string;
+  latest_version: string;
+  latest_tag: string;
+  is_latest: boolean;
+  release_url: string;
+  asset_name: string;
+  asset_download_url: string;
+};
+
+type UpdateDownloadResult = {
+  path: string;
+  version: string;
+};
+
 type ProfileDraft = {
   id?: string;
   name: string;
@@ -201,6 +217,17 @@ export default function App() {
     const timer = window.setTimeout(() => setNotice(""), 5000);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && activeView !== "workspace" && !settingsDialog) {
+        setActiveView("workspace");
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeView, settingsDialog]);
 
   useEffect(() => {
     const profile = profiles.find((item) => item.id === selectedProfileId);
@@ -493,7 +520,7 @@ export default function App() {
     }
   }
 
-  async function exportNovel(format: "txt" | "markdown") {
+  async function exportNovel(format: "txt") {
     if (!detail) return;
     setBusy(`export-${format}`);
     setNotice("");
@@ -540,6 +567,46 @@ export default function App() {
     }
   }
 
+  async function openGithubRepository() {
+    setBusy("open-github");
+    setNotice("");
+    try {
+      await invoke<void>("open_github_url");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function checkForUpdates() {
+    setBusy("check-updates");
+    setNotice("");
+    try {
+      const update = await invoke<UpdateCheckResult>("check_for_updates");
+      if (update.is_latest) {
+        showNotice(`当前已是最新版：${update.current_version}`);
+        return;
+      }
+
+      const shouldDownload = window.confirm(
+        `发现新版本 ${update.latest_version}（当前版本 ${update.current_version}）。\n\n是否下载 ${update.asset_name}？`
+      );
+      if (!shouldDownload) {
+        showNotice(`已取消下载。最新版本：${update.latest_version}`);
+        return;
+      }
+
+      setBusy("download-update");
+      const result = await invoke<UpdateDownloadResult>("download_latest_update");
+      showNotice(`已下载 ${result.version}：${result.path}`);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
   function updateCanon(kind: string, content: string) {
     if (!detail) return;
     setDetail({
@@ -569,6 +636,19 @@ export default function App() {
           disabled={!detail}
         >
           设定
+        </button>
+        <div className="app-menu-spacer" />
+        <button className="app-menu-item" onClick={openGithubRepository} disabled={busy !== ""}>
+          <Github size={16} />
+          GitHub地址
+        </button>
+        <button className="app-menu-item" onClick={checkForUpdates} disabled={busy !== ""}>
+          {busy === "check-updates" || busy === "download-update" ? (
+            <Loader2 className="spin" size={16} />
+          ) : (
+            <RefreshCw size={16} />
+          )}
+          检查更新
         </button>
       </nav>
 
@@ -713,10 +793,6 @@ export default function App() {
               <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
                 <Download size={17} />
                 TXT
-              </button>
-              <button onClick={() => exportNovel("markdown")} disabled={!detail || busy !== ""}>
-                <Download size={17} />
-                MD
               </button>
             </div>
           )}
