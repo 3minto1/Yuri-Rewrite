@@ -397,6 +397,18 @@ pre {
   color: #5f4a16;
 }
 
+.notice-panel {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .job-strip {
   background: #e9f2ed;
   border: 1px solid #bad5c6;
@@ -848,12 +860,17 @@ label {
 .compare-page-toolbar {
   align-items: center;
   display: flex;
-  justify-content: flex-start;
+  gap: 12px;
+  justify-content: space-between;
 }
 
 .compare-page-toolbar label {
   max-width: 520px;
   width: 100%;
+}
+
+.compare-page-toolbar button {
+  flex: 0 0 auto;
 }
 
 .large-compare-grid {

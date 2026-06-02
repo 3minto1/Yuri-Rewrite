@@ -239,6 +239,7 @@ pub fn run() {
             update_canon_assets,
             start_analysis,
             start_rewrite,
+            start_analyze_rewrite_all,
             get_job,
             export_novel,
             open_github_url,
@@ -1198,6 +1199,365 @@ async fn start_rewrite(
     get_job(job.id, state)
 }
 
+#[tauri::command]
+async fn start_analyze_rewrite_all(
+    novel_id: String,
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> Result<Job, String> {
+    let profile = load_model_profile(&state, &profile_id)?;
+    let api_key = read_stored_api_key(&state, &profile.id)?;
+    let (novel, batches) = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        let novel = conn
+            .query_row(
+                "SELECT id, title, source_path, encoding, status, created_at FROM novels WHERE id = ?1",
+                params![novel_id],
+                row_to_novel,
+            )
+            .map_err(to_string)?;
+        require_novel_settings(&conn, &novel.id)?;
+        (novel, load_chapter_batches(&conn, &novel_id)?)
+    };
+    if batches.is_empty() {
+        return Err("当前小说没有可处理的批次。".to_string());
+    }
+
+    let mut job = create_job(&state, &novel_id, "auto", batches.len() as i64)?;
+    let output_dir = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        resolve_rewrite_export_dir(&conn, &state.data_dir)?
+    };
+    fs::create_dir_all(&output_dir).map_err(to_string)?;
+
+    for (idx, batch) in batches.iter().enumerate() {
+        let current = (idx + 1) as i64;
+        update_job(
+            &state,
+            &job.id,
+            "running",
+            current,
+            &format!("正在分析第 {} 批", current),
+        )?;
+        let chapters = {
+            let conn = state.conn.lock().map_err(to_string)?;
+            load_chapters_for_batch(&conn, &novel_id, &batch.id)?
+        };
+        if chapters.is_empty() {
+            continue;
+        }
+        if let Err(error) =
+            analyze_chapters_for_auto(&state, &novel_id, &profile, &api_key, &chapters).await
+        {
+            update_job(&state, &job.id, "failed", current, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
+        }
+
+        update_job(
+            &state,
+            &job.id,
+            "running",
+            current,
+            &format!("正在改写第 {} 批", current),
+        )?;
+        if let Err(error) =
+            rewrite_chapters_for_auto(&state, &novel_id, &profile, &api_key, &batch.id).await
+        {
+            update_job(&state, &job.id, "failed", current, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
+        }
+
+        let rewritten_batch = {
+            let conn = state.conn.lock().map_err(to_string)?;
+            load_chapters_for_batch(&conn, &novel_id, &batch.id)?
+        };
+        let body = build_rewritten_export_body(&rewritten_batch)?;
+        let batch_path = output_dir.join(format!(
+            "{}_{}.txt",
+            sanitize_file_name(&novel.title),
+            chinese_batch_label(batch.batch_index)
+        ));
+        fs::write(&batch_path, body).map_err(to_string)?;
+    }
+
+    let all_chapters = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_chapters(&conn, &novel_id)?
+    };
+    let full_body = build_rewritten_export_body(&all_chapters)?;
+    let full_path = output_dir.join(format!("{}_全文.txt", sanitize_file_name(&novel.title)));
+    fs::write(&full_path, full_body).map_err(to_string)?;
+
+    update_job(
+        &state,
+        &job.id,
+        "completed",
+        batches.len() as i64,
+        &format!("一键分析改写完成，已输出：{}", full_path.to_string_lossy()),
+    )?;
+    get_job(job.id, state)
+}
+
+async fn analyze_chapters_for_auto(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    chapters: &[Chapter],
+) -> Result<(), String> {
+    let batch_label = format_batch_label(chapters);
+    for chapter in chapters {
+        set_chapter_status(state, &chapter.id, "analysis_status", "running")?;
+    }
+
+    let prompt = build_batch_analysis_prompt(chapters);
+    let output = match generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
+        &prompt,
+        true,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次分析",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_analysis_failed(state, chapters)?;
+            return Err(error);
+        }
+    };
+
+    let parsed_analysis = match parse_batch_analysis_output(&output.text, chapters) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次分析",
+                Some(&batch_label),
+                "error",
+                &error,
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            mark_chapters_analysis_failed(state, chapters)?;
+            return Err(error);
+        }
+    };
+
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &profile.id,
+        "批次分析",
+        Some(&batch_label),
+        "success",
+        &output.text,
+        output.reasoning.as_deref(),
+        Some(&output.raw_response),
+    )?;
+
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let tx = conn.transaction().map_err(to_string)?;
+    for chapter in chapters {
+        tx.execute(
+            "UPDATE chapters SET analysis_json = NULL, analysis_status = 'completed' WHERE id = ?1",
+            params![chapter.id],
+        )
+        .map_err(to_string)?;
+    }
+    for analysis in parsed_analysis {
+        tx.execute(
+            "UPDATE chapters SET analysis_json = ?1 WHERE id = ?2",
+            params![analysis.json, analysis.id],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)?;
+    merge_analysis_into_canon_assets(&conn, novel_id).map_err(to_string)?;
+    Ok(())
+}
+
+async fn rewrite_chapters_for_auto(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    batch_id: &str,
+) -> Result<(), String> {
+    let (chapters, canon_assets, settings) = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        let settings = require_novel_settings(&conn, novel_id)?;
+        let chapters = load_chapters_for_batch(&conn, novel_id, batch_id)?
+            .into_iter()
+            .filter(|chapter| chapter.analysis_status == "completed")
+            .collect::<Vec<_>>();
+        (chapters, load_canon_assets(&conn, novel_id)?, settings)
+    };
+    if chapters.is_empty() {
+        return Err("当前批次没有已完成分析的内容。".to_string());
+    }
+
+    let canon_text = canon_assets
+        .iter()
+        .map(|asset| format!("## {}\n{}", asset.kind, asset.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let batch_label = format_batch_label(&chapters);
+    for chapter in &chapters {
+        set_chapter_status(state, &chapter.id, "rewrite_status", "running")?;
+    }
+
+    let rewrite_prompt =
+        build_batch_rewrite_prompt_with_settings(&chapters, &canon_text, &settings);
+    let rewrite_output = match generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须保留用户提供的章节边界标记，只输出完整批次正文。",
+        &rewrite_prompt,
+        false,
+    )
+    .await
+    {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次改写",
+                Some(&batch_label),
+                "success",
+                output.text.trim(),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            output
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次改写",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(state, &chapters)?;
+            return Err(error);
+        }
+    };
+
+    let parsed_rewrite = match parse_batch_rewrite_output(&rewrite_output.text, &chapters) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次改写解析",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(state, &chapters)?;
+            return Err(error);
+        }
+    };
+
+    let review_prompt =
+        build_batch_review_prompt_with_settings(&chapters, &parsed_rewrite, &settings);
+    let review_output = match generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说改写质检与修正助手。检查并修正改写稿中的姓名、代词、称谓、设定和逻辑问题，必须保留章节边界标记，只输出修正后的完整批次正文。",
+        &review_prompt,
+        false,
+    )
+    .await
+    {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次复检修正",
+                Some(&batch_label),
+                "success",
+                output.text.trim(),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            output
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次复检修正",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(state, &chapters)?;
+            return Err(error);
+        }
+    };
+
+    let corrected_rewrite = match parse_batch_rewrite_output(&review_output.text, &chapters) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次复检解析",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_rewrite_failed(state, &chapters)?;
+            return Err(error);
+        }
+    };
+
+    let conn = state.conn.lock().map_err(to_string)?;
+    for rewrite in corrected_rewrite {
+        conn.execute(
+            "UPDATE chapters SET rewrite_text = ?1, rewrite_status = 'completed' WHERE id = ?2",
+            params![rewrite.text.trim(), rewrite.id],
+        )
+        .map_err(to_string)?;
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 async fn start_rewrite_legacy(
     novel_id: String,
@@ -1406,6 +1766,69 @@ fn build_rewritten_export_body(chapters: &[Chapter]) -> Result<String, String> {
         body.push_str("\n\n");
     }
     Ok(body)
+}
+
+fn resolve_rewrite_export_dir(conn: &Connection, data_dir: &Path) -> Result<PathBuf, String> {
+    let configured_export_dir = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'export_dir'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    Ok(configured_export_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("exports")))
+}
+
+fn chinese_batch_label(index: i64) -> String {
+    format!("第{}批", chinese_number(index))
+}
+
+fn chinese_number(value: i64) -> String {
+    if value <= 0 {
+        return value.to_string();
+    }
+    if value <= 10 {
+        return chinese_digit(value).to_string();
+    }
+    if value < 20 {
+        return format!(
+            "十{}",
+            if value % 10 == 0 {
+                ""
+            } else {
+                chinese_digit(value % 10)
+            }
+        );
+    }
+    if value < 100 {
+        let ten = value / 10;
+        let one = value % 10;
+        return format!(
+            "{}十{}",
+            chinese_digit(ten),
+            if one == 0 { "" } else { chinese_digit(one) }
+        );
+    }
+    value.to_string()
+}
+
+fn chinese_digit(value: i64) -> &'static str {
+    match value {
+        1 => "一",
+        2 => "二",
+        3 => "三",
+        4 => "四",
+        5 => "五",
+        6 => "六",
+        7 => "七",
+        8 => "八",
+        9 => "九",
+        10 => "十",
+        _ => "",
+    }
 }
 
 async fn fetch_latest_update(client: &Client) -> Result<UpdateCheckResult, String> {
@@ -3640,6 +4063,15 @@ mod tests {
         assert!(!body.contains("第二章"));
         assert!(!body.contains("不应导出的原文"));
         assert!(!body.contains("未完成改写也不导出"));
+    }
+
+    #[test]
+    fn chinese_batch_label_formats_common_batch_indices() {
+        assert_eq!(chinese_batch_label(1), "第一批");
+        assert_eq!(chinese_batch_label(2), "第二批");
+        assert_eq!(chinese_batch_label(10), "第十批");
+        assert_eq!(chinese_batch_label(12), "第十二批");
+        assert_eq!(chinese_batch_label(30), "第三十批");
     }
 
     #[test]

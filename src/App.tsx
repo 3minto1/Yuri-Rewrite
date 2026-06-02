@@ -199,6 +199,8 @@ export default function App() {
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "logs" | "settings">("workspace");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
+  const [noticeDuration, setNoticeDuration] = useState(5000);
+  const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const originalCompareRef = useRef<HTMLPreElement | null>(null);
   const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
@@ -223,9 +225,9 @@ export default function App() {
 
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(""), 5000);
+    const timer = window.setTimeout(() => setNotice(""), noticeDuration);
     return () => window.clearTimeout(timer);
-  }, [notice]);
+  }, [notice, noticeDuration]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -315,7 +317,9 @@ export default function App() {
     }
   }
 
-  function showNotice(message: string) {
+  function showNotice(message: string, duration = 5000, keepPendingUpdate = false) {
+    if (!keepPendingUpdate) setPendingUpdate(null);
+    setNoticeDuration(duration);
     setNotice(message);
   }
 
@@ -538,6 +542,37 @@ export default function App() {
     }
   }
 
+  async function runAnalyzeRewriteAll() {
+    if (!detail || !selectedProfileId) {
+      showNotice("请先导入小说并选择模型配置。");
+      return;
+    }
+    if (!hasCompleteNovelSettings) {
+      showNotice("请先填写设定");
+      setSettingsDialog("basic");
+      return;
+    }
+    setBusy("auto");
+    setNotice("");
+    try {
+      const result = await invoke<Job>("start_analyze_rewrite_all", {
+        novelId: detail.novel.id,
+        profileId: selectedProfileId
+      });
+      setJob(result);
+      await loadNovel(detail.novel.id);
+      await refreshLogs(detail.novel.id);
+      if (result.status === "completed") {
+        setActiveView("compare");
+      }
+      showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function exportNovel(format: "txt") {
     if (!detail) return;
     setBusy(`export-${format}`);
@@ -600,29 +635,40 @@ export default function App() {
   async function checkForUpdates() {
     setBusy("check-updates");
     setNotice("");
+    setPendingUpdate(null);
     try {
       const update = await invoke<UpdateCheckResult>("check_for_updates");
       if (update.is_latest) {
-        showNotice(`当前已是最新版：${update.current_version}`);
+        showNotice(`当前已是最新版：${update.current_version}`, 3000);
         return;
       }
 
-      const shouldDownload = window.confirm(
-        `发现新版本 ${update.latest_version}（当前版本 ${update.current_version}）。\n\n是否下载 ${update.asset_name}？`
-      );
-      if (!shouldDownload) {
-        showNotice(`已取消下载。最新版本：${update.latest_version}`);
-        return;
-      }
+      setPendingUpdate(update);
+      showNotice(`当前版本：${update.current_version}，最新版本：${update.latest_version}`, 60_000, true);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
 
-      setBusy("download-update");
+  async function downloadPendingUpdate() {
+    setBusy("download-update");
+    try {
       const result = await invoke<UpdateDownloadResult>("download_latest_update");
+      setPendingUpdate(null);
       showNotice(`已下载 ${result.version}：${result.path}`);
     } catch (error) {
       showNotice(String(error));
     } finally {
       setBusy("");
     }
+  }
+
+  function cancelPendingUpdateDownload() {
+    setPendingUpdate(null);
+    setNotice("");
+    setActiveView("workspace");
   }
 
   function updateCanon(kind: string, content: string) {
@@ -830,6 +876,14 @@ export default function App() {
           </div>
           {activeView === "workspace" && (
             <div className="topbar-actions">
+              <button
+                onClick={runAnalyzeRewriteAll}
+                disabled={!detail || !selectedProfileId || busy !== ""}
+                title="AI自动分析改写全文，耗时较久"
+              >
+                {busy === "auto" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
+                一键分析改写
+              </button>
               <button onClick={() => runJob("analysis")} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== ""}>
                 {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
                 分析
@@ -838,15 +892,26 @@ export default function App() {
                 {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
                 改写
               </button>
-              <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
-                <Download size={17} />
-                TXT
-              </button>
             </div>
           )}
         </header>
 
-        {notice && <div className="notice">{notice}</div>}
+        {notice && (
+          <div className="notice notice-panel">
+            <span>{notice}</span>
+            {pendingUpdate && (
+              <div className="notice-actions">
+                <button onClick={downloadPendingUpdate} disabled={busy === "download-update"}>
+                  {busy === "download-update" ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                  下载最新版
+                </button>
+                <button onClick={cancelPendingUpdateDownload} disabled={busy === "download-update"}>
+                  不下载最新版
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         {job && activeView === "workspace" && (
           <div className={`job-strip ${job.status}`}>
             <CheckCircle2 size={17} />
@@ -1007,6 +1072,10 @@ export default function App() {
                   ))}
                 </select>
               </label>
+              <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
+                <Download size={17} />
+                TXT
+              </button>
             </div>
             {selectedChapter ? (
               <div className="large-compare-grid">
