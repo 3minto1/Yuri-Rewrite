@@ -47,10 +47,33 @@ type CanonAsset = {
   updated_at: string;
 };
 
+type ChapterBatch = {
+  id: string;
+  novel_id: string;
+  batch_index: number;
+  label: string;
+  start_chapter: number;
+  end_chapter: number;
+  file_path: string;
+  created_at: string;
+};
+
+type NovelSettings = {
+  novel_id: string;
+  protagonist_name: string;
+  additional_feminize_names: string;
+  bust: string;
+  body_type: string;
+  advanced_settings: string;
+  updated_at: string;
+};
+
 type NovelDetail = {
   novel: Novel;
   chapters: Chapter[];
   canon_assets: CanonAsset[];
+  batches: ChapterBatch[];
+  settings?: NovelSettings | null;
 };
 
 type ModelProfile = {
@@ -101,6 +124,14 @@ type ProfileDraft = {
   api_key: string;
 };
 
+type NovelSettingsDraft = {
+  protagonist_name: string;
+  additional_feminize_names: string;
+  bust: string;
+  body_type: string;
+  advanced_settings: string;
+};
+
 const emptyProfile: ProfileDraft = {
   name: "OpenAI 兼容接口",
   provider: "openai-compatible",
@@ -108,6 +139,14 @@ const emptyProfile: ProfileDraft = {
   model: "请填写模型名",
   temperature: 0.7,
   api_key: ""
+};
+
+const emptyNovelSettings: NovelSettingsDraft = {
+  protagonist_name: "",
+  additional_feminize_names: "",
+  bust: "平胸",
+  body_type: "少女",
+  advanced_settings: ""
 };
 
 const savedApiKeyMask = "********";
@@ -127,11 +166,14 @@ export default function App() {
   const [profileDraft, setProfileDraft] = useState<ProfileDraft>(emptyProfile);
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [selectedChapterId, setSelectedChapterId] = useState("");
+  const [selectedBatchId, setSelectedBatchId] = useState("");
   const [openNovelMenuId, setOpenNovelMenuId] = useState("");
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
-  const [activeView, setActiveView] = useState<"workspace" | "compare" | "logs" | "settings">("workspace");
+  const [novelSettingsDraft, setNovelSettingsDraft] = useState<NovelSettingsDraft>(emptyNovelSettings);
+  const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
+  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "logs" | "settings">("workspace");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [job, setJob] = useState<Job | null>(null);
@@ -139,6 +181,15 @@ export default function App() {
   const selectedChapter = useMemo(
     () => detail?.chapters.find((chapter) => chapter.id === selectedChapterId) ?? detail?.chapters[0],
     [detail, selectedChapterId]
+  );
+
+  const selectedBatch = useMemo(
+    () => detail?.batches.find((batch) => batch.id === selectedBatchId) ?? detail?.batches[0],
+    [detail, selectedBatchId]
+  );
+
+  const hasCompleteNovelSettings = Boolean(
+    detail?.settings?.protagonist_name?.trim() && detail.settings.bust?.trim() && detail.settings.body_type?.trim()
   );
 
   useEffect(() => {
@@ -183,6 +234,18 @@ export default function App() {
     const next = await invoke<NovelDetail>("get_novel_detail", { novelId });
     setDetail(next);
     setSelectedChapterId(next.chapters[0]?.id ?? "");
+    setSelectedBatchId(next.batches[0]?.id ?? "");
+    setNovelSettingsDraft(
+      next.settings
+        ? {
+            protagonist_name: next.settings.protagonist_name,
+            additional_feminize_names: next.settings.additional_feminize_names,
+            bust: next.settings.bust,
+            body_type: next.settings.body_type,
+            advanced_settings: next.settings.advanced_settings
+          }
+        : emptyNovelSettings
+    );
     setOpenNovelMenuId("");
     setActiveView("workspace");
     await refreshLogs(next.novel.id);
@@ -211,6 +274,49 @@ export default function App() {
 
   function showNotice(message: string) {
     setNotice(message);
+  }
+
+  function openNovelSettings() {
+    if (!detail) {
+      showNotice("请先上传小说文件");
+      return;
+    }
+    setSettingsDialog("basic");
+  }
+
+  async function saveNovelSettings() {
+    if (!detail) return;
+    if (!novelSettingsDraft.protagonist_name.trim()) {
+      showNotice("请填写主角姓名。");
+      return;
+    }
+    setBusy("novel-settings");
+    setNotice("");
+    try {
+      const saved = await invoke<NovelSettings>("save_novel_settings", {
+        novelId: detail.novel.id,
+        protagonistName: novelSettingsDraft.protagonist_name,
+        additionalFeminizeNames: novelSettingsDraft.additional_feminize_names,
+        bust: novelSettingsDraft.bust,
+        bodyType: novelSettingsDraft.body_type,
+        advancedSettings: novelSettingsDraft.advanced_settings
+      });
+      setDetail({ ...detail, settings: saved });
+      setNovelSettingsDraft({
+        protagonist_name: saved.protagonist_name,
+        additional_feminize_names: saved.additional_feminize_names,
+        bust: saved.bust,
+        body_type: saved.body_type,
+        advanced_settings: saved.advanced_settings
+      });
+      setSettingsDialog(null);
+      setActiveView("workspace");
+      showNotice("基本设定已保存。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
   }
 
   async function importTxt() {
@@ -248,6 +354,9 @@ export default function App() {
         } else {
           setDetail(null);
           setSelectedChapterId("");
+          setSelectedBatchId("");
+          setNovelSettingsDraft(emptyNovelSettings);
+          setSettingsDialog(null);
           setLogs([]);
         }
       }
@@ -353,16 +462,29 @@ export default function App() {
       showNotice("请先导入小说并选择模型配置。");
       return;
     }
+    if (kind === "rewrite" && !hasCompleteNovelSettings) {
+      showNotice("请先填写设定");
+      setSettingsDialog("basic");
+      return;
+    }
+    if (!selectedBatch) {
+      showNotice("当前小说没有可处理的批次。");
+      return;
+    }
     setBusy(kind);
     setNotice("");
     try {
       const result = await invoke<Job>(kind === "analysis" ? "start_analysis" : "start_rewrite", {
         novelId: detail.novel.id,
-        profileId: selectedProfileId
+        profileId: selectedProfileId,
+        batchId: selectedBatch.id
       });
       setJob(result);
       await loadNovel(detail.novel.id);
       await refreshLogs(detail.novel.id);
+      if (kind === "rewrite" && result.status === "completed") {
+        setActiveView("compare");
+      }
       showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
       showNotice(String(error));
@@ -426,6 +548,11 @@ export default function App() {
     });
   }
 
+  function displayChapterTitle(chapter: Chapter) {
+    const title = chapter.title.replace(/\s+/g, " ").trim();
+    return title || `第 ${chapter.index} 章`;
+  }
+
   return (
     <main className="app-shell">
       <nav className="app-menu">
@@ -435,6 +562,13 @@ export default function App() {
           disabled={!detail}
         >
           对比
+        </button>
+        <button
+          className={activeView === "novel-settings" ? "app-menu-item active" : "app-menu-item"}
+          onClick={openNovelSettings}
+          disabled={!detail}
+        >
+          设定
         </button>
       </nav>
 
@@ -544,6 +678,8 @@ export default function App() {
                 ? "日志"
                 : activeView === "settings"
                   ? "设置"
+                  : activeView === "novel-settings"
+                    ? "基本设定"
                   : activeView === "compare"
                     ? "对比"
                     : detail?.novel.title ?? "工作台"}
@@ -553,6 +689,10 @@ export default function App() {
                 ? "查看 AI 调用的思考过程与原始输出"
                 : activeView === "settings"
                   ? "配置导出目录"
+                  : activeView === "novel-settings"
+                    ? detail
+                      ? `绑定《${detail.novel.title}》的改写规则`
+                      : "导入小说后配置基本设定"
                   : activeView === "compare"
                     ? "左侧原文，右侧改写稿"
                     : detail
@@ -562,11 +702,11 @@ export default function App() {
           </div>
           {activeView === "workspace" && (
             <div className="topbar-actions">
-              <button onClick={() => runJob("analysis")} disabled={!detail || !selectedProfileId || busy !== ""}>
+              <button onClick={() => runJob("analysis")} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== ""}>
                 {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
                 分析
               </button>
-              <button onClick={() => runJob("rewrite")} disabled={!detail || !selectedProfileId || busy !== ""}>
+              <button onClick={() => runJob("rewrite")} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== ""}>
                 {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
                 改写
               </button>
@@ -641,6 +781,73 @@ export default function App() {
           </div>
         )}
 
+        {activeView === "novel-settings" && (
+          <div className="page-panel">
+            <div className="page-heading">
+              <h2>基本设定</h2>
+              <div className="panel-actions">
+                <button onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings"}>
+                  {busy === "novel-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                  保存
+                </button>
+              </div>
+            </div>
+            {detail ? (
+              <section className="settings-section novel-settings-section">
+                <h3>改写基础规则</h3>
+                <div className="form-grid">
+                  <label>
+                    主角姓名（必填）
+                    <input
+                      value={novelSettingsDraft.protagonist_name}
+                      onChange={(event) =>
+                        setNovelSettingsDraft({ ...novelSettingsDraft, protagonist_name: event.target.value })
+                      }
+                      placeholder="例如：萧炎"
+                    />
+                  </label>
+                  <label>
+                    其他需要女性化的人名（选填）
+                    <textarea
+                      value={novelSettingsDraft.additional_feminize_names}
+                      onChange={(event) =>
+                        setNovelSettingsDraft({ ...novelSettingsDraft, additional_feminize_names: event.target.value })
+                      }
+                      placeholder="支持逗号或换行分隔"
+                    />
+                  </label>
+                  <label>
+                    身材
+                    <select
+                      value={novelSettingsDraft.bust}
+                      onChange={(event) => setNovelSettingsDraft({ ...novelSettingsDraft, bust: event.target.value })}
+                    >
+                      <option value="平胸">平胸</option>
+                      <option value="巨乳">巨乳</option>
+                    </select>
+                  </label>
+                  <label>
+                    体型
+                    <select
+                      value={novelSettingsDraft.body_type}
+                      onChange={(event) => setNovelSettingsDraft({ ...novelSettingsDraft, body_type: event.target.value })}
+                    >
+                      <option value="萝莉">萝莉</option>
+                      <option value="御姐">御姐</option>
+                      <option value="少女">少女</option>
+                    </select>
+                  </label>
+                </div>
+                <p className="settings-note">
+                  分析和改写会自动附带这些设定。主角姓名会按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉。
+                </p>
+              </section>
+            ) : (
+              <p className="muted">请先导入小说。</p>
+            )}
+          </div>
+        )}
+
         {activeView === "settings" && (
           <div className="page-panel">
             <div className="page-heading">
@@ -694,6 +901,26 @@ export default function App() {
         )}
 
         {activeView === "workspace" && (
+          <>
+          {detail && (
+            <div className="batch-strip">
+              <label>
+                当前批次
+                <select value={selectedBatchId} onChange={(event) => setSelectedBatchId(event.target.value)}>
+                  {detail.batches.map((batch) => (
+                    <option key={batch.id} value={batch.id}>
+                      {batch.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span>
+                {selectedBatch
+                  ? `将处理第 ${selectedBatch.start_chapter} - ${selectedBatch.end_chapter} 段/章`
+                  : "暂无批次"}
+              </span>
+            </div>
+          )}
           <div className="content-grid">
             <section className="panel model-panel">
               <div className="panel-heading">
@@ -797,8 +1024,8 @@ export default function App() {
                     className={selectedChapter?.id === chapter.id ? "chapter-item active" : "chapter-item"}
                     onClick={() => setSelectedChapterId(chapter.id)}
                   >
-                    <span>
-                      {chapter.index}. {chapter.title}
+                    <span className="chapter-title">
+                      {chapter.index}. {displayChapterTitle(chapter)}
                     </span>
                     <small>
                       分析 {statusText[chapter.analysis_status] ?? chapter.analysis_status} · 改写{" "}
@@ -810,8 +1037,104 @@ export default function App() {
             </section>
 
           </div>
+          </>
         )}
       </section>
+      {settingsDialog && (
+        <div className="modal-backdrop">
+          <div className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
+            {settingsDialog === "basic" ? (
+              <>
+                <header className="dialog-titlebar">
+                  <h2 id="settings-dialog-title">基本设定</h2>
+                </header>
+                <div className="dialog-body">
+                  <div className="form-grid">
+                    <label>
+                      主角姓名（必填）
+                      <input
+                        value={novelSettingsDraft.protagonist_name}
+                        onChange={(event) =>
+                          setNovelSettingsDraft({ ...novelSettingsDraft, protagonist_name: event.target.value })
+                        }
+                        placeholder="例如：萧炎"
+                      />
+                    </label>
+                    <label>
+                      其他需要女性化的人名（选填）
+                      <textarea
+                        value={novelSettingsDraft.additional_feminize_names}
+                        onChange={(event) =>
+                          setNovelSettingsDraft({
+                            ...novelSettingsDraft,
+                            additional_feminize_names: event.target.value
+                          })
+                        }
+                        placeholder="支持逗号或换行分隔"
+                      />
+                    </label>
+                    <label>
+                      身材
+                      <select
+                        value={novelSettingsDraft.bust}
+                        onChange={(event) => setNovelSettingsDraft({ ...novelSettingsDraft, bust: event.target.value })}
+                      >
+                        <option value="平胸">平胸</option>
+                        <option value="巨乳">巨乳</option>
+                      </select>
+                    </label>
+                    <label>
+                      体型
+                      <select
+                        value={novelSettingsDraft.body_type}
+                        onChange={(event) =>
+                          setNovelSettingsDraft({ ...novelSettingsDraft, body_type: event.target.value })
+                        }
+                      >
+                        <option value="萝莉">萝莉</option>
+                        <option value="御姐">御姐</option>
+                        <option value="少女">少女</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <footer className="dialog-actions">
+                  <button onClick={() => setSettingsDialog("advanced")} disabled={busy === "novel-settings"}>
+                    高级设定
+                  </button>
+                  <button className="dialog-primary" onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings"}>
+                    确定
+                  </button>
+                </footer>
+              </>
+            ) : (
+              <>
+                <header className="dialog-titlebar">
+                  <h2 id="settings-dialog-title">高级设定</h2>
+                </header>
+                <div className="dialog-body">
+                  <label>
+                    自定义设定
+                    <textarea
+                      className="advanced-settings-input"
+                      value={novelSettingsDraft.advanced_settings}
+                      onChange={(event) =>
+                        setNovelSettingsDraft({ ...novelSettingsDraft, advanced_settings: event.target.value })
+                      }
+                      placeholder="你可以自由输入你需要加入的设定"
+                    />
+                  </label>
+                </div>
+                <footer className="dialog-actions">
+                  <button className="dialog-primary" onClick={() => setSettingsDialog("basic")}>
+                    确定
+                  </button>
+                </footer>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

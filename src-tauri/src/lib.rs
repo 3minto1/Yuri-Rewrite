@@ -57,6 +57,31 @@ struct NovelDetail {
     novel: Novel,
     chapters: Vec<Chapter>,
     canon_assets: Vec<CanonAsset>,
+    batches: Vec<ChapterBatch>,
+    settings: Option<NovelSettings>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ChapterBatch {
+    id: String,
+    novel_id: String,
+    batch_index: i64,
+    label: String,
+    start_chapter: i64,
+    end_chapter: i64,
+    file_path: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct NovelSettings {
+    novel_id: String,
+    protagonist_name: String,
+    additional_feminize_names: String,
+    bust: String,
+    body_type: String,
+    advanced_settings: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -137,6 +162,11 @@ struct CanonAssetInput {
     content: String,
 }
 
+struct SplitResult {
+    chapters: Vec<Chapter>,
+    detected_chapters: bool,
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -166,6 +196,9 @@ pub fn run() {
             clear_ai_logs,
             get_app_settings,
             save_app_settings,
+            get_novel_settings,
+            save_novel_settings,
+            list_chapter_batches,
             update_canon_assets,
             start_analysis,
             start_rewrite,
@@ -250,15 +283,40 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS novel_settings (
+            novel_id TEXT PRIMARY KEY,
+            protagonist_name TEXT NOT NULL,
+            additional_feminize_names TEXT NOT NULL,
+            bust TEXT NOT NULL,
+            body_type TEXT NOT NULL,
+            advanced_settings TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS chapter_batches (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            batch_index INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            start_chapter INTEGER NOT NULL,
+            end_chapter INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id, chapter_index);
         CREATE INDEX IF NOT EXISTS idx_jobs_novel ON jobs(novel_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_novel ON ai_logs(novel_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_chapter_batches_novel ON chapter_batches(novel_id, batch_index);
         "#,
     )?;
     ensure_column(conn, "model_profiles", "api_key", "TEXT")?;
     ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
+    ensure_column(conn, "novel_settings", "advanced_settings", "TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -294,7 +352,7 @@ fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String
         status: "imported".to_string(),
         created_at: Utc::now().to_rfc3339(),
     };
-    let chapters = split_chapters(&novel.id, &text);
+    let split = split_chapters(&novel.id, &text);
     let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
         "INSERT INTO novels (id, title, source_path, encoding, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -302,7 +360,7 @@ fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String
     )
     .map_err(to_string)?;
 
-    for chapter in chapters {
+    for chapter in &split.chapters {
         conn.execute(
             "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_status, rewrite_status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 'pending')",
             params![chapter.id, chapter.novel_id, chapter.index, chapter.title, chapter.original_text],
@@ -310,6 +368,8 @@ fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String
         .map_err(to_string)?;
     }
 
+    create_chapter_batches(&conn, &state.data_dir, &novel.id, &split.chapters, split.detected_chapters)
+        .map_err(to_string)?;
     seed_canon_assets(&conn, &novel.id).map_err(to_string)?;
     Ok(novel)
 }
@@ -339,17 +399,33 @@ fn get_novel_detail(novel_id: String, state: State<AppState>) -> Result<NovelDet
         )
         .map_err(to_string)?;
     let chapters = load_chapters(&conn, &novel.id)?;
+    if !chapters.is_empty() && load_chapter_batches(&conn, &novel.id)?.is_empty() {
+        create_chapter_batches(&conn, &state.data_dir, &novel.id, &chapters, true)?;
+    }
+    fill_empty_canon_assets_from_analysis(&conn, &novel.id).map_err(to_string)?;
     let canon_assets = load_canon_assets(&conn, &novel.id)?;
+    let batches = load_chapter_batches(&conn, &novel.id)?;
+    let settings = load_novel_settings(&conn, &novel.id)?;
     Ok(NovelDetail {
         novel,
         chapters,
         canon_assets,
+        batches,
+        settings,
     })
 }
 
 #[tauri::command]
 fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(), String> {
     let conn = state.conn.lock().map_err(to_string)?;
+    let batch_dir = state.data_dir.join("chapter_batches").join(&novel_id);
+    if batch_dir.exists() {
+        fs::remove_dir_all(&batch_dir).map_err(to_string)?;
+    }
+    conn.execute("DELETE FROM novel_settings WHERE novel_id = ?1", params![novel_id])
+        .map_err(to_string)?;
+    conn.execute("DELETE FROM chapter_batches WHERE novel_id = ?1", params![novel_id])
+        .map_err(to_string)?;
     conn.execute("DELETE FROM chapters WHERE novel_id = ?1", params![novel_id])
         .map_err(to_string)?;
     conn.execute("DELETE FROM canon_assets WHERE novel_id = ?1", params![novel_id])
@@ -537,6 +613,78 @@ fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<Ap
 }
 
 #[tauri::command]
+fn get_novel_settings(novel_id: String, state: State<AppState>) -> Result<Option<NovelSettings>, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    load_novel_settings(&conn, &novel_id)
+}
+
+#[tauri::command]
+fn save_novel_settings(
+    novel_id: String,
+    protagonist_name: String,
+    additional_feminize_names: String,
+    bust: String,
+    body_type: String,
+    advanced_settings: String,
+    state: State<AppState>,
+) -> Result<NovelSettings, String> {
+    let protagonist_name = protagonist_name.trim();
+    let additional_feminize_names = normalize_name_list(&additional_feminize_names);
+    let bust = bust.trim();
+    let body_type = body_type.trim();
+    if protagonist_name.is_empty() {
+        return Err("主角姓名为必填项。".to_string());
+    }
+    if !["平胸", "巨乳"].contains(&bust) {
+        return Err("身材只能选择平胸或巨乳。".to_string());
+    }
+    if !["萝莉", "御姐", "少女"].contains(&body_type) {
+        return Err("体型只能选择萝莉、御姐或少女。".to_string());
+    }
+
+    let settings = NovelSettings {
+        novel_id: novel_id.clone(),
+        protagonist_name: protagonist_name.to_string(),
+        additional_feminize_names,
+        bust: bust.to_string(),
+        body_type: body_type.to_string(),
+        advanced_settings: advanced_settings.trim().to_string(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.execute(
+        r#"
+        INSERT INTO novel_settings (novel_id, protagonist_name, additional_feminize_names, bust, body_type, advanced_settings, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(novel_id) DO UPDATE SET
+            protagonist_name = excluded.protagonist_name,
+            additional_feminize_names = excluded.additional_feminize_names,
+            bust = excluded.bust,
+            body_type = excluded.body_type,
+            advanced_settings = excluded.advanced_settings,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            settings.novel_id,
+            settings.protagonist_name,
+            settings.additional_feminize_names,
+            settings.bust,
+            settings.body_type,
+            settings.advanced_settings,
+            settings.updated_at
+        ],
+    )
+    .map_err(to_string)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn list_chapter_batches(novel_id: String, state: State<AppState>) -> Result<Vec<ChapterBatch>, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    load_chapter_batches(&conn, &novel_id)
+}
+
+#[tauri::command]
 async fn test_model_profile(profile_id: String, state: State<'_, AppState>) -> Result<ModelTestResult, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
@@ -604,14 +752,18 @@ fn update_canon_assets(
 async fn start_analysis(
     novel_id: String,
     profile_id: String,
+    batch_id: String,
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
     let chapters = {
         let conn = state.conn.lock().map_err(to_string)?;
-        load_chapters(&conn, &novel_id)?
+        load_chapters_for_batch(&conn, &novel_id, &batch_id)?
     };
+    if chapters.is_empty() {
+        return Err("当前批次没有可分析的内容。".to_string());
+    }
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "analysis", total)?;
 
@@ -647,7 +799,7 @@ async fn start_analysis(
                     params![normalized, chapter.id],
                 )
                 .map_err(to_string)?;
-                merge_analysis_into_canon(&conn, &novel_id).map_err(to_string)?;
+                merge_analysis_into_canon_assets(&conn, &novel_id).map_err(to_string)?;
             }
             Err(error) => {
                 append_ai_log(
@@ -677,14 +829,23 @@ async fn start_analysis(
 async fn start_rewrite(
     novel_id: String,
     profile_id: String,
+    batch_id: String,
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (chapters, canon_assets) = {
+    let (chapters, canon_assets, settings) = {
         let conn = state.conn.lock().map_err(to_string)?;
-        (load_chapters(&conn, &novel_id)?, load_canon_assets(&conn, &novel_id)?)
+        let settings = require_novel_settings(&conn, &novel_id)?;
+        let chapters = load_chapters_for_batch(&conn, &novel_id, &batch_id)?
+            .into_iter()
+            .filter(|chapter| chapter.analysis_status == "completed")
+            .collect::<Vec<_>>();
+        (chapters, load_canon_assets(&conn, &novel_id)?, settings)
     };
+    if chapters.is_empty() {
+        return Err("当前批次没有已完成分析的内容，请先分析该批次。".to_string());
+    }
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
     let canon_text = canon_assets
@@ -696,7 +857,7 @@ async fn start_rewrite(
     for chapter in chapters {
         update_job(&state, &job.id, "running", chapter.index, &format!("正在改写 {}", chapter.title))?;
         set_chapter_status(&state, &chapter.id, "rewrite_status", "running")?;
-        let prompt = build_rewrite_prompt(&chapter, &canon_text);
+        let prompt = build_rewrite_prompt_with_settings(&chapter, &canon_text, &settings);
         match generate_text(
             &state.client,
             &profile,
@@ -811,13 +972,14 @@ fn decode_text(bytes: &[u8]) -> (String, String) {
     (gbk.into_owned(), "gbk".to_string())
 }
 
-fn split_chapters(novel_id: &str, text: &str) -> Vec<Chapter> {
-    let heading_re =
-        Regex::new(r"(?m)^\s*((第[0-9零〇一二两三四五六七八九十百千万]+[章节回卷部].*)|(Chapter\s+[0-9IVXLCDM]+.*))\s*$")
-            .expect("valid chapter regex");
+fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
+    let heading_re = chapter_heading_regex();
     let matches = heading_re.find_iter(text).collect::<Vec<_>>();
     if matches.is_empty() {
-        return chunk_without_headings(novel_id, text);
+        return SplitResult {
+            chapters: chunk_without_headings(novel_id, text),
+            detected_chapters: false,
+        };
     }
 
     let mut chapters = Vec::new();
@@ -825,7 +987,12 @@ fn split_chapters(novel_id: &str, text: &str) -> Vec<Chapter> {
         let start = mat.start();
         let content_start = mat.end();
         let end = matches.get(idx + 1).map_or(text.len(), |next| next.start());
-        let title = text[start..content_start].trim().to_string();
+        let title = text[start..content_start].trim();
+        let title = if title.is_empty() {
+            format!("第{}章", idx + 1)
+        } else {
+            title.to_string()
+        };
         let original_text = text[content_start..end].trim().to_string();
         chapters.push(Chapter {
             id: Uuid::new_v4().to_string(),
@@ -839,12 +1006,22 @@ fn split_chapters(novel_id: &str, text: &str) -> Vec<Chapter> {
             rewrite_status: "pending".to_string(),
         });
     }
-    chapters
+    SplitResult {
+        chapters,
+        detected_chapters: true,
+    }
+}
+
+fn chapter_heading_regex() -> Regex {
+    Regex::new(
+        r#"(?m)^[\s\u{feff}　]*(?:[【〔［「『《（(\[]?\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册]\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:卷|篇|部|章|回|幕|册|话|节|季|段)\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[\s:：、.．\-—_·|]*.{0,80}|[上中下前后终外]\s*(?:卷|篇|部|章|册)[\s:：、.．\-—_·|]*.{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)\s*[0-9０-９IVXLCDMivxlcdm]+[\s:：、.．\-—_·|]*.{0,80}|[【〔［「『《（(\[]?\s*(?:序章|楔子|引子|前言|正文|终章|尾声|后记|番外(?:篇|章)?|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|[0-9０-９]{1,5}\.?\s*|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12}\s*|(?:第?\s*)?[0-9０-９]{1,5}\s*[、.．:：\-—_·|]\s*.{1,80}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,8}\s*[、.．:：\-—_·|]\s*.{1,80}|[（(]?[0-9０-９]{1,5}[）)]\s*.{0,80}|[【〔［「『《（(\[].{1,40}[】〕］」』》）)\]]|={2,6}.{1,60}={2,6})[\s　]*$"#,
+    )
+    .expect("valid chapter regex")
 }
 
 fn chunk_without_headings(novel_id: &str, text: &str) -> Vec<Chapter> {
     let chars = text.chars().collect::<Vec<_>>();
-    let chunk_size = 8_000;
+    let chunk_size = 100_000;
     chars
         .chunks(chunk_size)
         .enumerate()
@@ -873,6 +1050,56 @@ fn seed_canon_assets(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
+fn create_chapter_batches(
+    conn: &Connection,
+    data_dir: &Path,
+    novel_id: &str,
+    chapters: &[Chapter],
+    detected_chapters: bool,
+) -> Result<(), String> {
+    let batch_size = if detected_chapters { 30 } else { 1 };
+    let batch_dir = data_dir.join("chapter_batches").join(novel_id);
+    fs::create_dir_all(&batch_dir).map_err(to_string)?;
+    let now = Utc::now().to_rfc3339();
+
+    for (idx, chunk) in chapters.chunks(batch_size).enumerate() {
+        let first = chunk
+            .first()
+            .ok_or_else(|| "批次内容为空。".to_string())?;
+        let last = chunk
+            .last()
+            .ok_or_else(|| "批次内容为空。".to_string())?;
+        let batch_index = (idx + 1) as i64;
+        let label = if detected_chapters {
+            format!("{}-{}章", first.index, last.index)
+        } else {
+            format!("第{}批（约10万字）", batch_index)
+        };
+        let file_path = batch_dir.join(format!("batch-{batch_index:03}.txt"));
+        let body = chunk
+            .iter()
+            .map(|chapter| format!("{}\n\n{}", chapter.title, chapter.original_text))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        fs::write(&file_path, body).map_err(to_string)?;
+        conn.execute(
+            "INSERT INTO chapter_batches (id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                Uuid::new_v4().to_string(),
+                novel_id,
+                batch_index,
+                label,
+                first.index,
+                last.index,
+                file_path.to_string_lossy().to_string(),
+                now
+            ],
+        )
+        .map_err(to_string)?;
+    }
+    Ok(())
+}
+
 fn load_chapters(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter>, String> {
     let mut stmt = conn
         .prepare(
@@ -884,6 +1111,66 @@ fn load_chapters(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter>, Stri
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_string)?;
     Ok(chapters)
+}
+
+fn load_chapters_for_batch(conn: &Connection, novel_id: &str, batch_id: &str) -> Result<Vec<Chapter>, String> {
+    let batch = conn
+        .query_row(
+            "SELECT id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at FROM chapter_batches WHERE id = ?1 AND novel_id = ?2",
+            params![batch_id, novel_id],
+            row_to_chapter_batch,
+        )
+        .map_err(to_string)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, analysis_status, rewrite_status FROM chapters WHERE novel_id = ?1 AND chapter_index BETWEEN ?2 AND ?3 ORDER BY chapter_index",
+        )
+        .map_err(to_string)?;
+    let chapters = stmt
+        .query_map(params![novel_id, batch.start_chapter, batch.end_chapter], row_to_chapter)
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+    Ok(chapters)
+}
+
+fn load_chapter_batches(conn: &Connection, novel_id: &str) -> Result<Vec<ChapterBatch>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at FROM chapter_batches WHERE novel_id = ?1 ORDER BY batch_index",
+        )
+        .map_err(to_string)?;
+    let batches = stmt
+        .query_map(params![novel_id], row_to_chapter_batch)
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+    Ok(batches)
+}
+
+fn load_novel_settings(conn: &Connection, novel_id: &str) -> Result<Option<NovelSettings>, String> {
+    let result = conn.query_row(
+        "SELECT novel_id, protagonist_name, additional_feminize_names, bust, body_type, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
+        params![novel_id],
+        row_to_novel_settings,
+    );
+    match result {
+        Ok(settings) => Ok(Some(settings)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(to_string(error)),
+    }
+}
+
+fn require_novel_settings(conn: &Connection, novel_id: &str) -> Result<NovelSettings, String> {
+    let settings = load_novel_settings(conn, novel_id)?
+        .ok_or_else(|| "请先填写设定".to_string())?;
+    if settings.protagonist_name.trim().is_empty()
+        || settings.bust.trim().is_empty()
+        || settings.body_type.trim().is_empty()
+    {
+        return Err("请先填写设定".to_string());
+    }
+    Ok(settings)
 }
 
 fn load_canon_assets(conn: &Connection, novel_id: &str) -> Result<Vec<CanonAsset>, String> {
@@ -1075,6 +1362,90 @@ fn normalize_model_name(base_url: &str, model: &str) -> String {
     }
 }
 
+fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
+    let additional = if settings.additional_feminize_names.trim().is_empty() {
+        "无".to_string()
+    } else {
+        settings.additional_feminize_names.clone()
+    };
+    let additional = if settings.advanced_settings.trim().is_empty() {
+        additional
+    } else {
+        format!("{}\n\n高级设定：{}", additional, settings.advanced_settings.trim())
+    };
+    format!(
+        r#"小说基本设定：
+- 主角原姓名：{}
+- 其他需要女性化的人物姓名：{}
+- 身材：{}
+- 体型：{}
+
+姓名女性化规则：
+1. 主角姓名必须女性化，不能保留明显男性化姓名。
+2. 优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
+3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
+4. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
+5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。"#,
+        settings.protagonist_name,
+        additional,
+        settings.bust,
+        settings.body_type
+    )
+}
+
+#[allow(dead_code)]
+fn build_analysis_prompt_with_settings(chapter: &Chapter, settings: &NovelSettings) -> String {
+    format!(
+        r#"请分析以下章节，并输出 JSON：
+{{
+  "outline": "本章大纲",
+  "characters": ["角色与设定变化"],
+  "relationships": ["人物关系变化"],
+  "locations": ["地点"],
+  "foreshadowing": ["伏笔或回收"],
+  "name_feminization_map": ["原姓名 -> 女性化姓名，未出现的人物不要写入"],
+  "rewrite_notes": ["后续百合改写必须注意的性别、称谓、动作、外貌、关系细节"]
+}}
+
+{}
+
+章节标题：{}
+
+章节正文：
+{}"#,
+        build_novel_settings_prompt(settings),
+        chapter.title,
+        truncate_text(&chapter.original_text, 30_000)
+    )
+}
+
+fn build_rewrite_prompt_with_settings(chapter: &Chapter, canon_text: &str, settings: &NovelSettings) -> String {
+    format!(
+        r#"改写要求：
+1. 将原本男女主叙事自然改写为双女主百合叙事。
+2. 采用中度再创作：保留主线、冲突、章节顺序和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
+3. 清除所有原男主痕迹，包括代词、身体描写、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
+4. 主角姓名必须按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉；其他指定姓名只在本章出现时女性化。
+5. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
+6. 保持中文网文可读性，只输出改写后的正文，不要解释。
+
+{}
+
+一致性资产：
+{}
+
+章节标题：{}
+
+原章节：
+{}"#,
+        build_novel_settings_prompt(settings),
+        canon_text,
+        chapter.title,
+        truncate_text(&chapter.original_text, 30_000)
+    )
+}
+
+#[allow(dead_code)]
 fn build_analysis_prompt(chapter: &Chapter) -> String {
     format!(
         r#"请分析以下章节，并输出 JSON：
@@ -1096,6 +1467,7 @@ fn build_analysis_prompt(chapter: &Chapter) -> String {
     )
 }
 
+#[allow(dead_code)]
 fn build_rewrite_prompt(chapter: &Chapter, canon_text: &str) -> String {
     format!(
         r#"改写要求：
@@ -1117,6 +1489,166 @@ fn build_rewrite_prompt(chapter: &Chapter, canon_text: &str) -> String {
     )
 }
 
+fn merge_analysis_into_canon_assets(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT title, analysis_json FROM chapters WHERE novel_id = ?1 AND analysis_json IS NOT NULL ORDER BY chapter_index",
+    )?;
+    let rows = stmt
+        .query_map(params![novel_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let analyses = rows
+        .iter()
+        .map(|(title, analysis_json)| format!("## {}\n{}", title, analysis_json))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let now = Utc::now().to_rfc3339();
+    upsert_canon_asset(conn, novel_id, "AI分析汇总", &analyses, &now)?;
+    upsert_canon_asset(conn, novel_id, "人物卡", &collect_analysis_field(&rows, "characters"), &now)?;
+    upsert_canon_asset(conn, novel_id, "人物关系", &collect_analysis_field(&rows, "relationships"), &now)?;
+    upsert_canon_asset(conn, novel_id, "地点", &collect_analysis_field(&rows, "locations"), &now)?;
+    upsert_canon_asset(conn, novel_id, "伏笔", &collect_analysis_field(&rows, "foreshadowing"), &now)?;
+    upsert_canon_asset(conn, novel_id, "术语表", &collect_analysis_terms(&rows), &now)?;
+    Ok(())
+}
+
+fn upsert_canon_asset(
+    conn: &Connection,
+    novel_id: &str,
+    kind: &str,
+    content: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO canon_assets (novel_id, kind, content, updated_at)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(novel_id, kind) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+        "#,
+        params![novel_id, kind, content, updated_at],
+    )?;
+    Ok(())
+}
+
+fn collect_analysis_field(rows: &[(String, String)], field: &str) -> String {
+    rows.iter()
+        .filter_map(|(title, analysis_json)| {
+            let value = serde_json::from_str::<serde_json::Value>(analysis_json).ok()?;
+            let text = json_field_to_text(value.get(field)?);
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(format!("## {}\n{}", title, text))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn collect_analysis_terms(rows: &[(String, String)]) -> String {
+    rows.iter()
+        .filter_map(|(title, analysis_json)| {
+            let value = serde_json::from_str::<serde_json::Value>(analysis_json).ok()?;
+            let mut sections = Vec::new();
+            if let Some(text) = value
+                .get("name_feminization_map")
+                .map(json_field_to_text)
+                .filter(|text| !text.trim().is_empty())
+            {
+                sections.push(format!("姓名女性化映射：\n{}", text));
+            }
+            if let Some(text) = value
+                .get("rewrite_notes")
+                .map(json_field_to_text)
+                .filter(|text| !text.trim().is_empty())
+            {
+                sections.push(format!("改写注意事项：\n{}", text));
+            }
+            if sections.is_empty() {
+                None
+            } else {
+                Some(format!("## {}\n{}", title, sections.join("\n\n")))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn json_field_to_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(json_field_to_text)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| format!("- {}", text))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Object(_) => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
+fn fill_empty_canon_assets_from_analysis(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT title, analysis_json FROM chapters WHERE novel_id = ?1 AND analysis_json IS NOT NULL ORDER BY chapter_index",
+    )?;
+    let rows = stmt
+        .query_map(params![novel_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let analyses = rows
+        .iter()
+        .map(|(title, analysis_json)| format!("## {}\n{}", title, analysis_json))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let now = Utc::now().to_rfc3339();
+    upsert_empty_canon_asset(conn, novel_id, "AI分析汇总", &analyses, &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "人物卡", &collect_analysis_field(&rows, "characters"), &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "人物关系", &collect_analysis_field(&rows, "relationships"), &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "地点", &collect_analysis_field(&rows, "locations"), &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "伏笔", &collect_analysis_field(&rows, "foreshadowing"), &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "术语表", &collect_analysis_terms(&rows), &now)?;
+    Ok(())
+}
+
+fn upsert_empty_canon_asset(
+    conn: &Connection,
+    novel_id: &str,
+    kind: &str,
+    content: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        r#"
+        INSERT INTO canon_assets (novel_id, kind, content, updated_at)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(novel_id, kind) DO UPDATE SET
+            content = CASE
+                WHEN trim(canon_assets.content) = '' THEN excluded.content
+                ELSE canon_assets.content
+            END,
+            updated_at = CASE
+                WHEN trim(canon_assets.content) = '' THEN excluded.updated_at
+                ELSE canon_assets.updated_at
+            END
+        "#,
+        params![novel_id, kind, content, updated_at],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn merge_analysis_into_canon(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT title, analysis_json FROM chapters WHERE novel_id = ?1 AND analysis_json IS NOT NULL ORDER BY chapter_index",
@@ -1266,6 +1798,31 @@ fn row_to_chapter(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chapter> {
     })
 }
 
+fn row_to_chapter_batch(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChapterBatch> {
+    Ok(ChapterBatch {
+        id: row.get(0)?,
+        novel_id: row.get(1)?,
+        batch_index: row.get(2)?,
+        label: row.get(3)?,
+        start_chapter: row.get(4)?,
+        end_chapter: row.get(5)?,
+        file_path: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+fn row_to_novel_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<NovelSettings> {
+    Ok(NovelSettings {
+        novel_id: row.get(0)?,
+        protagonist_name: row.get(1)?,
+        additional_feminize_names: row.get(2)?,
+        bust: row.get(3)?,
+        body_type: row.get(4)?,
+        advanced_settings: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
 fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
     Ok(Job {
         id: row.get(0)?,
@@ -1343,6 +1900,15 @@ fn normalize_jsonish(text: &str) -> String {
         .to_string()
 }
 
+fn normalize_name_list(input: &str) -> String {
+    input
+        .split(|ch| matches!(ch, '\n' | '\r' | ',' | '，' | '、' | ';' | '；'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn sanitize_file_name(input: &str) -> String {
     let cleaned = input
         .chars()
@@ -1360,4 +1926,36 @@ fn sanitize_file_name(input: &str) -> String {
 
 fn to_string<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chapter_heading_regex_covers_common_toc_rules() {
+        let heading_re = chapter_heading_regex();
+        for title in [
+            "第1章 限落的天才",
+            "正文 第三章：客人",
+            "第一话 新的开始",
+            "卷五 开源盛典",
+            "上卷 山雨",
+            "Chapter 1 MyGrandmaIsNB",
+            "Section 12",
+            "Part 3 - After",
+            "Episode 4",
+            "No. 5",
+            "12",
+            "一百七十",
+            "1、这就是标题",
+            "二十四、我瞎编的标题",
+            "（11）我奶常山赵子龙",
+            "【特别篇】",
+            "=== 起 ===",
+            "番外篇 她们后来",
+        ] {
+            assert!(heading_re.is_match(title), "expected heading match: {title}");
+        }
+    }
 }
