@@ -18,7 +18,7 @@ import {
   Sparkles,
   Trash2
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Novel = {
   id: string;
@@ -85,6 +85,7 @@ type ModelProfile = {
   base_url: string;
   model: string;
   temperature: number;
+  thinking_mode: "auto" | "off" | "on";
   has_api_key: boolean;
   updated_at: string;
 };
@@ -138,6 +139,7 @@ type ProfileDraft = {
   base_url: string;
   model: string;
   temperature: number;
+  thinking_mode: "auto" | "off" | "on";
   api_key: string;
 };
 
@@ -156,6 +158,7 @@ const emptyProfile: ProfileDraft = {
   base_url: "https://api.openai.com/v1",
   model: "请填写模型名",
   temperature: 0.7,
+  thinking_mode: "auto",
   api_key: ""
 };
 
@@ -169,6 +172,7 @@ const emptyNovelSettings: NovelSettingsDraft = {
 };
 
 const savedApiKeyMask = "********";
+const thinkingModeTooltip = "建议自动\n兼容性：OpenAI/OpenRouter/Gemini 可控；DeepSeek 官方多由模型名决定；不支持时会自动降级";
 
 const statusText: Record<string, string> = {
   pending: "待处理",
@@ -196,6 +200,8 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [job, setJob] = useState<Job | null>(null);
+  const originalCompareRef = useRef<HTMLPreElement | null>(null);
+  const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
 
   const selectedChapter = useMemo(
     () => detail?.chapters.find((chapter) => chapter.id === selectedChapterId) ?? detail?.chapters[0],
@@ -242,9 +248,15 @@ export default function App() {
       base_url: profile.base_url,
       model: profile.model,
       temperature: profile.temperature,
+      thinking_mode: profile.thinking_mode === "off" || profile.thinking_mode === "on" ? profile.thinking_mode : "auto",
       api_key: profile.has_api_key ? savedApiKeyMask : ""
     });
   }, [profiles, selectedProfileId]);
+
+  useEffect(() => {
+    if (originalCompareRef.current) originalCompareRef.current.scrollTop = 0;
+    if (rewriteCompareRef.current) rewriteCompareRef.current.scrollTop = 0;
+  }, [selectedChapterId]);
 
   async function refreshAll() {
     const [novelRows, profileRows, appSettings] = await Promise.all([
@@ -1000,11 +1012,11 @@ export default function App() {
               <div className="large-compare-grid">
                 <article>
                   <h2>原文</h2>
-                  <pre>{selectedChapter.original_text}</pre>
+                  <pre ref={originalCompareRef}>{selectedChapter.original_text}</pre>
                 </article>
                 <article>
                   <h2>改写稿</h2>
-                  <pre>{selectedChapter.rewrite_text || "尚未改写。"}</pre>
+                  <pre ref={rewriteCompareRef}>{selectedChapter.rewrite_text || "尚未改写。"}</pre>
                 </article>
               </div>
             ) : (
@@ -1049,7 +1061,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <div className="form-grid">
+              <div className="form-grid model-form-grid">
                 <label>
                   名称
                   <input value={profileDraft.name} onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })} />
@@ -1091,6 +1103,41 @@ export default function App() {
                     value={profileDraft.temperature}
                     onChange={(event) => setProfileDraft({ ...profileDraft, temperature: Number(event.target.value) })}
                   />
+                </label>
+                <label className="mode-field thinking-mode-field form-full" title={thinkingModeTooltip}>
+                  <span>思考模式</span>
+                  <div className="mode-toggle mode-toggle-three" role="radiogroup" aria-label="思考模式">
+                    <button
+                      type="button"
+                      className={profileDraft.thinking_mode === "auto" ? "active" : ""}
+                      role="radio"
+                      aria-checked={profileDraft.thinking_mode === "auto"}
+                      title={thinkingModeTooltip}
+                      onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "auto" })}
+                    >
+                      自动
+                    </button>
+                    <button
+                      type="button"
+                      className={profileDraft.thinking_mode === "off" ? "active" : ""}
+                      role="radio"
+                      aria-checked={profileDraft.thinking_mode === "off"}
+                      title={thinkingModeTooltip}
+                      onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "off" })}
+                    >
+                      关闭
+                    </button>
+                    <button
+                      type="button"
+                      className={profileDraft.thinking_mode === "on" ? "active" : ""}
+                      role="radio"
+                      aria-checked={profileDraft.thinking_mode === "on"}
+                      title={thinkingModeTooltip}
+                      onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "on" })}
+                    >
+                      开启
+                    </button>
+                  </div>
                 </label>
                 <label>
                   API Key

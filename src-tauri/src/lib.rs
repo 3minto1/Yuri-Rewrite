@@ -96,6 +96,7 @@ struct ModelProfile {
     base_url: String,
     model: String,
     temperature: f64,
+    thinking_mode: String,
     has_api_key: bool,
     updated_at: String,
 }
@@ -108,6 +109,7 @@ struct ModelProfileInput {
     base_url: String,
     model: String,
     temperature: f64,
+    thinking_mode: Option<String>,
     api_key: Option<String>,
 }
 
@@ -196,6 +198,12 @@ struct ParsedChapterRewrite {
     text: String,
 }
 
+#[derive(Debug, Clone)]
+struct ParsedChapterAnalysis {
+    id: String,
+    json: String,
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -281,6 +289,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             base_url TEXT NOT NULL,
             model TEXT NOT NULL,
             temperature REAL NOT NULL,
+            thinking_mode TEXT NOT NULL DEFAULT 'auto',
             api_key TEXT,
             updated_at TEXT NOT NULL
         );
@@ -347,6 +356,12 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
     ensure_column(conn, "model_profiles", "api_key", "TEXT")?;
+    ensure_column(
+        conn,
+        "model_profiles",
+        "thinking_mode",
+        "TEXT NOT NULL DEFAULT 'auto'",
+    )?;
     ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
     ensure_column(
@@ -526,6 +541,7 @@ fn save_model_profile(
     if let Some(value) = &api_key {
         let _ = write_api_key(&id, value);
     }
+    let thinking_mode = normalize_thinking_mode(input.thinking_mode.as_deref())?;
     let profile = ModelProfile {
         id: id.clone(),
         name: input.name,
@@ -533,20 +549,22 @@ fn save_model_profile(
         base_url: input.base_url,
         model: input.model,
         temperature: input.temperature,
+        thinking_mode,
         has_api_key: api_key.is_some() || stored_api_key_exists(&conn, &id),
         updated_at,
     };
 
     conn.execute(
         r#"
-        INSERT INTO model_profiles (id, name, provider, base_url, model, temperature, updated_at, api_key)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        INSERT INTO model_profiles (id, name, provider, base_url, model, temperature, thinking_mode, updated_at, api_key)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             provider = excluded.provider,
             base_url = excluded.base_url,
             model = excluded.model,
             temperature = excluded.temperature,
+            thinking_mode = excluded.thinking_mode,
             updated_at = excluded.updated_at,
             api_key = COALESCE(excluded.api_key, model_profiles.api_key)
         "#,
@@ -557,6 +575,7 @@ fn save_model_profile(
             profile.base_url,
             profile.model,
             profile.temperature,
+            profile.thinking_mode,
             profile.updated_at,
             api_key
         ],
@@ -588,13 +607,13 @@ fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelProfile>, Stri
     let conn = state.conn.lock().map_err(to_string)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, provider, base_url, model, temperature, updated_at, api_key FROM model_profiles ORDER BY updated_at DESC",
+            "SELECT id, name, provider, base_url, model, temperature, thinking_mode, updated_at, api_key FROM model_profiles ORDER BY updated_at DESC",
         )
         .map_err(to_string)?;
     let profiles = stmt
         .query_map([], |row| {
             let id: String = row.get(0)?;
-            let db_api_key: Option<String> = row.get(7)?;
+            let db_api_key: Option<String> = row.get(8)?;
             Ok(ModelProfile {
                 has_api_key: read_api_key(&id).is_ok()
                     || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
@@ -604,7 +623,8 @@ fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelProfile>, Stri
                 base_url: row.get(3)?,
                 model: row.get(4)?,
                 temperature: row.get(5)?,
-                updated_at: row.get(6)?,
+                thinking_mode: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })
         .map_err(to_string)?
@@ -797,6 +817,7 @@ async fn test_model_profile(
         &api_key,
         "你是一个连接测试助手。只回复一句中文。",
         "请回复：连接成功。",
+        false,
     )
     .await
     {
@@ -879,65 +900,102 @@ async fn start_analysis(
     }
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "analysis", total)?;
+    let batch_label = format_batch_label(&chapters);
 
-    for chapter in chapters {
-        update_job(
-            &state,
-            &job.id,
-            "running",
-            chapter.index,
-            &format!("正在分析 {}", chapter.title),
-        )?;
+    update_job(
+        &state,
+        &job.id,
+        "running",
+        0,
+        &format!("正在批次分析 {}", batch_label),
+    )?;
+    for chapter in &chapters {
         set_chapter_status(&state, &chapter.id, "analysis_status", "running")?;
-        let prompt = build_analysis_prompt(&chapter);
-        match generate_text(
-            &state.client,
-            &profile,
-            &api_key,
-            "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
-            &prompt,
-        )
-        .await
-        {
-            Ok(output) => {
-                let normalized = normalize_jsonish(&output.text);
-                append_ai_log(
-                    &state,
-                    Some(&novel_id),
-                    &profile.id,
-                    "章节分析",
-                    Some(&chapter.title),
-                    "success",
-                    &normalized,
-                    output.reasoning.as_deref(),
-                    Some(&output.raw_response),
-                )?;
-                let conn = state.conn.lock().map_err(to_string)?;
-                conn.execute(
-                    "UPDATE chapters SET analysis_json = ?1, analysis_status = 'completed' WHERE id = ?2",
-                    params![normalized, chapter.id],
-                )
-                .map_err(to_string)?;
-                merge_analysis_into_canon_assets(&conn, &novel_id).map_err(to_string)?;
-            }
-            Err(error) => {
-                append_ai_log(
-                    &state,
-                    Some(&novel_id),
-                    &profile.id,
-                    "章节分析",
-                    Some(&chapter.title),
-                    "error",
-                    &error,
-                    None,
-                    None,
-                )?;
-                set_chapter_status(&state, &chapter.id, "analysis_status", "failed")?;
-                update_job(&state, &job.id, "failed", chapter.index, &error)?;
-                job = get_job(job.id.clone(), state)?;
-                return Ok(job);
-            }
+    }
+
+    let prompt = build_batch_analysis_prompt(&chapters);
+    let output = match generate_text(
+        &state.client,
+        &profile,
+        &api_key,
+        "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
+        &prompt,
+        true,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次分析",
+                Some(&batch_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            mark_chapters_analysis_failed(&state, &chapters)?;
+            update_job(&state, &job.id, "failed", 0, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
         }
+    };
+
+    let parsed_analysis = match parse_batch_analysis_output(&output.text, &chapters) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            append_ai_log(
+                &state,
+                Some(&novel_id),
+                &profile.id,
+                "批次分析",
+                Some(&batch_label),
+                "error",
+                &error,
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            mark_chapters_analysis_failed(&state, &chapters)?;
+            update_job(&state, &job.id, "failed", 0, &error)?;
+            job = get_job(job.id.clone(), state)?;
+            return Ok(job);
+        }
+    };
+
+    append_ai_log(
+        &state,
+        Some(&novel_id),
+        &profile.id,
+        "批次分析",
+        Some(&batch_label),
+        "success",
+        &output.text,
+        output.reasoning.as_deref(),
+        Some(&output.raw_response),
+    )?;
+
+    {
+        let mut conn = state.conn.lock().map_err(to_string)?;
+        let tx = conn.transaction().map_err(to_string)?;
+        for chapter in &chapters {
+            tx.execute(
+                "UPDATE chapters SET analysis_json = NULL, analysis_status = 'completed' WHERE id = ?1",
+                params![chapter.id],
+            )
+            .map_err(to_string)?;
+        }
+        for analysis in parsed_analysis {
+            tx.execute(
+                "UPDATE chapters SET analysis_json = ?1 WHERE id = ?2",
+                params![analysis.json, analysis.id],
+            )
+            .map_err(to_string)?;
+        }
+        tx.commit().map_err(to_string)?;
+        merge_analysis_into_canon_assets(&conn, &novel_id).map_err(to_string)?;
     }
 
     update_job(&state, &job.id, "completed", total, "分析完成")?;
@@ -994,6 +1052,7 @@ async fn start_rewrite(
         &api_key,
         "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须保留用户提供的章节边界标记，只输出完整批次正文。",
         &rewrite_prompt,
+        false,
     )
     .await
     {
@@ -1066,6 +1125,7 @@ async fn start_rewrite(
         &api_key,
         "你是中文小说改写质检与修正助手。检查并修正改写稿中的姓名、代词、称谓、设定和逻辑问题，必须保留章节边界标记，只输出修正后的完整批次正文。",
         &review_prompt,
+        false,
     )
     .await
     {
@@ -1183,6 +1243,7 @@ async fn start_rewrite_legacy(
             &api_key,
             "你是中文小说改写助手，任务是把男女主文本改写为自然的双女主百合文本。只输出改写后的正文。",
             &prompt,
+            false,
         )
         .await
         {
@@ -1727,11 +1788,11 @@ fn load_model_profile(
 ) -> Result<ModelProfile, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     conn.query_row(
-        "SELECT id, name, provider, base_url, model, temperature, updated_at, api_key FROM model_profiles WHERE id = ?1",
+        "SELECT id, name, provider, base_url, model, temperature, thinking_mode, updated_at, api_key FROM model_profiles WHERE id = ?1",
         params![profile_id],
         |row| {
             let id: String = row.get(0)?;
-            let db_api_key: Option<String> = row.get(7)?;
+            let db_api_key: Option<String> = row.get(8)?;
             Ok(ModelProfile {
                 has_api_key: read_api_key(&id).is_ok()
                     || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
@@ -1741,7 +1802,8 @@ fn load_model_profile(
                 base_url: row.get(3)?,
                 model: row.get(4)?,
                 temperature: row.get(5)?,
-                updated_at: row.get(6)?,
+                thinking_mode: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         },
     )
@@ -1754,11 +1816,12 @@ async fn generate_text(
     api_key: &str,
     system: &str,
     user: &str,
+    prefer_json_output: bool,
 ) -> Result<ModelOutput, String> {
     if profile.provider.to_lowercase().contains("gemini") {
         generate_gemini(client, profile, api_key, system, user).await
     } else {
-        generate_openai_compatible(client, profile, api_key, system, user).await
+        generate_openai_compatible(client, profile, api_key, system, user, prefer_json_output).await
     }
 }
 
@@ -1768,6 +1831,7 @@ async fn generate_openai_compatible(
     api_key: &str,
     system: &str,
     user: &str,
+    prefer_json_output: bool,
 ) -> Result<ModelOutput, String> {
     let base = profile.base_url.trim().trim_end_matches('/');
     let model = normalize_model_name(base, &profile.model);
@@ -1776,7 +1840,7 @@ async fn generate_openai_compatible(
     } else {
         format!("{}/chat/completions", base)
     };
-    let payload = json!({
+    let mut payload = json!({
         "model": model,
         "temperature": profile.temperature,
         "messages": [
@@ -1784,14 +1848,45 @@ async fn generate_openai_compatible(
             {"role": "user", "content": user}
         ]
     });
+    if prefer_json_output && is_deepseek_profile(profile, base, &model) {
+        payload["response_format"] = json!({ "type": "json_object" });
+    }
+    let added_thinking_control =
+        apply_openai_compatible_thinking_control(&mut payload, profile, base, &model);
     let response = client
-        .post(endpoint)
+        .post(&endpoint)
         .bearer_auth(api_key.trim())
         .json(&payload)
         .send()
         .await
         .map_err(to_string)?;
-    let (value, raw_response) = response_json_or_error(response).await?;
+    let (value, raw_response) = match response_json_or_error(response).await {
+        Ok(result) => result,
+        Err(error) if added_thinking_control => {
+            let mut retry_payload = payload;
+            retry_payload
+                .as_object_mut()
+                .expect("payload is an object")
+                .remove("reasoning_effort");
+            retry_payload
+                .as_object_mut()
+                .expect("payload is an object")
+                .remove("reasoning");
+            let retry_response = client
+                .post(endpoint)
+                .bearer_auth(api_key.trim())
+                .json(&retry_payload)
+                .send()
+                .await
+                .map_err(to_string)?;
+            response_json_or_error(retry_response)
+                .await
+                .map_err(|retry_error| {
+                    format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
+                })?
+        }
+        Err(error) => return Err(error),
+    };
     let text = value["choices"][0]["message"]["content"]
         .as_str()
         .map(|text| text.to_string())
@@ -1825,7 +1920,7 @@ async fn generate_gemini(
         profile.model.trim(),
         api_key.trim()
     );
-    let payload = json!({
+    let mut payload = json!({
         "contents": [
             {
                 "role": "user",
@@ -1838,13 +1933,37 @@ async fn generate_gemini(
             "temperature": profile.temperature
         }
     });
+    let added_thinking_control = apply_gemini_thinking_control(&mut payload, profile);
     let response = client
-        .post(endpoint)
+        .post(&endpoint)
         .json(&payload)
         .send()
         .await
         .map_err(to_string)?;
-    let (value, raw_response) = response_json_or_error(response).await?;
+    let (value, raw_response) = match response_json_or_error(response).await {
+        Ok(result) => result,
+        Err(error) if added_thinking_control => {
+            let mut retry_payload = payload;
+            if let Some(generation_config) = retry_payload
+                .get_mut("generationConfig")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                generation_config.remove("thinkingConfig");
+            }
+            let retry_response = client
+                .post(endpoint)
+                .json(&retry_payload)
+                .send()
+                .await
+                .map_err(to_string)?;
+            response_json_or_error(retry_response)
+                .await
+                .map_err(|retry_error| {
+                    format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
+                })?
+        }
+        Err(error) => return Err(error),
+    };
     let text = value["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
         .map(|text| text.to_string())
@@ -1900,6 +2019,111 @@ fn normalize_model_name(base_url: &str, model: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn normalize_thinking_mode(input: Option<&str>) -> Result<String, String> {
+    let mode = input.unwrap_or("auto").trim().to_ascii_lowercase();
+    match mode.as_str() {
+        "" | "auto" => Ok("auto".to_string()),
+        "off" => Ok("off".to_string()),
+        "on" => Ok("on".to_string()),
+        _ => Err("思考模式只能是 auto、off 或 on。".to_string()),
+    }
+}
+
+fn is_deepseek_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    provider.contains("deepseek") || base.contains("deepseek") || model.contains("deepseek")
+}
+
+fn apply_openai_compatible_thinking_control(
+    payload: &mut serde_json::Value,
+    profile: &ModelProfile,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    match profile.thinking_mode.as_str() {
+        "off" => apply_reasoning_parameter(payload, profile, base_url, model, false),
+        "on" => apply_reasoning_parameter(payload, profile, base_url, model, true),
+        _ => false,
+    }
+}
+
+fn apply_reasoning_parameter(
+    payload: &mut serde_json::Value,
+    profile: &ModelProfile,
+    base_url: &str,
+    model: &str,
+    enabled: bool,
+) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model_lower = model.to_ascii_lowercase();
+
+    if base.contains("openrouter") {
+        payload["reasoning"] = if enabled {
+            json!({ "enabled": true, "effort": "medium" })
+        } else {
+            json!({ "effort": "none" })
+        };
+        return true;
+    }
+
+    if base.contains("api.openai.com") || is_openai_reasoning_model(&model_lower) {
+        payload["reasoning_effort"] = json!(if enabled { "medium" } else { "none" });
+        return true;
+    }
+
+    if is_deepseek_profile(profile, base_url, model) && !base.contains("api.deepseek.com") {
+        payload["reasoning"] = if enabled {
+            json!({ "enabled": true, "effort": "medium" })
+        } else {
+            json!({ "effort": "none" })
+        };
+        return true;
+    }
+
+    if provider.contains("grok") || model_lower.contains("grok") {
+        payload["reasoning_effort"] = json!(if enabled { "medium" } else { "none" });
+        return true;
+    }
+
+    false
+}
+
+fn is_openai_reasoning_model(model: &str) -> bool {
+    matches!(
+        model,
+        value if value.starts_with("o1")
+            || value.starts_with("o3")
+            || value.starts_with("o4")
+            || value.starts_with("gpt-5")
+    )
+}
+
+fn apply_gemini_thinking_control(payload: &mut serde_json::Value, profile: &ModelProfile) -> bool {
+    let mode = profile.thinking_mode.as_str();
+    if mode == "auto" {
+        return false;
+    }
+
+    let model = profile.model.to_ascii_lowercase();
+    let thinking_config = if model.contains("2.5") {
+        if mode == "off" {
+            json!({ "thinkingBudget": 0 })
+        } else {
+            json!({ "thinkingBudget": -1 })
+        }
+    } else if mode == "off" {
+        json!({ "thinkingLevel": "minimal" })
+    } else {
+        json!({ "thinkingLevel": "high" })
+    };
+
+    payload["generationConfig"]["thinkingConfig"] = thinking_config;
+    true
 }
 
 #[allow(dead_code)]
@@ -2002,6 +2226,20 @@ fn rewrite_mode_prompt(mode: &str) -> &'static str {
     }
 }
 
+fn analysis_chapter_start_marker(chapter: &Chapter) -> String {
+    format!(
+        "<<<YURI_ANALYSIS_CHAPTER_START index={} id={}>>>",
+        chapter.index, chapter.id
+    )
+}
+
+fn analysis_chapter_end_marker(chapter: &Chapter) -> String {
+    format!(
+        "<<<YURI_ANALYSIS_CHAPTER_END index={} id={}>>>",
+        chapter.index, chapter.id
+    )
+}
+
 fn chapter_start_marker(chapter: &Chapter) -> String {
     format!(
         "<<<YURI_REWRITE_CHAPTER_START index={} id={}>>>",
@@ -2040,6 +2278,22 @@ fn build_batch_chapter_text(chapters: &[Chapter], use_rewrite_text: bool) -> Str
         .join("\n\n")
 }
 
+fn build_batch_analysis_chapter_text(chapters: &[Chapter]) -> String {
+    chapters
+        .iter()
+        .map(|chapter| {
+            format!(
+                "{}\n标题：{}\n正文：\n{}\n{}",
+                analysis_chapter_start_marker(chapter),
+                chapter.title,
+                chapter.original_text.trim(),
+                analysis_chapter_end_marker(chapter)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn build_batch_rewrite_text(chapters: &[Chapter], rewrites: &[ParsedChapterRewrite]) -> String {
     chapters
         .iter()
@@ -2057,6 +2311,190 @@ fn build_batch_rewrite_text(chapters: &[Chapter], rewrites: &[ParsedChapterRewri
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn parse_batch_analysis_output(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    let json_error = match parse_batch_analysis_json_output(output, expected_chapters) {
+        Ok(parsed) => return Ok(parsed),
+        Err(error) => error,
+    };
+
+    if output.contains("YURI_ANALYSIS_CHAPTER_START") {
+        return parse_batch_analysis_marker_output(output, expected_chapters).map_err(|marker_error| {
+            format!(
+                "AI 分析输出既不是合法批次 JSON，也不是有效章节边界格式。JSON 解析错误：{}；边界格式解析错误：{}",
+                json_error, marker_error
+            )
+        });
+    }
+
+    Err(json_error)
+}
+
+fn parse_batch_analysis_json_output(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    let value = parse_jsonish_value(output)
+        .map_err(|error| format!("AI 分析输出不是合法 JSON：{}", error))?;
+    if let Ok(batch_json) = extract_batch_level_analysis_json(&value) {
+        return Ok(vec![ParsedChapterAnalysis {
+            id: expected_chapters
+                .first()
+                .ok_or_else(|| "缺少待分析章节。".to_string())?
+                .id
+                .clone(),
+            json: batch_json,
+        }]);
+    }
+
+    let items = match &value {
+        serde_json::Value::Object(map) => map
+            .get("chapters")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "AI 分析 JSON 缺少 chapters 数组。".to_string())?,
+        serde_json::Value::Array(items) => items,
+        _ => return Err("AI 分析 JSON 必须是对象或数组。".to_string()),
+    };
+
+    if items.len() != expected_chapters.len() {
+        return Err(format!(
+            "AI 分析 JSON 章节数量不匹配：期望 {} 章，实际 {} 章。",
+            expected_chapters.len(),
+            items.len()
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(expected_chapters.len());
+    for (item, chapter) in items.iter().zip(expected_chapters.iter()) {
+        let item_object = item
+            .as_object()
+            .ok_or_else(|| format!("章节 {} 的分析项必须是 JSON 对象。", chapter.index))?;
+        if let Some(index) = item_object
+            .get("index")
+            .or_else(|| item_object.get("chapter_index"))
+            .and_then(serde_json::Value::as_i64)
+        {
+            if index != chapter.index {
+                return Err(format!(
+                    "AI 分析 JSON 章节顺序不匹配：期望第 {} 章，实际第 {} 章。",
+                    chapter.index, index
+                ));
+            }
+        }
+        if let Some(id) = item_object
+            .get("id")
+            .or_else(|| item_object.get("chapter_id"))
+            .and_then(serde_json::Value::as_str)
+        {
+            if id != chapter.id {
+                return Err(format!(
+                    "AI 分析 JSON 章节 id 不匹配：期望 {}，实际 {}。",
+                    chapter.id, id
+                ));
+            }
+        }
+
+        let analysis_value = item_object.get("analysis").unwrap_or(item);
+        let mut analysis = analysis_value
+            .as_object()
+            .ok_or_else(|| format!("章节 {} 的 analysis 必须是 JSON 对象。", chapter.index))?
+            .clone();
+        analysis.remove("id");
+        analysis.remove("chapter_id");
+        analysis.remove("index");
+        analysis.remove("chapter_index");
+        analysis.remove("title");
+        analysis.remove("chapter_title");
+        if analysis.is_empty() {
+            return Err(format!("章节 {} 的分析 JSON 为空。", chapter.index));
+        }
+        let json = serde_json::to_string_pretty(&serde_json::Value::Object(analysis))
+            .map_err(to_string)?;
+        parsed.push(ParsedChapterAnalysis {
+            id: chapter.id.clone(),
+            json,
+        });
+    }
+
+    Ok(parsed)
+}
+
+fn extract_batch_level_analysis_json(value: &serde_json::Value) -> Result<String, String> {
+    let candidate = value
+        .get("batch_assets")
+        .or_else(|| value.get("consistency_assets"))
+        .or_else(|| value.get("assets"))
+        .or_else(|| value.get("analysis"))
+        .unwrap_or(value);
+    let object = candidate
+        .as_object()
+        .ok_or_else(|| "批次级分析 JSON 必须是对象。".to_string())?;
+    if object.contains_key("chapters") {
+        return Err("检测到逐章 chapters 输出。".to_string());
+    }
+    let useful_fields = [
+        "outline",
+        "characters",
+        "relationships",
+        "locations",
+        "foreshadowing",
+        "terms",
+        "names",
+    ];
+    if !useful_fields
+        .iter()
+        .any(|field| object.contains_key(*field))
+    {
+        return Err("批次级分析 JSON 缺少一致性资产字段。".to_string());
+    }
+    serde_json::to_string_pretty(candidate).map_err(to_string)
+}
+
+fn parse_batch_analysis_marker_output(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    let mut cursor = output.replace("\r\n", "\n").replace('\r', "\n");
+    let mut parsed = Vec::with_capacity(expected_chapters.len());
+
+    for chapter in expected_chapters {
+        let start_marker = analysis_chapter_start_marker(chapter);
+        let end_marker = analysis_chapter_end_marker(chapter);
+        let start_pos = cursor
+            .find(&start_marker)
+            .ok_or_else(|| format!("AI 输出缺少章节分析开始标记：{}", start_marker))?;
+        if !cursor[..start_pos].trim().is_empty() {
+            return Err(format!(
+                "AI 输出在章节 {} 分析开始标记前包含多余内容。",
+                chapter.index
+            ));
+        }
+        let after_start = cursor[start_pos + start_marker.len()..].to_string();
+        let end_pos = after_start
+            .find(&end_marker)
+            .ok_or_else(|| format!("AI 输出缺少章节分析结束标记：{}", end_marker))?;
+        let block = after_start[..end_pos].trim();
+        if block.trim().is_empty() {
+            return Err(format!("章节 {} 的分析 JSON 为空。", chapter.index));
+        }
+        let value = parse_jsonish_value(block)
+            .map_err(|error| format!("章节 {} 的分析 JSON 无效：{}", chapter.index, error))?;
+        let normalized = serde_json::to_string_pretty(&value).map_err(to_string)?;
+        parsed.push(ParsedChapterAnalysis {
+            id: chapter.id.clone(),
+            json: normalized,
+        });
+        cursor = after_start[end_pos + end_marker.len()..].to_string();
+    }
+
+    if !cursor.trim().is_empty() {
+        return Err("AI 输出在最后一个章节分析结束标记后包含多余内容。".to_string());
+    }
+    Ok(parsed)
 }
 
 fn parse_batch_rewrite_output(
@@ -2124,6 +2562,16 @@ fn mark_chapters_rewrite_failed(
 ) -> Result<(), String> {
     for chapter in chapters {
         set_chapter_status(state, &chapter.id, "rewrite_status", "failed")?;
+    }
+    Ok(())
+}
+
+fn mark_chapters_analysis_failed(
+    state: &State<'_, AppState>,
+    chapters: &[Chapter],
+) -> Result<(), String> {
+    for chapter in chapters {
+        set_chapter_status(state, &chapter.id, "analysis_status", "failed")?;
     }
     Ok(())
 }
@@ -2241,6 +2689,47 @@ fn build_rewrite_prompt_with_settings(
         canon_text,
         chapter.title,
         truncate_text(&chapter.original_text, 30_000)
+    )
+}
+
+fn build_batch_analysis_prompt(chapters: &[Chapter]) -> String {
+    let (start_index, end_index) = match (chapters.first(), chapters.last()) {
+        (Some(first), Some(last)) => (first.index, last.index),
+        _ => (0, 0),
+    };
+    format!(
+        r#"请只基于原文分析以下整个批次，并输出一个合法 JSON 对象。
+
+输出结构必须是：
+{{
+  "batch": {{
+    "start_index": {},
+    "end_index": {},
+    "chapter_count": {}
+  }},
+  "outline": ["本批次原文主线、关键事件和状态变化，按时间顺序概括"],
+  "characters": ["本批次出现的重要人物、别名、身份、外貌、性格、动机、能力或状态变化"],
+  "relationships": ["本批次人物关系与关系变化"],
+  "locations": ["本批次地点、场景和空间关系"],
+  "foreshadowing": ["本批次伏笔、悬念、回收或关键信息"],
+  "terms": ["本批次术语、组织、物品、功法、系统规则等"],
+  "names": ["本批次出现的人名、称谓、别名和指代对象"]
+}}
+
+要求：
+1. 输入是一个完整批次，必须一次性分析完整批次。
+2. 只输出一份批次级一致性资产，不要按章节逐章输出，不要输出 `chapters` 数组。
+3. 不要补充原文没有的信息，不要改变原文人物、姓名、关系或剧情。
+4. 不要提出任何后续处理方向。
+5. JSON 字符串内部如果需要换行，必须写成 `\n`，不要在字符串里输出真实换行或其他控制字符。
+6. 只输出 JSON，不要解释、不要 Markdown。
+
+原文批次：
+{}"#,
+        start_index,
+        end_index,
+        chapters.len(),
+        build_batch_analysis_chapter_text(chapters)
     )
 }
 
@@ -2409,6 +2898,20 @@ fn collect_analysis_terms(rows: &[(String, String)]) -> String {
         .filter_map(|(title, analysis_json)| {
             let value = serde_json::from_str::<serde_json::Value>(analysis_json).ok()?;
             let mut sections = Vec::new();
+            if let Some(text) = value
+                .get("terms")
+                .map(json_field_to_text)
+                .filter(|text| !text.trim().is_empty())
+            {
+                sections.push(format!("原文术语：\n{}", text));
+            }
+            if let Some(text) = value
+                .get("names")
+                .map(json_field_to_text)
+                .filter(|text| !text.trim().is_empty())
+            {
+                sections.push(format!("原文姓名与称谓：\n{}", text));
+            }
             if let Some(text) = value
                 .get("name_feminization_map")
                 .map(json_field_to_text)
@@ -2803,6 +3306,57 @@ fn normalize_jsonish(text: &str) -> String {
         .to_string()
 }
 
+fn parse_jsonish_value(text: &str) -> Result<serde_json::Value, String> {
+    let normalized = normalize_jsonish(text);
+    match serde_json::from_str::<serde_json::Value>(&normalized) {
+        Ok(value) => Ok(value),
+        Err(first_error) => {
+            let repaired = escape_unescaped_json_control_chars(&normalized);
+            if repaired != normalized {
+                serde_json::from_str::<serde_json::Value>(&repaired).map_err(|second_error| {
+                    format!("{}；修复控制字符后仍失败：{}", first_error, second_error)
+                })
+            } else {
+                Err(first_error.to_string())
+            }
+        }
+    }
+}
+
+fn escape_unescaped_json_control_chars(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if escaped {
+            output.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => {
+                output.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                output.push(ch);
+                in_string = !in_string;
+            }
+            '\n' if in_string => output.push_str("\\n"),
+            '\r' if in_string => output.push_str("\\r"),
+            '\t' if in_string => output.push_str("\\t"),
+            ch if in_string && ch.is_control() => {
+                output.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            _ => output.push(ch),
+        }
+    }
+
+    output
+}
+
 fn normalize_name_list(input: &str) -> String {
     input
         .split(|ch| matches!(ch, '\n' | '\r' | ',' | '，' | '、' | ';' | '；'))
@@ -2898,6 +3452,178 @@ mod tests {
     }
 
     #[test]
+    fn batch_analysis_markers_round_trip() {
+        let chapters = vec![
+            sample_chapter(1, "第一章", "原文一"),
+            sample_chapter(2, "第二章", "原文二"),
+        ];
+        let output = format!(
+            "{}\n{{\"outline\":\"大纲一\",\"characters\":[\"萧炎\"],\"relationships\":[],\"locations\":[],\"foreshadowing\":[],\"terms\":[],\"names\":[\"萧炎\"]}}\n{}\n\n{}\n{{\"outline\":\"大纲二\",\"characters\":[\"药老\"],\"relationships\":[],\"locations\":[],\"foreshadowing\":[],\"terms\":[],\"names\":[\"药老\"]}}\n{}",
+            analysis_chapter_start_marker(&chapters[0]),
+            analysis_chapter_end_marker(&chapters[0]),
+            analysis_chapter_start_marker(&chapters[1]),
+            analysis_chapter_end_marker(&chapters[1])
+        );
+
+        let parsed = parse_batch_analysis_output(&output, &chapters).expect("valid batch output");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "chapter-1");
+        assert!(parsed[0].json.contains("大纲一"));
+        assert_eq!(parsed[1].id, "chapter-2");
+        assert!(parsed[1].json.contains("大纲二"));
+    }
+
+    #[test]
+    fn batch_analysis_json_output_round_trip_without_markers() {
+        let chapters = vec![
+            sample_chapter(1, "第一章", "原文一"),
+            sample_chapter(2, "第二章", "原文二"),
+        ];
+        let output = format!(
+            r#"{{
+  "chapters": [
+    {{
+      "index": 1,
+      "id": "{}",
+      "title": "第一章",
+      "analysis": {{
+        "outline": "大纲一",
+        "characters": ["萧炎"],
+        "relationships": [],
+        "locations": [],
+        "foreshadowing": [],
+        "terms": [],
+        "names": ["萧炎"]
+      }}
+    }},
+    {{
+      "index": 2,
+      "id": "{}",
+      "title": "第二章",
+      "analysis": {{
+        "outline": "大纲二",
+        "characters": ["药老"],
+        "relationships": [],
+        "locations": [],
+        "foreshadowing": [],
+        "terms": [],
+        "names": ["药老"]
+      }}
+    }}
+  ]
+}}"#,
+            chapters[0].id, chapters[1].id
+        );
+
+        let parsed = parse_batch_analysis_output(&output, &chapters).expect("valid json output");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "chapter-1");
+        assert!(parsed[0].json.contains("大纲一"));
+        assert_eq!(parsed[1].id, "chapter-2");
+        assert!(parsed[1].json.contains("大纲二"));
+    }
+
+    #[test]
+    fn batch_analysis_json_output_accepts_batch_level_assets() {
+        let chapters = vec![
+            sample_chapter(1, "第一章", "原文一"),
+            sample_chapter(2, "第二章", "原文二"),
+        ];
+        let output = r#"{
+  "batch": {"start_index": 1, "end_index": 2, "chapter_count": 2},
+  "outline": ["萧炎进入大厅并遇见药老。"],
+  "characters": ["萧炎：少年。", "药老：神秘人物。"],
+  "relationships": ["萧炎与药老建立联系。"],
+  "locations": ["大厅"],
+  "foreshadowing": ["药老身份仍有悬念。"],
+  "terms": ["斗气"],
+  "names": ["萧炎", "药老"]
+}"#;
+
+        let parsed =
+            parse_batch_analysis_output(output, &chapters).expect("valid batch-level output");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "chapter-1");
+        assert!(parsed[0].json.contains("萧炎进入大厅"));
+        assert!(parsed[0].json.contains("斗气"));
+    }
+
+    #[test]
+    fn batch_analysis_json_output_repairs_control_chars_inside_strings() {
+        let chapters = vec![sample_chapter(1, "第一章", "原文一")];
+        let output = format!(
+            r#"{{
+  "chapters": [
+    {{
+      "index": 1,
+      "id": "{}",
+      "title": "第一章",
+      "analysis": {{
+        "outline": "第一行
+第二行",
+        "characters": ["萧炎	少年"],
+        "relationships": [],
+        "locations": [],
+        "foreshadowing": [],
+        "terms": [],
+        "names": ["萧炎"]
+      }}
+    }}
+  ]
+}}"#,
+            chapters[0].id
+        );
+
+        let parsed = parse_batch_analysis_output(&output, &chapters)
+            .expect("control characters inside JSON strings should be repaired");
+
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].json.contains("\\n"));
+        assert!(parsed[0].json.contains("\\t"));
+    }
+
+    #[test]
+    fn batch_analysis_parser_rejects_missing_out_of_order_or_invalid_json() {
+        let chapters = vec![
+            sample_chapter(1, "第一章", "原文一"),
+            sample_chapter(2, "第二章", "原文二"),
+        ];
+        let valid_first = "{\"outline\":\"大纲一\"}";
+        let valid_second = "{\"outline\":\"大纲二\"}";
+        let missing_second = format!(
+            "{}\n{}\n{}",
+            analysis_chapter_start_marker(&chapters[0]),
+            valid_first,
+            analysis_chapter_end_marker(&chapters[0])
+        );
+        assert!(parse_batch_analysis_output(&missing_second, &chapters).is_err());
+
+        let out_of_order = format!(
+            "{}\n{}\n{}\n\n{}\n{}\n{}",
+            analysis_chapter_start_marker(&chapters[1]),
+            valid_second,
+            analysis_chapter_end_marker(&chapters[1]),
+            analysis_chapter_start_marker(&chapters[0]),
+            valid_first,
+            analysis_chapter_end_marker(&chapters[0])
+        );
+        assert!(parse_batch_analysis_output(&out_of_order, &chapters).is_err());
+
+        let invalid_json = format!(
+            "{}\nnot-json\n{}\n\n{}\n{}\n{}",
+            analysis_chapter_start_marker(&chapters[0]),
+            analysis_chapter_end_marker(&chapters[0]),
+            analysis_chapter_start_marker(&chapters[1]),
+            valid_second,
+            analysis_chapter_end_marker(&chapters[1])
+        );
+        assert!(parse_batch_analysis_output(&invalid_json, &chapters).is_err());
+    }
+
+    #[test]
     fn export_body_contains_only_completed_rewrites() {
         let mut completed = sample_chapter(1, "第一章", "不应导出的原文一");
         completed.rewrite_status = "completed".to_string();
@@ -2919,7 +3645,7 @@ mod tests {
     #[test]
     fn analysis_prompt_does_not_include_rewrite_instructions() {
         let chapter = sample_chapter(1, "第一章", "萧炎走进大厅。");
-        let prompt = build_analysis_prompt(&chapter);
+        let prompt = build_batch_analysis_prompt(&[chapter]);
 
         for forbidden in ["百合", "改写", "女性化", "代词替换", "双女主"] {
             assert!(
@@ -2953,6 +3679,87 @@ mod tests {
         assert!(creative_prompt.contains("创意模式"));
         assert!(creative_prompt.contains("更多女性化描写"));
         assert!(creative_prompt.contains("女性外貌描写"));
+    }
+
+    #[test]
+    fn deepseek_detection_covers_official_and_proxy_configs() {
+        let mut profile = ModelProfile {
+            id: "profile-1".to_string(),
+            name: "DeepSeek".to_string(),
+            provider: "OpenAI 兼容".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            temperature: 0.7,
+            thinking_mode: "auto".to_string(),
+            has_api_key: true,
+            updated_at: "now".to_string(),
+        };
+        assert!(is_deepseek_profile(
+            &profile,
+            "https://api.deepseek.com/v1",
+            "deepseek-chat"
+        ));
+
+        profile.base_url = "https://example-proxy.invalid/v1".to_string();
+        profile.model = "deepseek-v4-pro".to_string();
+        assert!(is_deepseek_profile(
+            &profile,
+            "https://example-proxy.invalid/v1",
+            "deepseek-v4-pro"
+        ));
+
+        profile.model = "gpt-4o".to_string();
+        assert!(!is_deepseek_profile(
+            &profile,
+            "https://example-proxy.invalid/v1",
+            "gpt-4o"
+        ));
+    }
+
+    #[test]
+    fn thinking_mode_parameters_are_provider_specific() {
+        let mut profile = ModelProfile {
+            id: "profile-1".to_string(),
+            name: "OpenRouter".to_string(),
+            provider: "openai-compatible".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model: "anthropic/claude-sonnet-4".to_string(),
+            temperature: 0.7,
+            thinking_mode: "off".to_string(),
+            has_api_key: true,
+            updated_at: "now".to_string(),
+        };
+
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload["reasoning"]["effort"], "none");
+
+        profile.base_url = "https://api.openai.com/v1".to_string();
+        profile.model = "gpt-5.1".to_string();
+        profile.thinking_mode = "on".to_string();
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload["reasoning_effort"], "medium");
+
+        profile.provider = "gemini".to_string();
+        profile.model = "gemini-2.5-flash".to_string();
+        profile.thinking_mode = "off".to_string();
+        let mut payload = json!({ "generationConfig": {} });
+        assert!(apply_gemini_thinking_control(&mut payload, &profile));
+        assert_eq!(
+            payload["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            0
+        );
     }
 
     #[test]

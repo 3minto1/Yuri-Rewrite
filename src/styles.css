@@ -414,7 +414,7 @@ pre {
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(320px, 0.8fr) minmax(560px, 1.6fr);
-  grid-template-rows: minmax(246px, auto) minmax(520px, 1fr);
+  grid-template-rows: minmax(0, auto) minmax(360px, 1fr);
   min-height: 0;
   overflow: auto;
   padding: 14px 22px 22px;
@@ -551,6 +551,10 @@ pre {
   padding: 4px;
 }
 
+.mode-toggle-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .mode-toggle button {
   border-color: transparent;
   min-height: 34px;
@@ -598,6 +602,7 @@ pre {
 .panel-heading {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 12px;
@@ -620,6 +625,57 @@ pre {
   display: grid;
   gap: 10px;
   grid-template-columns: 1fr 1fr;
+}
+
+.model-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-full {
+  grid-column: 1 / -1;
+}
+
+.model-panel .panel-heading {
+  align-items: flex-start;
+}
+
+.model-panel {
+  max-height: min(560px, calc(100vh - 270px));
+  overflow: auto;
+}
+
+.model-panel .panel-actions {
+  flex: 1 1 210px;
+}
+
+.model-panel .panel-actions button {
+  flex: 1 1 98px;
+  min-width: 0;
+}
+
+@media (max-width: 1180px) {
+  .model-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .model-panel {
+    max-height: min(520px, calc(100vh - 230px));
+  }
+}
+
+@media (max-width: 920px) {
+  .content-grid {
+    grid-template-columns: minmax(280px, 1fr);
+    grid-template-rows: none;
+  }
+
+  .canon-panel {
+    grid-row: auto;
+  }
+
+  .model-panel {
+    max-height: none;
+  }
 }
 
 label {
