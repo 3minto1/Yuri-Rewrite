@@ -83,6 +83,7 @@ struct NovelSettings {
     additional_feminize_names: String,
     bust: String,
     body_type: String,
+    rewrite_mode: String,
     advanced_settings: String,
     updated_at: String,
 }
@@ -320,6 +321,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             additional_feminize_names TEXT NOT NULL,
             bust TEXT NOT NULL,
             body_type TEXT NOT NULL,
+            rewrite_mode TEXT NOT NULL DEFAULT 'strict',
             advanced_settings TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL,
             FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
@@ -352,6 +354,12 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "novel_settings",
         "advanced_settings",
         "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "novel_settings",
+        "rewrite_mode",
+        "TEXT NOT NULL DEFAULT 'strict'",
     )?;
     Ok(())
 }
@@ -705,6 +713,7 @@ fn save_novel_settings(
     additional_feminize_names: String,
     bust: String,
     body_type: String,
+    rewrite_mode: String,
     advanced_settings: String,
     state: State<AppState>,
 ) -> Result<NovelSettings, String> {
@@ -712,6 +721,7 @@ fn save_novel_settings(
     let additional_feminize_names = normalize_name_list(&additional_feminize_names);
     let bust = bust.trim();
     let body_type = body_type.trim();
+    let rewrite_mode = rewrite_mode.trim();
     if protagonist_name.is_empty() {
         return Err("主角姓名为必填项。".to_string());
     }
@@ -722,25 +732,31 @@ fn save_novel_settings(
         return Err("体型只能选择萝莉、御姐或少女。".to_string());
     }
 
+    if !["strict", "creative"].contains(&rewrite_mode) {
+        return Err("改写模式只能选择严谨模式或创意模式。".to_string());
+    }
+
     let settings = NovelSettings {
         novel_id: novel_id.clone(),
         protagonist_name: protagonist_name.to_string(),
         additional_feminize_names,
         bust: bust.to_string(),
         body_type: body_type.to_string(),
+        rewrite_mode: rewrite_mode.to_string(),
         advanced_settings: advanced_settings.trim().to_string(),
         updated_at: Utc::now().to_rfc3339(),
     };
     let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
         r#"
-        INSERT INTO novel_settings (novel_id, protagonist_name, additional_feminize_names, bust, body_type, advanced_settings, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        INSERT INTO novel_settings (novel_id, protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         ON CONFLICT(novel_id) DO UPDATE SET
             protagonist_name = excluded.protagonist_name,
             additional_feminize_names = excluded.additional_feminize_names,
             bust = excluded.bust,
             body_type = excluded.body_type,
+            rewrite_mode = excluded.rewrite_mode,
             advanced_settings = excluded.advanced_settings,
             updated_at = excluded.updated_at
         "#,
@@ -750,6 +766,7 @@ fn save_novel_settings(
             settings.additional_feminize_names,
             settings.bust,
             settings.body_type,
+            settings.rewrite_mode,
             settings.advanced_settings,
             settings.updated_at
         ],
@@ -1661,7 +1678,7 @@ fn load_chapter_batches(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter
 
 fn load_novel_settings(conn: &Connection, novel_id: &str) -> Result<Option<NovelSettings>, String> {
     let result = conn.query_row(
-        "SELECT novel_id, protagonist_name, additional_feminize_names, bust, body_type, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
+        "SELECT novel_id, protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
         params![novel_id],
         row_to_novel_settings,
     );
@@ -1678,6 +1695,7 @@ fn require_novel_settings(conn: &Connection, novel_id: &str) -> Result<NovelSett
     if settings.protagonist_name.trim().is_empty()
         || settings.bust.trim().is_empty()
         || settings.body_type.trim().is_empty()
+        || settings.rewrite_mode.trim().is_empty()
     {
         return Err("请先填写设定".to_string());
     }
@@ -1884,6 +1902,7 @@ fn normalize_model_name(base_url: &str, model: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
     let additional = if settings.additional_feminize_names.trim().is_empty() {
         "无".to_string()
@@ -1921,6 +1940,65 @@ fn format_batch_label(chapters: &[Chapter]) -> String {
         (Some(first), Some(last)) if first.index == last.index => format!("第{}章", first.index),
         (Some(first), Some(last)) => format!("第{}-{}章", first.index, last.index),
         _ => "空批次".to_string(),
+    }
+}
+
+fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
+    let additional_names = if settings.additional_feminize_names.trim().is_empty() {
+        "无".to_string()
+    } else {
+        settings.additional_feminize_names.clone()
+    };
+    let advanced_settings = if settings.advanced_settings.trim().is_empty() {
+        "无".to_string()
+    } else {
+        settings.advanced_settings.trim().to_string()
+    };
+
+    format!(
+        r#"小说基本设定：
+- 主角原姓名：{}
+- 其他需要女性化的人物姓名：{}
+- 身材：{}
+- 体型：{}
+- 改写模式：{}
+
+{}
+
+高级设定：
+{}
+
+姓名女性化规则：
+1. 主角姓名必须女性化，不能保留明显男性化姓名。
+2. 优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
+3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
+4. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
+5. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。"#,
+        settings.protagonist_name,
+        additional_names,
+        settings.bust,
+        settings.body_type,
+        rewrite_mode_label(&settings.rewrite_mode),
+        rewrite_mode_prompt(&settings.rewrite_mode),
+        advanced_settings
+    )
+}
+
+fn rewrite_mode_label(mode: &str) -> &'static str {
+    match mode {
+        "creative" => "创意模式",
+        _ => "严谨模式",
+    }
+}
+
+fn rewrite_mode_prompt(mode: &str) -> &'static str {
+    match mode {
+        "creative" => {
+            "改写模式规则：当前为创意模式。AI 在保留主线、人物关系、关键事件和章节顺序的同时，可以加入更多女性化描写，让读者更直观意识到主角从男性变为了女性；包括但不限于女性外貌描写、神态描写、女性细节，以及主角作为女性与周围人物互动方式的自然变化。新增内容必须服务于原剧情，不得破坏核心逻辑。"
+        }
+        _ => {
+            "改写模式规则：当前为严谨模式。AI 必须更加忠于原文，不做过大改动，不对主角添加过多额外女性化描写；但必要的女性化描写不能减少，原文本身已有的男性化描写在改写后必须自然转换为女性化描写。"
+        }
     }
 }
 
@@ -2070,7 +2148,7 @@ fn build_analysis_prompt_with_settings(chapter: &Chapter, settings: &NovelSettin
 
 章节正文：
 {}"#,
-        build_novel_settings_prompt(settings),
+        build_rewrite_settings_prompt(settings),
         chapter.title,
         truncate_text(&chapter.original_text, 30_000)
     )
@@ -2099,7 +2177,7 @@ fn build_batch_rewrite_prompt_with_settings(
 
 原批次：
 {}"#,
-        build_novel_settings_prompt(settings),
+        build_rewrite_settings_prompt(settings),
         canon_text,
         build_batch_chapter_text(chapters, false)
     )
@@ -2130,7 +2208,7 @@ fn build_batch_review_prompt_with_settings(
 
 待复检改写稿：
 {}"#,
-        build_novel_settings_prompt(settings),
+        build_rewrite_settings_prompt(settings),
         build_batch_rewrite_text(chapters, rewrites)
     )
 }
@@ -2159,7 +2237,7 @@ fn build_rewrite_prompt_with_settings(
 
 原章节：
 {}"#,
-        build_novel_settings_prompt(settings),
+        build_rewrite_settings_prompt(settings),
         canon_text,
         chapter.title,
         truncate_text(&chapter.original_text, 30_000)
@@ -2642,8 +2720,9 @@ fn row_to_novel_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<NovelSetti
         additional_feminize_names: row.get(2)?,
         bust: row.get(3)?,
         body_type: row.get(4)?,
-        advanced_settings: row.get(5)?,
-        updated_at: row.get(6)?,
+        rewrite_mode: row.get(5)?,
+        advanced_settings: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -2848,6 +2927,32 @@ mod tests {
                 "prompt contains forbidden term: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn rewrite_settings_prompt_includes_selected_rewrite_mode() {
+        let strict_settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            additional_feminize_names: "".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: "".to_string(),
+            updated_at: "now".to_string(),
+        };
+        let mut creative_settings = strict_settings.clone();
+        creative_settings.rewrite_mode = "creative".to_string();
+
+        let strict_prompt = build_rewrite_settings_prompt(&strict_settings);
+        let creative_prompt = build_rewrite_settings_prompt(&creative_settings);
+
+        assert!(strict_prompt.contains("严谨模式"));
+        assert!(strict_prompt.contains("更加忠于原文"));
+        assert!(strict_prompt.contains("不对主角添加过多额外女性化描写"));
+        assert!(creative_prompt.contains("创意模式"));
+        assert!(creative_prompt.contains("更多女性化描写"));
+        assert!(creative_prompt.contains("女性外貌描写"));
     }
 
     #[test]

@@ -529,6 +529,40 @@ pre {
   padding: 10px 12px;
 }
 
+.mode-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mode-field > span {
+  color: #5c554c;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.mode-toggle {
+  background: #efebe2;
+  border: 1px solid #d5ccbd;
+  border-radius: 7px;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 4px;
+}
+
+.mode-toggle button {
+  border-color: transparent;
+  min-height: 34px;
+  width: 100%;
+}
+
+.mode-toggle button.active {
+  background: #2f6f6b;
+  border-color: #2f6f6b;
+  color: #fff;
+}
+
 .batch-strip {
   align-items: center;
   background: #fff;

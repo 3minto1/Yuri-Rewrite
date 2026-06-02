@@ -65,6 +65,7 @@ type NovelSettings = {
   additional_feminize_names: string;
   bust: string;
   body_type: string;
+  rewrite_mode: "strict" | "creative";
   advanced_settings: string;
   updated_at: string;
 };
@@ -145,6 +146,7 @@ type NovelSettingsDraft = {
   additional_feminize_names: string;
   bust: string;
   body_type: string;
+  rewrite_mode: "strict" | "creative";
   advanced_settings: string;
 };
 
@@ -162,6 +164,7 @@ const emptyNovelSettings: NovelSettingsDraft = {
   additional_feminize_names: "",
   bust: "平胸",
   body_type: "少女",
+  rewrite_mode: "strict",
   advanced_settings: ""
 };
 
@@ -269,6 +272,7 @@ export default function App() {
             additional_feminize_names: next.settings.additional_feminize_names,
             bust: next.settings.bust,
             body_type: next.settings.body_type,
+            rewrite_mode: next.settings.rewrite_mode === "creative" ? "creative" : "strict",
             advanced_settings: next.settings.advanced_settings
           }
         : emptyNovelSettings
@@ -326,6 +330,7 @@ export default function App() {
         additionalFeminizeNames: novelSettingsDraft.additional_feminize_names,
         bust: novelSettingsDraft.bust,
         bodyType: novelSettingsDraft.body_type,
+        rewriteMode: novelSettingsDraft.rewrite_mode,
         advancedSettings: novelSettingsDraft.advanced_settings
       });
       setDetail({ ...detail, settings: saved });
@@ -334,6 +339,7 @@ export default function App() {
         additional_feminize_names: saved.additional_feminize_names,
         bust: saved.bust,
         body_type: saved.body_type,
+        rewrite_mode: saved.rewrite_mode === "creative" ? "creative" : "strict",
         advanced_settings: saved.advanced_settings
       });
       setSettingsDialog(null);
@@ -618,6 +624,36 @@ export default function App() {
   function displayChapterTitle(chapter: Chapter) {
     const title = chapter.title.replace(/\s+/g, " ").trim();
     return title || `第 ${chapter.index} 章`;
+  }
+
+  function renderRewriteModeControl() {
+    return (
+      <div className="mode-field">
+        <span>改写模式</span>
+        <div className="mode-toggle" role="radiogroup" aria-label="改写模式">
+          <button
+            type="button"
+            className={novelSettingsDraft.rewrite_mode === "strict" ? "active" : ""}
+            title="AI会更加忠于原文，不做过大改动"
+            aria-checked={novelSettingsDraft.rewrite_mode === "strict"}
+            role="radio"
+            onClick={() => setNovelSettingsDraft({ ...novelSettingsDraft, rewrite_mode: "strict" })}
+          >
+            严谨模式
+          </button>
+          <button
+            type="button"
+            className={novelSettingsDraft.rewrite_mode === "creative" ? "active" : ""}
+            title="AI会更加有创意，可能产生较大改动"
+            aria-checked={novelSettingsDraft.rewrite_mode === "creative"}
+            role="radio"
+            onClick={() => setNovelSettingsDraft({ ...novelSettingsDraft, rewrite_mode: "creative" })}
+          >
+            创意模式
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -913,6 +949,7 @@ export default function App() {
                       <option value="少女">少女</option>
                     </select>
                   </label>
+                  {renderRewriteModeControl()}
                 </div>
                 <p className="settings-note">
                   分析和改写会自动附带这些设定。主角姓名会按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉。
@@ -1172,6 +1209,7 @@ export default function App() {
                         <option value="少女">少女</option>
                       </select>
                     </label>
+                    {renderRewriteModeControl()}
                   </div>
                 </div>
                 <footer className="dialog-actions">
