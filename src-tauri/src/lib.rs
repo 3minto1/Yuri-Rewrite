@@ -16,8 +16,7 @@ use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "YuriRewrite";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/3minto1/Yuri-Rewrite";
-const GITHUB_LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/3minto1/Yuri-Rewrite/releases/latest";
+const GITHUB_LATEST_RELEASE_URL: &str = "https://github.com/3minto1/Yuri-Rewrite/releases/latest";
 
 struct AppState {
     conn: Mutex<Connection>,
@@ -1333,24 +1332,32 @@ fn build_rewritten_export_body(chapters: &[Chapter]) -> Result<String, String> {
 
 async fn fetch_latest_update(client: &Client) -> Result<UpdateCheckResult, String> {
     let response = client
-        .get(GITHUB_LATEST_RELEASE_API)
+        .get(GITHUB_LATEST_RELEASE_URL)
         .header("User-Agent", "YuriRewrite")
-        .header("Accept", "application/vnd.github+json")
         .send()
         .await
         .map_err(to_string)?;
-    let (value, _) = response_json_or_error(response).await?;
-    let latest_tag = value["tag_name"]
-        .as_str()
-        .ok_or_else(|| "GitHub 最新发布信息缺少 tag_name。".to_string())?
-        .to_string();
+    let status = response.status();
+    let final_url = response.url().to_string();
+    if !status.is_success() {
+        let body = response.text().await.map_err(to_string)?;
+        return Err(format!(
+            "检查更新失败 HTTP {}: {}",
+            status,
+            compact_error_body(&body)
+        ));
+    }
+
+    let latest_tag = release_tag_from_url(&final_url)
+        .ok_or_else(|| format!("无法从 GitHub 最新发布地址解析版本：{}", final_url))?;
     let latest_version = normalize_release_version(&latest_tag);
     let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let release_url = value["html_url"]
-        .as_str()
-        .unwrap_or(GITHUB_REPOSITORY_URL)
-        .to_string();
-    let (asset_name, asset_download_url) = select_portable_zip_asset(&value)?;
+    let release_url = format!("{}/releases/tag/{}", GITHUB_REPOSITORY_URL, latest_tag);
+    let asset_name = portable_zip_name(&latest_version);
+    let asset_download_url = format!(
+        "{}/releases/download/{}/{}",
+        GITHUB_REPOSITORY_URL, latest_tag, asset_name
+    );
 
     Ok(UpdateCheckResult {
         current_version: current_version.clone(),
@@ -1363,34 +1370,23 @@ async fn fetch_latest_update(client: &Client) -> Result<UpdateCheckResult, Strin
     })
 }
 
-fn select_portable_zip_asset(value: &serde_json::Value) -> Result<(String, String), String> {
-    let assets = value["assets"]
-        .as_array()
-        .ok_or_else(|| "GitHub 最新发布信息缺少 assets。".to_string())?;
-    let selected = assets
-        .iter()
-        .filter_map(|asset| {
-            let name = asset["name"].as_str()?;
-            let url = asset["browser_download_url"].as_str()?;
-            Some((name, url))
-        })
-        .find(|(name, _)| {
-            let lower = name.to_ascii_lowercase();
-            lower.ends_with(".zip") && lower.contains("windows") && lower.contains("x64")
-        })
-        .or_else(|| {
-            assets
-                .iter()
-                .filter_map(|asset| {
-                    let name = asset["name"].as_str()?;
-                    let url = asset["browser_download_url"].as_str()?;
-                    Some((name, url))
-                })
-                .find(|(name, _)| name.to_ascii_lowercase().ends_with(".zip"))
-        })
-        .ok_or_else(|| "最新发布中没有可下载的 zip 压缩包。".to_string())?;
+fn release_tag_from_url(url: &str) -> Option<String> {
+    let clean_url = url.split(['?', '#']).next().unwrap_or(url);
+    let segments = clean_url
+        .split('/')
+        .filter(|segment| !segment.trim().is_empty())
+        .collect::<Vec<_>>();
+    segments
+        .windows(2)
+        .find(|pair| pair[0] == "tag")
+        .map(|pair| pair[1].to_string())
+}
 
-    Ok((selected.0.to_string(), selected.1.to_string()))
+fn portable_zip_name(version: &str) -> String {
+    format!(
+        "YuriRewrite-v{}-windows-x64.zip",
+        normalize_release_version(version)
+    )
 }
 
 fn normalize_release_version(version: &str) -> String {
@@ -2852,6 +2848,21 @@ mod tests {
                 "prompt contains forbidden term: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn update_check_parses_release_redirect_url_without_api() {
+        let tag =
+            release_tag_from_url("https://github.com/3minto1/Yuri-Rewrite/releases/tag/v0.1.2")
+                .expect("release tag");
+
+        assert_eq!(tag, "v0.1.2");
+        assert_eq!(
+            portable_zip_name(&normalize_release_version(&tag)),
+            "YuriRewrite-v0.1.2-windows-x64.zip"
+        );
+        assert!(is_newer_version("0.1.2", "0.1.1"));
+        assert!(!is_newer_version("0.1.1", "0.1.1"));
     }
 
     #[test]
