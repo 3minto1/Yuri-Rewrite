@@ -63,6 +63,7 @@ type ChapterBatch = {
 type NovelSettings = {
   novel_id: string;
   protagonist_name: string;
+  rewritten_protagonist_name: string;
   additional_feminize_names: string;
   bust: string;
   body_type: string;
@@ -148,6 +149,7 @@ type ProfileDraft = {
 
 type NovelSettingsDraft = {
   protagonist_name: string;
+  rewritten_protagonist_name: string;
   additional_feminize_names: string;
   bust: string;
   body_type: string;
@@ -167,6 +169,7 @@ const emptyProfile: ProfileDraft = {
 
 const emptyNovelSettings: NovelSettingsDraft = {
   protagonist_name: "",
+  rewritten_protagonist_name: "",
   additional_feminize_names: "",
   bust: "平胸",
   body_type: "少女",
@@ -204,6 +207,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [noticeDuration, setNoticeDuration] = useState(5000);
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
+  const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const originalCompareRef = useRef<HTMLPreElement | null>(null);
   const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
@@ -224,6 +228,25 @@ export default function App() {
 
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkStartupUpdate() {
+      try {
+        const update = await invoke<UpdateCheckResult>("check_for_updates");
+        if (!cancelled) {
+          setHasAvailableUpdate(!update.is_latest);
+        }
+      } catch {
+        // Startup update checks are intentionally silent when offline or rate-limited.
+      }
+    }
+
+    void checkStartupUpdate();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -286,6 +309,7 @@ export default function App() {
       next.settings
         ? {
             protagonist_name: next.settings.protagonist_name,
+            rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
             additional_feminize_names: next.settings.additional_feminize_names,
             bust: next.settings.bust,
             body_type: next.settings.body_type,
@@ -346,6 +370,7 @@ export default function App() {
       const saved = await invoke<NovelSettings>("save_novel_settings", {
         novelId: detail.novel.id,
         protagonistName: novelSettingsDraft.protagonist_name,
+        rewrittenProtagonistName: novelSettingsDraft.rewritten_protagonist_name,
         additionalFeminizeNames: novelSettingsDraft.additional_feminize_names,
         bust: novelSettingsDraft.bust,
         bodyType: novelSettingsDraft.body_type,
@@ -355,6 +380,7 @@ export default function App() {
       setDetail({ ...detail, settings: saved });
       setNovelSettingsDraft({
         protagonist_name: saved.protagonist_name,
+        rewritten_protagonist_name: saved.rewritten_protagonist_name ?? "",
         additional_feminize_names: saved.additional_feminize_names,
         bust: saved.bust,
         body_type: saved.body_type,
@@ -514,7 +540,7 @@ export default function App() {
       showNotice("请先导入小说并选择模型配置。");
       return;
     }
-    if (kind === "rewrite" && !hasCompleteNovelSettings) {
+    if (!hasCompleteNovelSettings) {
       showNotice("请先填写设定");
       setSettingsDialog("basic");
       return;
@@ -695,10 +721,12 @@ export default function App() {
     try {
       const update = await invoke<UpdateCheckResult>("check_for_updates");
       if (update.is_latest) {
+        setHasAvailableUpdate(false);
         showNotice(`当前已是最新版：${update.current_version}`, 3000);
         return;
       }
 
+      setHasAvailableUpdate(true);
       setPendingUpdate(update);
       showNotice(`当前版本：${update.current_version}，最新版本：${update.latest_version}`, 60_000, true);
     } catch (error) {
@@ -713,6 +741,7 @@ export default function App() {
     try {
       const result = await invoke<UpdateDownloadResult>("download_latest_update");
       setPendingUpdate(null);
+      setHasAvailableUpdate(false);
       showNotice(`已下载 ${result.version}：${result.path}`);
     } catch (error) {
       showNotice(String(error));
@@ -792,13 +821,14 @@ export default function App() {
           <Github size={16} />
           GitHub地址
         </button>
-        <button className="app-menu-item" onClick={checkForUpdates} disabled={busy !== ""}>
+        <button className="app-menu-item update-menu-item" onClick={checkForUpdates} disabled={busy !== ""}>
           {busy === "check-updates" || busy === "download-update" ? (
             <Loader2 className="spin" size={16} />
           ) : (
             <RefreshCw size={16} />
           )}
           检查更新
+          {hasAvailableUpdate && <span className="update-dot" aria-label="发现新版本" />}
         </button>
       </nav>
 
@@ -1059,7 +1089,20 @@ export default function App() {
                       placeholder="例如：萧炎"
                     />
                   </label>
-                  <label>
+                  <label className="settings-rewritten-name-field">
+                    改写后姓名（选填）
+                    <input
+                      value={novelSettingsDraft.rewritten_protagonist_name}
+                      onChange={(event) =>
+                        setNovelSettingsDraft({
+                          ...novelSettingsDraft,
+                          rewritten_protagonist_name: event.target.value
+                        })
+                      }
+                      placeholder="留空则让AI生成改写后姓名"
+                    />
+                  </label>
+                  <label className="settings-additional-names-field">
                     其他需要女性化的人名（选填）
                     <textarea
                       value={novelSettingsDraft.additional_feminize_names}
@@ -1401,9 +1444,22 @@ export default function App() {
                           setNovelSettingsDraft({ ...novelSettingsDraft, protagonist_name: event.target.value })
                         }
                         placeholder="例如：萧炎"
+                    />
+                  </label>
+                    <label className="settings-rewritten-name-field">
+                      改写后姓名（选填）
+                      <input
+                        value={novelSettingsDraft.rewritten_protagonist_name}
+                        onChange={(event) =>
+                          setNovelSettingsDraft({
+                            ...novelSettingsDraft,
+                            rewritten_protagonist_name: event.target.value
+                          })
+                        }
+                        placeholder="留空则让AI生成改写后姓名"
                       />
                     </label>
-                    <label>
+                    <label className="settings-additional-names-field">
                       其他需要女性化的人名（选填）
                       <textarea
                         value={novelSettingsDraft.additional_feminize_names}

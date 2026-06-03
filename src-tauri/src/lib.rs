@@ -82,12 +82,26 @@ struct ChapterBatch {
 struct NovelSettings {
     novel_id: String,
     protagonist_name: String,
+    rewritten_protagonist_name: String,
     additional_feminize_names: String,
     bust: String,
     body_type: String,
     rewrite_mode: String,
     advanced_settings: String,
     updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct NameMappingEntry {
+    source: String,
+    target: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NameMappingAsset {
+    version: i64,
+    protagonist: Option<NameMappingEntry>,
+    names: Vec<NameMappingEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -337,6 +351,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS novel_settings (
             novel_id TEXT PRIMARY KEY,
             protagonist_name TEXT NOT NULL,
+            rewritten_protagonist_name TEXT NOT NULL DEFAULT '',
             additional_feminize_names TEXT NOT NULL,
             bust TEXT NOT NULL,
             body_type TEXT NOT NULL,
@@ -374,6 +389,12 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
+    ensure_column(
+        conn,
+        "novel_settings",
+        "rewritten_protagonist_name",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     ensure_column(
         conn,
         "novel_settings",
@@ -818,6 +839,7 @@ fn get_novel_settings(
 fn save_novel_settings(
     novel_id: String,
     protagonist_name: String,
+    rewritten_protagonist_name: String,
     additional_feminize_names: String,
     bust: String,
     body_type: String,
@@ -826,6 +848,7 @@ fn save_novel_settings(
     state: State<AppState>,
 ) -> Result<NovelSettings, String> {
     let protagonist_name = protagonist_name.trim();
+    let rewritten_protagonist_name = rewritten_protagonist_name.trim();
     let additional_feminize_names = normalize_name_list(&additional_feminize_names);
     let bust = bust.trim();
     let body_type = body_type.trim();
@@ -847,6 +870,7 @@ fn save_novel_settings(
     let settings = NovelSettings {
         novel_id: novel_id.clone(),
         protagonist_name: protagonist_name.to_string(),
+        rewritten_protagonist_name: rewritten_protagonist_name.to_string(),
         additional_feminize_names,
         bust: bust.to_string(),
         body_type: body_type.to_string(),
@@ -857,10 +881,11 @@ fn save_novel_settings(
     let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
         r#"
-        INSERT INTO novel_settings (novel_id, protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        INSERT INTO novel_settings (novel_id, protagonist_name, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(novel_id) DO UPDATE SET
             protagonist_name = excluded.protagonist_name,
+            rewritten_protagonist_name = excluded.rewritten_protagonist_name,
             additional_feminize_names = excluded.additional_feminize_names,
             bust = excluded.bust,
             body_type = excluded.body_type,
@@ -871,6 +896,7 @@ fn save_novel_settings(
         params![
             settings.novel_id,
             settings.protagonist_name,
+            settings.rewritten_protagonist_name,
             settings.additional_feminize_names,
             settings.bust,
             settings.body_type,
@@ -980,10 +1006,12 @@ async fn start_analysis(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (chapters, rewrite_parallelism) = {
+    let (chapters, settings, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
+        let settings = require_novel_settings(&conn, &novel_id)?;
         (
             load_chapters_for_batch(&conn, &novel_id, &batch_id)?,
+            settings,
             load_rewrite_parallelism(&conn)?,
         )
     };
@@ -1025,8 +1053,15 @@ async fn start_analysis(
     };
 
     save_parsed_analyses(&state, &novel_id, &chapters, parsed_analysis)?;
+    ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
 
-    update_job(&state, &job.id, "completed", total, "分析完成")?;
+    update_job(
+        &state,
+        &job.id,
+        "completed",
+        total,
+        "分析完成，姓名映射表已更新",
+    )?;
     get_job(job.id, state)
 }
 
@@ -1039,7 +1074,7 @@ async fn start_rewrite(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (chapters, canon_assets, settings, review_enabled, rewrite_parallelism) = {
+    let (chapters, settings, review_enabled, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, &novel_id)?;
         let chapters = load_chapters_for_batch(&conn, &novel_id, &batch_id)?
@@ -1048,7 +1083,6 @@ async fn start_rewrite(
             .collect::<Vec<_>>();
         (
             chapters,
-            load_canon_assets(&conn, &novel_id)?,
             settings,
             load_review_enabled(&conn)?,
             load_rewrite_parallelism(&conn)?,
@@ -1060,6 +1094,11 @@ async fn start_rewrite(
 
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
+    ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
+    let canon_assets = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_canon_assets(&conn, &novel_id)?
+    };
     let canon_text = build_compact_canon_text(&canon_assets);
     let batch_label = format_batch_label(&chapters);
 
@@ -1242,6 +1281,7 @@ async fn analyze_chapters_for_auto(
     })?;
 
     save_parsed_analyses(state, novel_id, chapters, parsed_analysis)?;
+    ensure_name_mapping_asset_if_settings_available(state, novel_id, profile, api_key).await?;
     Ok(())
 }
 
@@ -1277,13 +1317,13 @@ async fn analyze_batch_with_parallelism(
                 true,
             )
             .await;
-            (idx, shard_label, shard_for_task, output)
+            (idx, shard_label, context, shard_for_task, output)
         });
     }
 
     let mut parsed_by_shard = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        let (idx, shard_label, shard, output) = result.map_err(to_string)?;
+        let (idx, shard_label, context, shard, output) = result.map_err(to_string)?;
         match output {
             Ok(output) => {
                 append_ai_log(
@@ -1311,7 +1351,24 @@ async fn analyze_batch_with_parallelism(
                             output.reasoning.as_deref(),
                             Some(&output.raw_response),
                         )?;
-                        return Err(format!("{}：{}", shard_label, error));
+                        match retry_analysis_shard_after_parse_error(
+                            state,
+                            novel_id,
+                            profile,
+                            api_key,
+                            &shard,
+                            &context,
+                            &shard_label,
+                            &error,
+                            &output.text,
+                        )
+                        .await
+                        {
+                            Ok(parsed) => parsed,
+                            Err(retry_error) => {
+                                return Err(format!("{}：{}", shard_label, retry_error));
+                            }
+                        }
                     }
                 };
                 parsed_by_shard.push((idx, parsed));
@@ -1338,6 +1395,89 @@ async fn analyze_batch_with_parallelism(
         .into_iter()
         .flat_map(|(_, parsed)| parsed)
         .collect())
+}
+
+async fn retry_analysis_shard_after_parse_error(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    shard_context: &str,
+    shard_label: &str,
+    parse_error: &str,
+    bad_output: &str,
+) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    let retry_context = format!(
+        "{}\n\n修复重试：上一次分析输出无法解析，错误：{}。请重新分析当前分片，只输出当前分片级一致性资产 JSON 对象。不要输出 Markdown、解释、空内容或 chapters 数组；JSON 字符串内换行必须写成 \\n。",
+        shard_context.trim(),
+        parse_error
+    );
+    let base_prompt = build_batch_analysis_prompt_with_context(shard, retry_context.trim());
+    let prompt = format!(
+        "{}\n\n上一次无法解析的输出如下，仅供你避开格式错误，不要照抄：\n{}",
+        base_prompt,
+        truncate_text(bad_output, 12_000)
+    );
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是严谨的中文长篇小说结构分析格式修复助手。必须只输出一个合法 JSON 对象，不要输出 Markdown、解释或空内容。",
+        &prompt,
+        true,
+    )
+    .await;
+
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次分析重试",
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, None),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            match parse_batch_analysis_output(&output.text, shard) {
+                Ok(parsed) => Ok(parsed),
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        "批次分析重试解析",
+                        Some(shard_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    Err(format!(
+                        "分析输出解析失败后已自动重试，但重试输出仍无法解析：{}",
+                        error
+                    ))
+                }
+            }
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次分析重试",
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(format!("分析输出解析失败后自动重试也失败：{}", error))
+        }
+    }
 }
 
 fn save_parsed_analyses(
@@ -1367,6 +1507,389 @@ fn save_parsed_analyses(
     Ok(())
 }
 
+async fn ensure_name_mapping_asset(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    settings: &NovelSettings,
+) -> Result<(), String> {
+    let existing_content = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_canon_asset_content(&conn, novel_id, "姓名映射表")?
+    };
+    let mut mappings = parse_name_mapping_entries(existing_content.as_deref().unwrap_or(""));
+    let required_names = required_feminized_name_sources(settings);
+    if required_names.is_empty() {
+        return Ok(());
+    }
+
+    if !settings.rewritten_protagonist_name.trim().is_empty() {
+        upsert_name_mapping_entry(
+            &mut mappings,
+            settings.protagonist_name.trim(),
+            settings.rewritten_protagonist_name.trim(),
+        );
+    }
+
+    let missing_sources = required_names
+        .iter()
+        .filter(|source| {
+            !mappings
+                .iter()
+                .any(|entry| entry.source == **source && !entry.target.trim().is_empty())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !missing_sources.is_empty() {
+        match generate_name_mapping_entries(
+            state,
+            novel_id,
+            profile,
+            api_key,
+            settings,
+            &missing_sources,
+        )
+        .await
+        {
+            Ok(generated) => {
+                for entry in generated {
+                    upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
+                }
+            }
+            Err(error) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "姓名映射生成",
+                    Some("姓名映射表"),
+                    "error",
+                    &format!("AI 姓名映射生成失败，已使用本地兜底规则：{}", error),
+                    None,
+                    None,
+                )?;
+            }
+        }
+    }
+
+    for source in required_names {
+        if !mappings
+            .iter()
+            .any(|entry| entry.source == source && !entry.target.trim().is_empty())
+        {
+            let target = fallback_feminized_name(&source);
+            upsert_name_mapping_entry(&mut mappings, &source, &target);
+        }
+    }
+
+    let content = build_name_mapping_asset_content(settings, mappings)?;
+    let conn = state.conn.lock().map_err(to_string)?;
+    upsert_canon_asset(
+        &conn,
+        novel_id,
+        "姓名映射表",
+        &content,
+        &Utc::now().to_rfc3339(),
+    )
+    .map_err(to_string)?;
+    Ok(())
+}
+
+async fn ensure_name_mapping_asset_if_settings_available(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+) -> Result<bool, String> {
+    let settings = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_novel_settings(&conn, novel_id)?
+    };
+    let Some(settings) = settings else {
+        return Ok(false);
+    };
+    if settings.protagonist_name.trim().is_empty()
+        || settings.bust.trim().is_empty()
+        || settings.body_type.trim().is_empty()
+        || settings.rewrite_mode.trim().is_empty()
+    {
+        return Ok(false);
+    }
+    ensure_name_mapping_asset(state, novel_id, profile, api_key, &settings).await?;
+    Ok(true)
+}
+
+async fn generate_name_mapping_entries(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    settings: &NovelSettings,
+    sources: &[String],
+) -> Result<Vec<NameMappingEntry>, String> {
+    let prompt = build_name_mapping_prompt(settings, sources);
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说姓名女性化映射助手。必须只输出合法 JSON，不要输出 Markdown 或解释。",
+        &prompt,
+        true,
+    )
+    .await?;
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &profile.id,
+        "姓名映射生成",
+        Some("姓名映射表"),
+        "success",
+        &format_model_log_content(&output, profile, None),
+        output.reasoning.as_deref(),
+        Some(&output.raw_response),
+    )?;
+    parse_generated_name_mapping_entries(&output.text, sources)
+}
+
+fn build_name_mapping_prompt(settings: &NovelSettings, sources: &[String]) -> String {
+    let forced = if settings.rewritten_protagonist_name.trim().is_empty() {
+        "无".to_string()
+    } else {
+        format!(
+            "{} -> {}",
+            settings.protagonist_name.trim(),
+            settings.rewritten_protagonist_name.trim()
+        )
+    };
+    format!(
+        r#"请为以下中文小说人物姓名生成固定的女性化姓名映射。
+
+输出 JSON 结构必须是：
+{{
+  "names": [
+    {{ "source": "原姓名", "target": "女性化姓名" }}
+  ]
+}}
+
+要求：
+1. 每个输入姓名都必须输出一条映射。
+2. target 必须是中文姓名，不能为空，不能与 source 完全相同。
+3. 优先保留姓氏，名字部分使用同音或近音的女性化字。
+4. 若存在强制映射，必须逐字使用强制 target。
+5. 只输出 JSON，不要解释、不要 Markdown。
+
+强制映射：
+{}
+
+待生成姓名：
+{}"#,
+        forced,
+        sources.join("\n")
+    )
+}
+
+fn parse_generated_name_mapping_entries(
+    output: &str,
+    expected_sources: &[String],
+) -> Result<Vec<NameMappingEntry>, String> {
+    let value = parse_jsonish_value(output)?;
+    let items = value
+        .get("names")
+        .or_else(|| value.get("mappings"))
+        .or_else(|| value.get("name_mapping"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "姓名映射 JSON 缺少 names 数组。".to_string())?;
+    let expected = expected_sources
+        .iter()
+        .map(|source| source.trim().to_string())
+        .collect::<HashSet<_>>();
+    let mut parsed = Vec::new();
+    for item in items {
+        let source = item
+            .get("source")
+            .or_else(|| item.get("original"))
+            .or_else(|| item.get("from"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let target = item
+            .get("target")
+            .or_else(|| item.get("rewritten"))
+            .or_else(|| item.get("to"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if source.is_empty() || target.is_empty() || source == target || !expected.contains(source)
+        {
+            continue;
+        }
+        parsed.push(NameMappingEntry {
+            source: source.to_string(),
+            target: target.to_string(),
+        });
+    }
+    if parsed.is_empty() {
+        return Err("姓名映射 JSON 中没有可用映射。".to_string());
+    }
+    Ok(parsed)
+}
+
+fn required_feminized_name_sources(settings: &NovelSettings) -> Vec<String> {
+    let mut names = Vec::new();
+    push_unique_name(&mut names, settings.protagonist_name.trim());
+    for name in settings.additional_feminize_names.lines() {
+        push_unique_name(&mut names, name.trim());
+    }
+    names
+}
+
+fn push_unique_name(names: &mut Vec<String>, name: &str) {
+    if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+        names.push(name.to_string());
+    }
+}
+
+fn parse_name_mapping_entries(content: &str) -> Vec<NameMappingEntry> {
+    if content.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(value) = parse_jsonish_value(content) else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    if let Some(protagonist) = value
+        .get("protagonist")
+        .and_then(serde_json::Value::as_object)
+    {
+        let source = protagonist
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let target = protagonist
+            .get("target")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if !source.is_empty() && !target.is_empty() {
+            entries.push(NameMappingEntry {
+                source: source.to_string(),
+                target: target.to_string(),
+            });
+        }
+    }
+    if let Some(items) = value.get("names").and_then(serde_json::Value::as_array) {
+        for item in items {
+            let source = item
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let target = item
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if !source.is_empty() && !target.is_empty() {
+                upsert_name_mapping_entry(&mut entries, source, target);
+            }
+        }
+    }
+    entries
+}
+
+fn build_name_mapping_asset_content(
+    settings: &NovelSettings,
+    mut mappings: Vec<NameMappingEntry>,
+) -> Result<String, String> {
+    if !settings.rewritten_protagonist_name.trim().is_empty() {
+        upsert_name_mapping_entry(
+            &mut mappings,
+            settings.protagonist_name.trim(),
+            settings.rewritten_protagonist_name.trim(),
+        );
+    }
+    let protagonist = mappings
+        .iter()
+        .find(|entry| entry.source == settings.protagonist_name.trim())
+        .cloned();
+    mappings.sort_by(|left, right| left.source.cmp(&right.source));
+    mappings.dedup_by(|left, right| left.source == right.source);
+    let asset = NameMappingAsset {
+        version: 1,
+        protagonist,
+        names: mappings,
+    };
+    serde_json::to_string_pretty(&asset).map_err(to_string)
+}
+
+fn upsert_name_mapping_entry(entries: &mut Vec<NameMappingEntry>, source: &str, target: &str) {
+    let source = source.trim();
+    let target = target.trim();
+    if source.is_empty() || target.is_empty() {
+        return;
+    }
+    if let Some(entry) = entries.iter_mut().find(|entry| entry.source == source) {
+        entry.target = target.to_string();
+    } else {
+        entries.push(NameMappingEntry {
+            source: source.to_string(),
+            target: target.to_string(),
+        });
+    }
+}
+
+fn fallback_feminized_name(source: &str) -> String {
+    let mut chars = source.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return "妍".to_string();
+    }
+    if chars.len() == 1 {
+        return feminized_char(chars[0]).unwrap_or('妍').to_string();
+    }
+    let mut changed = false;
+    for ch in chars.iter_mut().skip(1) {
+        if let Some(next) = feminized_char(*ch) {
+            *ch = next;
+            changed = true;
+        }
+    }
+    if !changed || chars.iter().collect::<String>() == source {
+        if let Some(last) = chars.last_mut() {
+            *last = '妍';
+        }
+    }
+    chars.iter().collect()
+}
+
+fn feminized_char(ch: char) -> Option<char> {
+    match ch {
+        '炎' | '岩' | '言' | '焱' | '彦' => Some('妍'),
+        '旺' | '望' | '王' => Some('婉'),
+        '磊' | '雷' => Some('蕾'),
+        '强' => Some('蔷'),
+        '刚' | '钢' => Some('婉'),
+        '伟' | '威' => Some('薇'),
+        '勇' => Some('咏'),
+        '龙' => Some('珑'),
+        '虎' => Some('琥'),
+        '峰' | '锋' => Some('枫'),
+        '阳' => Some('漾'),
+        '明' => Some('茗'),
+        '杰' => Some('洁'),
+        '豪' | '昊' => Some('皓'),
+        '宇' => Some('羽'),
+        '轩' => Some('萱'),
+        '飞' => Some('霏'),
+        '凡' => Some('樊'),
+        '尘' => Some('晨'),
+        '三' => Some('姗'),
+        _ => None,
+    }
+}
+
 async fn rewrite_chapters_for_auto(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -1374,7 +1897,7 @@ async fn rewrite_chapters_for_auto(
     api_key: &str,
     batch_id: &str,
 ) -> Result<(), String> {
-    let (chapters, canon_assets, settings, review_enabled, rewrite_parallelism) = {
+    let (chapters, settings, review_enabled, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, novel_id)?;
         let chapters = load_chapters_for_batch(&conn, novel_id, batch_id)?
@@ -1383,7 +1906,6 @@ async fn rewrite_chapters_for_auto(
             .collect::<Vec<_>>();
         (
             chapters,
-            load_canon_assets(&conn, novel_id)?,
             settings,
             load_review_enabled(&conn)?,
             load_rewrite_parallelism(&conn)?,
@@ -1393,6 +1915,11 @@ async fn rewrite_chapters_for_auto(
         return Err("当前批次没有已完成分析的内容。".to_string());
     }
 
+    ensure_name_mapping_asset(state, novel_id, profile, api_key, &settings).await?;
+    let canon_assets = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_canon_assets(&conn, novel_id)?
+    };
     let canon_text = build_compact_canon_text(&canon_assets);
     for chapter in &chapters {
         set_chapter_status(state, &chapter.id, "rewrite_status", "running")?;
@@ -2456,7 +2983,7 @@ fn chunk_without_headings(novel_id: &str, text: &str) -> Vec<Chapter> {
 
 fn seed_canon_assets(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> {
     let now = Utc::now().to_rfc3339();
-    for kind in ["人物卡", "人物关系", "地点", "伏笔", "术语表"] {
+    for kind in ["姓名映射表", "人物卡", "人物关系", "地点", "伏笔", "术语表"] {
         conn.execute(
             "INSERT OR IGNORE INTO canon_assets (novel_id, kind, content, updated_at) VALUES (?1, ?2, '', ?3)",
             params![novel_id, kind, now],
@@ -2569,7 +3096,7 @@ fn load_chapter_batches(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter
 
 fn load_novel_settings(conn: &Connection, novel_id: &str) -> Result<Option<NovelSettings>, String> {
     let result = conn.query_row(
-        "SELECT novel_id, protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
+        "SELECT novel_id, protagonist_name, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
         params![novel_id],
         row_to_novel_settings,
     );
@@ -2610,6 +3137,22 @@ fn load_canon_assets(conn: &Connection, novel_id: &str) -> Result<Vec<CanonAsset
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_string)?;
     Ok(assets)
+}
+
+fn load_canon_asset_content(
+    conn: &Connection,
+    novel_id: &str,
+    kind: &str,
+) -> Result<Option<String>, String> {
+    match conn.query_row(
+        "SELECT content FROM canon_assets WHERE novel_id = ?1 AND kind = ?2",
+        params![novel_id, kind],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(content) => Ok(Some(content)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(to_string(error)),
+    }
 }
 
 fn load_model_profile(
@@ -2970,6 +3513,11 @@ fn apply_gemini_thinking_control(payload: &mut serde_json::Value, profile: &Mode
 
 #[allow(dead_code)]
 fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
+    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
+        "留空，由 AI 按姓名女性化规则生成".to_string()
+    } else {
+        settings.rewritten_protagonist_name.trim().to_string()
+    };
     let additional = if settings.additional_feminize_names.trim().is_empty() {
         "无".to_string()
     } else {
@@ -2987,17 +3535,18 @@ fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
+- 主角改写后姓名：{}
 - 其他需要女性化的人物姓名：{}
 - 身材：{}
 - 体型：{}
 
 姓名女性化规则：
-1. 主角姓名必须女性化，不能保留明显男性化姓名。
-2. 优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
+1. 如果“主角改写后姓名”不是留空，必须把主角统一改为该姓名，标题和正文都必须遵守，不得自行生成其他主角新名。
+2. 如果“主角改写后姓名”留空，主角姓名必须女性化，不能保留明显男性化姓名；优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
 3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
 4. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
 5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。"#,
-        settings.protagonist_name, additional, settings.bust, settings.body_type
+        settings.protagonist_name, rewritten_name, additional, settings.bust, settings.body_type
     )
 }
 
@@ -3061,6 +3610,7 @@ fn compact_canon_asset_content(kind: &str, content: &str) -> String {
 
 fn canon_asset_char_limit(kind: &str) -> usize {
     match kind {
+        "姓名映射表" => 12_000,
         "AI分析汇总" => 4_000,
         "人物卡" | "人物关系" => 6_000,
         "伏笔" | "术语表" => 5_000,
@@ -3080,6 +3630,21 @@ fn take_last_chars(text: &str, max_chars: usize) -> String {
 }
 
 fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
+    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
+        "留空，由 AI 按姓名女性化规则生成".to_string()
+    } else {
+        settings.rewritten_protagonist_name.trim().to_string()
+    };
+    let forced_name_rule = if settings.rewritten_protagonist_name.trim().is_empty() {
+        "当前未指定主角改写后姓名：AI 必须按同音或近音原则为主角生成女性化姓名，并在全批次保持一致。".to_string()
+    } else {
+        format!(
+            "强制姓名规则：用户已指定主角改写后姓名为“{}”。改写标题、正文、称谓映射和后续复检时，主角姓名必须统一为“{}”；不得自行改成其他姓名，也不得保留主角原姓名“{}”。",
+            settings.rewritten_protagonist_name.trim(),
+            settings.rewritten_protagonist_name.trim(),
+            settings.protagonist_name.trim()
+        )
+    };
     let additional_names = if settings.additional_feminize_names.trim().is_empty() {
         "无".to_string()
     } else {
@@ -3094,6 +3659,7 @@ fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
+- 主角改写后姓名：{}
 - 其他需要女性化的人物姓名：{}
 - 身材：{}
 - 体型：{}
@@ -3105,22 +3671,25 @@ fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
 {}
 
 姓名女性化规则：
-1. 主角姓名必须女性化，不能保留明显男性化姓名。
+1. {}
 2. 章节标题和正文都必须检查主角姓名，标题中出现主角原名、男性化称号或男性身份时也必须改成女性化表达。
-3. 优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
+3. 如果用户未指定主角改写后姓名，优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字；如果用户已指定，则以用户指定姓名为最高优先级。
 4. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
 5. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
-6. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。
+6. 一致性资产中的“姓名映射表”优先级最高；凡是映射表中已有 `source -> target`，标题和正文都必须统一替换为 target，不得自行生成同一人物的其他女性化姓名。
+7. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致；并发分片和后续批次也必须继续使用同一份映射表。
 
 核心目标：
 让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。"#,
         settings.protagonist_name,
+        rewritten_name,
         additional_names,
         settings.bust,
         settings.body_type,
         rewrite_mode_label(&settings.rewrite_mode),
         rewrite_mode_prompt(&settings.rewrite_mode),
-        advanced_settings
+        advanced_settings,
+        forced_name_rule
     )
 }
 
@@ -4465,12 +5034,13 @@ fn row_to_novel_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<NovelSetti
     Ok(NovelSettings {
         novel_id: row.get(0)?,
         protagonist_name: row.get(1)?,
-        additional_feminize_names: row.get(2)?,
-        bust: row.get(3)?,
-        body_type: row.get(4)?,
-        rewrite_mode: row.get(5)?,
-        advanced_settings: row.get(6)?,
-        updated_at: row.get(7)?,
+        rewritten_protagonist_name: row.get(2)?,
+        additional_feminize_names: row.get(3)?,
+        bust: row.get(4)?,
+        body_type: row.get(5)?,
+        rewrite_mode: row.get(6)?,
+        advanced_settings: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -5150,6 +5720,7 @@ mod tests {
         let strict_settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            rewritten_protagonist_name: "".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
             body_type: "少女".to_string(),
@@ -5177,11 +5748,78 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_settings_prompt_includes_forced_rewritten_protagonist_name() {
+        let settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            rewritten_protagonist_name: "萧妍".to_string(),
+            additional_feminize_names: "".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: "".to_string(),
+            updated_at: "now".to_string(),
+        };
+
+        let prompt = build_rewrite_settings_prompt(&settings);
+
+        assert!(prompt.contains("主角改写后姓名：萧妍"));
+        assert!(prompt.contains("强制姓名规则"));
+        assert!(prompt.contains("主角姓名必须统一为“萧妍”"));
+        assert!(prompt.contains("不得自行改成其他姓名"));
+    }
+
+    #[test]
+    fn name_mapping_asset_persists_forced_and_generated_names() {
+        let settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            rewritten_protagonist_name: "萧妍".to_string(),
+            additional_feminize_names: "林动\n唐三".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: "".to_string(),
+            updated_at: "now".to_string(),
+        };
+        let content = build_name_mapping_asset_content(
+            &settings,
+            vec![
+                NameMappingEntry {
+                    source: "林动".to_string(),
+                    target: "林彤".to_string(),
+                },
+                NameMappingEntry {
+                    source: "唐三".to_string(),
+                    target: fallback_feminized_name("唐三"),
+                },
+            ],
+        )
+        .expect("valid mapping content");
+        let entries = parse_name_mapping_entries(&content);
+        let prompt = build_rewrite_settings_prompt(&settings);
+
+        assert!(content.contains("\"protagonist\""));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source == "萧炎" && entry.target == "萧妍"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source == "林动" && entry.target == "林彤"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source == "唐三" && entry.target == "唐姗"));
+        assert!(prompt.contains("姓名映射表"));
+        assert!(prompt.contains("并发分片和后续批次也必须继续使用同一份映射表"));
+    }
+
+    #[test]
     fn review_prompt_checks_creative_mode_strength() {
         let chapter = sample_chapter(1, "第一章", "萧炎走进大厅。");
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            rewritten_protagonist_name: "".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
             body_type: "少女".to_string(),

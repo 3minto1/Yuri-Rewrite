@@ -116,6 +116,21 @@ pre {
   color: #242422;
 }
 
+.update-menu-item {
+  position: relative;
+}
+
+.update-dot {
+  background: #e23b3b;
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(95, 24, 24, 0.25);
+  display: inline-block;
+  height: 8px;
+  margin-left: 1px;
+  width: 8px;
+}
+
 .sidebar {
   background: #252422;
   color: #f7f4ed;
@@ -680,6 +695,15 @@ pre {
   grid-column: 1 / -1;
 }
 
+.settings-rewritten-name-field {
+  grid-column: 1;
+}
+
+.settings-additional-names-field {
+  grid-column: 2;
+  grid-row: span 2;
+}
+
 .model-panel .panel-heading {
   align-items: flex-start;
 }
@@ -712,6 +736,12 @@ pre {
   .content-grid {
     grid-template-columns: minmax(280px, 1fr);
     grid-template-rows: none;
+  }
+
+  .settings-rewritten-name-field,
+  .settings-additional-names-field {
+    grid-column: auto;
+    grid-row: auto;
   }
 
   .canon-panel {
