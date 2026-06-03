@@ -2,14 +2,16 @@ use chrono::Utc;
 use encoding_rs::{GBK, UTF_8};
 use regex::Regex;
 use reqwest::Client;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
+    time::Instant,
 };
 use tauri::{Manager, State};
 use uuid::Uuid;
@@ -149,12 +151,19 @@ struct AiLog {
 #[derive(Debug, Serialize, Deserialize)]
 struct AppSettings {
     export_dir: Option<String>,
+    #[serde(default)]
+    review_enabled: bool,
+    #[serde(default = "default_rewrite_parallelism")]
+    rewrite_parallelism: usize,
 }
 
 struct ModelOutput {
     text: String,
     reasoning: Option<String>,
     raw_response: String,
+    input_chars: usize,
+    output_chars: usize,
+    elapsed_ms: u128,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -690,12 +699,19 @@ fn get_app_settings(state: State<AppState>) -> Result<AppSettings, String> {
         )
         .ok()
         .filter(|value| !value.trim().is_empty());
-    Ok(AppSettings { export_dir })
+    let review_enabled = load_review_enabled(&conn)?;
+    let rewrite_parallelism = load_rewrite_parallelism(&conn)?;
+    Ok(AppSettings {
+        export_dir,
+        review_enabled,
+        rewrite_parallelism,
+    })
 }
 
 #[tauri::command]
 fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<AppSettings, String> {
     let conn = state.conn.lock().map_err(to_string)?;
+    let rewrite_parallelism = normalize_rewrite_parallelism(settings.rewrite_parallelism);
     if let Some(export_dir) = settings
         .export_dir
         .as_deref()
@@ -708,14 +724,85 @@ fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<Ap
             params![export_dir],
         )
         .map_err(to_string)?;
+        save_review_enabled(&conn, settings.review_enabled)?;
+        save_rewrite_parallelism(&conn, rewrite_parallelism)?;
         Ok(AppSettings {
             export_dir: Some(export_dir.to_string()),
+            review_enabled: settings.review_enabled,
+            rewrite_parallelism,
         })
     } else {
         conn.execute("DELETE FROM app_settings WHERE key = 'export_dir'", [])
             .map_err(to_string)?;
-        Ok(AppSettings { export_dir: None })
+        save_review_enabled(&conn, settings.review_enabled)?;
+        save_rewrite_parallelism(&conn, rewrite_parallelism)?;
+        Ok(AppSettings {
+            export_dir: None,
+            review_enabled: settings.review_enabled,
+            rewrite_parallelism,
+        })
     }
+}
+
+fn load_review_enabled(conn: &Connection) -> Result<bool, String> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'review_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(matches!(
+        value.as_deref().map(str::trim),
+        Some("true") | Some("1") | Some("yes")
+    ))
+}
+
+fn save_review_enabled(conn: &Connection, enabled: bool) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('review_enabled', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![if enabled { "true" } else { "false" }],
+    )
+    .map_err(to_string)?;
+    Ok(())
+}
+
+fn default_rewrite_parallelism() -> usize {
+    6
+}
+
+fn normalize_rewrite_parallelism(value: usize) -> usize {
+    match value {
+        1 | 3 | 6 | 10 => value,
+        _ => default_rewrite_parallelism(),
+    }
+}
+
+fn load_rewrite_parallelism(conn: &Connection) -> Result<usize, String> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'rewrite_parallelism'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(value
+        .as_deref()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(normalize_rewrite_parallelism)
+        .unwrap_or_else(default_rewrite_parallelism))
+}
+
+fn save_rewrite_parallelism(conn: &Connection, value: usize) -> Result<(), String> {
+    let normalized = normalize_rewrite_parallelism(value);
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('rewrite_parallelism', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![normalized.to_string()],
+    )
+    .map_err(to_string)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -823,6 +910,7 @@ async fn test_model_profile(
     .await
     {
         Ok(output) => {
+            let log_content = format_model_log_content(&output, &profile, None);
             append_ai_log(
                 &state,
                 None,
@@ -830,7 +918,7 @@ async fn test_model_profile(
                 "测试模型",
                 None,
                 "success",
-                &output.text,
+                &log_content,
                 output.reasoning.as_deref(),
                 Some(&output.raw_response),
             )?;
@@ -892,9 +980,12 @@ async fn start_analysis(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let chapters = {
+    let (chapters, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
-        load_chapters_for_batch(&conn, &novel_id, &batch_id)?
+        (
+            load_chapters_for_batch(&conn, &novel_id, &batch_id)?,
+            load_rewrite_parallelism(&conn)?,
+        )
     };
     if chapters.is_empty() {
         return Err("当前批次没有可分析的内容。".to_string());
@@ -914,51 +1005,18 @@ async fn start_analysis(
         set_chapter_status(&state, &chapter.id, "analysis_status", "running")?;
     }
 
-    let prompt = build_batch_analysis_prompt(&chapters);
-    let output = match generate_text(
-        &state.client,
+    let parsed_analysis = match analyze_batch_with_parallelism(
+        &state,
+        &novel_id,
         &profile,
         &api_key,
-        "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
-        &prompt,
-        true,
+        &chapters,
+        rewrite_parallelism,
     )
     .await
     {
-        Ok(output) => output,
-        Err(error) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次分析",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_analysis_failed(&state, &chapters)?;
-            update_job(&state, &job.id, "failed", 0, &error)?;
-            job = get_job(job.id.clone(), state)?;
-            return Ok(job);
-        }
-    };
-
-    let parsed_analysis = match parse_batch_analysis_output(&output.text, &chapters) {
         Ok(parsed) => parsed,
         Err(error) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次分析",
-                Some(&batch_label),
-                "error",
-                &error,
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
             mark_chapters_analysis_failed(&state, &chapters)?;
             update_job(&state, &job.id, "failed", 0, &error)?;
             job = get_job(job.id.clone(), state)?;
@@ -966,38 +1024,7 @@ async fn start_analysis(
         }
     };
 
-    append_ai_log(
-        &state,
-        Some(&novel_id),
-        &profile.id,
-        "批次分析",
-        Some(&batch_label),
-        "success",
-        &output.text,
-        output.reasoning.as_deref(),
-        Some(&output.raw_response),
-    )?;
-
-    {
-        let mut conn = state.conn.lock().map_err(to_string)?;
-        let tx = conn.transaction().map_err(to_string)?;
-        for chapter in &chapters {
-            tx.execute(
-                "UPDATE chapters SET analysis_json = NULL, analysis_status = 'completed' WHERE id = ?1",
-                params![chapter.id],
-            )
-            .map_err(to_string)?;
-        }
-        for analysis in parsed_analysis {
-            tx.execute(
-                "UPDATE chapters SET analysis_json = ?1 WHERE id = ?2",
-                params![analysis.json, analysis.id],
-            )
-            .map_err(to_string)?;
-        }
-        tx.commit().map_err(to_string)?;
-        merge_analysis_into_canon_assets(&conn, &novel_id).map_err(to_string)?;
-    }
+    save_parsed_analyses(&state, &novel_id, &chapters, parsed_analysis)?;
 
     update_job(&state, &job.id, "completed", total, "分析完成")?;
     get_job(job.id, state)
@@ -1012,14 +1039,20 @@ async fn start_rewrite(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (chapters, canon_assets, settings) = {
+    let (chapters, canon_assets, settings, review_enabled, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, &novel_id)?;
         let chapters = load_chapters_for_batch(&conn, &novel_id, &batch_id)?
             .into_iter()
             .filter(|chapter| chapter.analysis_status == "completed")
             .collect::<Vec<_>>();
-        (chapters, load_canon_assets(&conn, &novel_id)?, settings)
+        (
+            chapters,
+            load_canon_assets(&conn, &novel_id)?,
+            settings,
+            load_review_enabled(&conn)?,
+            load_rewrite_parallelism(&conn)?,
+        )
     };
     if chapters.is_empty() {
         return Err("当前批次没有已完成分析的内容，请先分析该批次。".to_string());
@@ -1027,11 +1060,7 @@ async fn start_rewrite(
 
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
-    let canon_text = canon_assets
-        .iter()
-        .map(|asset| format!("## {}\n{}", asset.kind, asset.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let canon_text = build_compact_canon_text(&canon_assets);
     let batch_label = format_batch_label(&chapters);
 
     for chapter in &chapters {
@@ -1045,44 +1074,21 @@ async fn start_rewrite(
         0,
         &format!("正在批次改写 {}", batch_label),
     )?;
-    let rewrite_prompt =
-        build_batch_rewrite_prompt_with_settings(&chapters, &canon_text, &settings);
-    let rewrite_output = match generate_text(
-        &state.client,
+    let final_rewrite = match rewrite_batch_with_parallelism(
+        &state,
+        &novel_id,
         &profile,
         &api_key,
-        "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须保留用户提供的章节边界标记，只输出完整批次正文。",
-        &rewrite_prompt,
-        false,
+        &chapters,
+        &canon_text,
+        &settings,
+        review_enabled,
+        rewrite_parallelism,
     )
     .await
     {
-        Ok(output) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次改写",
-                Some(&batch_label),
-                "success",
-                output.text.trim(),
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
-            output
-        }
+        Ok(rewrites) => rewrites,
         Err(error) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次改写",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
             mark_chapters_rewrite_failed(&state, &chapters)?;
             update_job(&state, &job.id, "failed", 0, &error)?;
             job = get_job(job.id.clone(), state)?;
@@ -1090,112 +1096,19 @@ async fn start_rewrite(
         }
     };
 
-    let parsed_rewrite = match parse_batch_rewrite_output(&rewrite_output.text, &chapters) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次改写解析",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_rewrite_failed(&state, &chapters)?;
-            update_job(&state, &job.id, "failed", 0, &error)?;
-            job = get_job(job.id.clone(), state)?;
-            return Ok(job);
-        }
-    };
+    save_parsed_rewrites(&state, final_rewrite)?;
 
     update_job(
         &state,
         &job.id,
-        "running",
+        "completed",
         total,
-        &format!("正在复检修正 {}", batch_label),
+        if review_enabled {
+            "改写与复检完成"
+        } else {
+            "改写完成"
+        },
     )?;
-    let review_prompt =
-        build_batch_review_prompt_with_settings(&chapters, &parsed_rewrite, &settings);
-    let review_output = match generate_text(
-        &state.client,
-        &profile,
-        &api_key,
-        "你是中文小说改写质检与修正助手。检查并修正改写稿中的姓名、代词、称谓、设定和逻辑问题，必须保留章节边界标记，只输出修正后的完整批次正文。",
-        &review_prompt,
-        false,
-    )
-    .await
-    {
-        Ok(output) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次复检修正",
-                Some(&batch_label),
-                "success",
-                output.text.trim(),
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
-            output
-        }
-        Err(error) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次复检修正",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_rewrite_failed(&state, &chapters)?;
-            update_job(&state, &job.id, "failed", total, &error)?;
-            job = get_job(job.id.clone(), state)?;
-            return Ok(job);
-        }
-    };
-
-    let corrected_rewrite = match parse_batch_rewrite_output(&review_output.text, &chapters) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            append_ai_log(
-                &state,
-                Some(&novel_id),
-                &profile.id,
-                "批次复检解析",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_rewrite_failed(&state, &chapters)?;
-            update_job(&state, &job.id, "failed", total, &error)?;
-            job = get_job(job.id.clone(), state)?;
-            return Ok(job);
-        }
-    };
-
-    {
-        let conn = state.conn.lock().map_err(to_string)?;
-        for rewrite in corrected_rewrite {
-            conn.execute(
-                "UPDATE chapters SET rewrite_text = ?1, rewrite_status = 'completed' WHERE id = ?2",
-                params![rewrite.text.trim(), rewrite.id],
-            )
-            .map_err(to_string)?;
-        }
-    }
-
-    update_job(&state, &job.id, "completed", total, "改写与复检完成")?;
     get_job(job.id, state)
 }
 
@@ -1307,71 +1220,132 @@ async fn analyze_chapters_for_auto(
     api_key: &str,
     chapters: &[Chapter],
 ) -> Result<(), String> {
-    let batch_label = format_batch_label(chapters);
     for chapter in chapters {
         set_chapter_status(state, &chapter.id, "analysis_status", "running")?;
     }
 
-    let prompt = build_batch_analysis_prompt(chapters);
-    let output = match generate_text(
-        &state.client,
+    let rewrite_parallelism = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_rewrite_parallelism(&conn)?
+    };
+    let parsed_analysis = analyze_batch_with_parallelism(
+        state,
+        novel_id,
         profile,
         api_key,
-        "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
-        &prompt,
-        true,
+        chapters,
+        rewrite_parallelism,
     )
     .await
-    {
-        Ok(output) => output,
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次分析",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_analysis_failed(state, chapters)?;
-            return Err(error);
+    .inspect_err(|_| {
+        let _ = mark_chapters_analysis_failed(state, chapters);
+    })?;
+
+    save_parsed_analyses(state, novel_id, chapters, parsed_analysis)?;
+    Ok(())
+}
+
+async fn analyze_batch_with_parallelism(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    chapters: &[Chapter],
+    rewrite_parallelism: usize,
+) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    let shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
+    let shard_total = shards.len();
+    let batch_label = format_batch_label(chapters);
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for (idx, shard) in shards.into_iter().enumerate() {
+        let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
+        let context =
+            format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
+        let prompt = build_batch_analysis_prompt_with_context(&shard, &context);
+        let client = state.client.clone();
+        let profile_for_task = profile.clone();
+        let api_key = api_key.to_string();
+        let shard_for_task = shard.clone();
+        tasks.spawn(async move {
+            let output = generate_text(
+                &client,
+                &profile_for_task,
+                &api_key,
+                "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
+                &prompt,
+                true,
+            )
+            .await;
+            (idx, shard_label, shard_for_task, output)
+        });
+    }
+
+    let mut parsed_by_shard = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        let (idx, shard_label, shard, output) = result.map_err(to_string)?;
+        match output {
+            Ok(output) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次分析",
+                    Some(&shard_label),
+                    "success",
+                    &format_model_log_content(&output, profile, None),
+                    output.reasoning.as_deref(),
+                    Some(&output.raw_response),
+                )?;
+                let parsed = match parse_batch_analysis_output(&output.text, &shard) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        append_ai_log(
+                            state,
+                            Some(novel_id),
+                            &profile.id,
+                            "批次分析解析",
+                            Some(&shard_label),
+                            "error",
+                            &error,
+                            output.reasoning.as_deref(),
+                            Some(&output.raw_response),
+                        )?;
+                        return Err(format!("{}：{}", shard_label, error));
+                    }
+                };
+                parsed_by_shard.push((idx, parsed));
+            }
+            Err(error) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次分析",
+                    Some(&shard_label),
+                    "error",
+                    &error,
+                    None,
+                    None,
+                )?;
+                return Err(format!("{}：{}", shard_label, error));
+            }
         }
-    };
+    }
 
-    let parsed_analysis = match parse_batch_analysis_output(&output.text, chapters) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次分析",
-                Some(&batch_label),
-                "error",
-                &error,
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
-            mark_chapters_analysis_failed(state, chapters)?;
-            return Err(error);
-        }
-    };
+    parsed_by_shard.sort_by_key(|(idx, _)| *idx);
+    Ok(parsed_by_shard
+        .into_iter()
+        .flat_map(|(_, parsed)| parsed)
+        .collect())
+}
 
-    append_ai_log(
-        state,
-        Some(novel_id),
-        &profile.id,
-        "批次分析",
-        Some(&batch_label),
-        "success",
-        &output.text,
-        output.reasoning.as_deref(),
-        Some(&output.raw_response),
-    )?;
-
+fn save_parsed_analyses(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    chapters: &[Chapter],
+    analyses: Vec<ParsedChapterAnalysis>,
+) -> Result<(), String> {
     let mut conn = state.conn.lock().map_err(to_string)?;
     let tx = conn.transaction().map_err(to_string)?;
     for chapter in chapters {
@@ -1381,7 +1355,7 @@ async fn analyze_chapters_for_auto(
         )
         .map_err(to_string)?;
     }
-    for analysis in parsed_analysis {
+    for analysis in analyses {
         tx.execute(
             "UPDATE chapters SET analysis_json = ?1 WHERE id = ?2",
             params![analysis.json, analysis.id],
@@ -1400,162 +1374,374 @@ async fn rewrite_chapters_for_auto(
     api_key: &str,
     batch_id: &str,
 ) -> Result<(), String> {
-    let (chapters, canon_assets, settings) = {
+    let (chapters, canon_assets, settings, review_enabled, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, novel_id)?;
         let chapters = load_chapters_for_batch(&conn, novel_id, batch_id)?
             .into_iter()
             .filter(|chapter| chapter.analysis_status == "completed")
             .collect::<Vec<_>>();
-        (chapters, load_canon_assets(&conn, novel_id)?, settings)
+        (
+            chapters,
+            load_canon_assets(&conn, novel_id)?,
+            settings,
+            load_review_enabled(&conn)?,
+            load_rewrite_parallelism(&conn)?,
+        )
     };
     if chapters.is_empty() {
         return Err("当前批次没有已完成分析的内容。".to_string());
     }
 
-    let canon_text = canon_assets
-        .iter()
-        .map(|asset| format!("## {}\n{}", asset.kind, asset.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let batch_label = format_batch_label(&chapters);
+    let canon_text = build_compact_canon_text(&canon_assets);
     for chapter in &chapters {
         set_chapter_status(state, &chapter.id, "rewrite_status", "running")?;
     }
 
-    let rewrite_prompt =
-        build_batch_rewrite_prompt_with_settings(&chapters, &canon_text, &settings);
-    let rewrite_output = match generate_text(
-        &state.client,
+    let final_rewrite = rewrite_batch_with_parallelism(
+        state,
+        novel_id,
         profile,
         api_key,
-        "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须保留用户提供的章节边界标记，只输出完整批次正文。",
-        &rewrite_prompt,
-        false,
+        &chapters,
+        &canon_text,
+        &settings,
+        review_enabled,
+        rewrite_parallelism,
     )
     .await
-    {
-        Ok(output) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次改写",
-                Some(&batch_label),
-                "success",
-                output.text.trim(),
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
-            output
-        }
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次改写",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_rewrite_failed(state, &chapters)?;
-            return Err(error);
-        }
-    };
+    .inspect_err(|_| {
+        let _ = mark_chapters_rewrite_failed(state, &chapters);
+    })?;
 
-    let parsed_rewrite = match parse_batch_rewrite_output(&rewrite_output.text, &chapters) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次改写解析",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_rewrite_failed(state, &chapters)?;
-            return Err(error);
-        }
-    };
-
-    let review_prompt =
-        build_batch_review_prompt_with_settings(&chapters, &parsed_rewrite, &settings);
-    let review_output = match generate_text(
-        &state.client,
-        profile,
-        api_key,
-        "你是中文小说改写质检与修正助手。检查并修正改写稿中的姓名、代词、称谓、设定和逻辑问题，必须保留章节边界标记，只输出修正后的完整批次正文。",
-        &review_prompt,
-        false,
-    )
-    .await
-    {
-        Ok(output) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次复检修正",
-                Some(&batch_label),
-                "success",
-                output.text.trim(),
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
-            output
-        }
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次复检修正",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_rewrite_failed(state, &chapters)?;
-            return Err(error);
-        }
-    };
-
-    let corrected_rewrite = match parse_batch_rewrite_output(&review_output.text, &chapters) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次复检解析",
-                Some(&batch_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            mark_chapters_rewrite_failed(state, &chapters)?;
-            return Err(error);
-        }
-    };
-
-    let conn = state.conn.lock().map_err(to_string)?;
-    for rewrite in corrected_rewrite {
-        conn.execute(
-            "UPDATE chapters SET rewrite_text = ?1, rewrite_status = 'completed' WHERE id = ?2",
-            params![rewrite.text.trim(), rewrite.id],
-        )
-        .map_err(to_string)?;
-    }
+    save_parsed_rewrites(state, final_rewrite)?;
     Ok(())
+}
+
+async fn rewrite_batch_with_parallelism(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    chapters: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+    review_enabled: bool,
+    rewrite_parallelism: usize,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let parsed_rewrite = generate_rewrite_shards(
+        state,
+        novel_id,
+        profile,
+        api_key,
+        chapters,
+        canon_text,
+        settings,
+        review_enabled,
+        rewrite_parallelism,
+    )
+    .await?;
+
+    if !review_enabled {
+        return Ok(parsed_rewrite);
+    }
+
+    generate_review_shards(
+        state,
+        novel_id,
+        profile,
+        api_key,
+        chapters,
+        &parsed_rewrite,
+        settings,
+        rewrite_parallelism,
+    )
+    .await
+}
+
+async fn generate_rewrite_shards(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    chapters: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+    review_enabled: bool,
+    rewrite_parallelism: usize,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
+    let shard_total = shards.len();
+    let batch_label = format_batch_label(chapters);
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for (idx, shard) in shards.into_iter().enumerate() {
+        let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
+        let context =
+            format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
+        let prompt =
+            build_batch_rewrite_prompt_with_context(&shard, canon_text, settings, &context);
+        let client = state.client.clone();
+        let profile_for_task = profile.clone();
+        let api_key = api_key.to_string();
+        let shard_for_task = shard.clone();
+        tasks.spawn(async move {
+            let output = generate_text(
+                &client,
+                &profile_for_task,
+                &api_key,
+                "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须保留用户提供的章节边界标记，只输出当前输入章节改写后的标题和正文，不要输出输入外章节。",
+                &prompt,
+                false,
+            )
+            .await;
+            (idx, shard_label, shard_for_task, output)
+        });
+    }
+
+    let mut parsed_by_shard = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        let (idx, shard_label, shard, output) = result.map_err(to_string)?;
+        match output {
+            Ok(output) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次改写",
+                    Some(&shard_label),
+                    "success",
+                    &format_model_log_content(&output, profile, Some(review_enabled)),
+                    output.reasoning.as_deref(),
+                    Some(&output.raw_response),
+                )?;
+                let parsed = match parse_batch_rewrite_output(&output.text, &shard) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        append_ai_log(
+                            state,
+                            Some(novel_id),
+                            &profile.id,
+                            "批次改写解析",
+                            Some(&shard_label),
+                            "error",
+                            &error,
+                            output.reasoning.as_deref(),
+                            Some(&output.raw_response),
+                        )?;
+                        return Err(format!("{}：{}", shard_label, error));
+                    }
+                };
+                parsed_by_shard.push((idx, parsed));
+            }
+            Err(error) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次改写",
+                    Some(&shard_label),
+                    "error",
+                    &error,
+                    None,
+                    None,
+                )?;
+                return Err(format!("{}：{}", shard_label, error));
+            }
+        }
+    }
+
+    parsed_by_shard.sort_by_key(|(idx, _)| *idx);
+    Ok(parsed_by_shard
+        .into_iter()
+        .flat_map(|(_, parsed)| parsed)
+        .collect())
+}
+
+async fn generate_review_shards(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+    rewrite_parallelism: usize,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let chapter_shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
+    let shard_total = chapter_shards.len();
+    let batch_label = format_batch_label(chapters);
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut rewrite_offset = 0usize;
+
+    for (idx, shard) in chapter_shards.into_iter().enumerate() {
+        let count = shard.len();
+        let rewrite_shard = rewrites
+            .get(rewrite_offset..rewrite_offset + count)
+            .ok_or_else(|| "复检分片与改写结果数量不匹配。".to_string())?
+            .to_vec();
+        rewrite_offset += count;
+
+        let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
+        let context =
+            format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
+        let prompt =
+            build_batch_review_prompt_with_context(&shard, &rewrite_shard, settings, &context);
+        let client = state.client.clone();
+        let profile_for_task = profile.clone();
+        let api_key = api_key.to_string();
+        let shard_for_task = shard.clone();
+        tasks.spawn(async move {
+            let output = generate_text(
+                &client,
+                &profile_for_task,
+                &api_key,
+                "你是中文小说改写质检与修正助手。检查并修正改写稿中的标题、姓名、代词、称谓、设定和逻辑问题，必须保留章节边界标记，只输出当前输入章节修正后的标题和正文，不要输出输入外章节。",
+                &prompt,
+                false,
+            )
+            .await;
+            (idx, shard_label, shard_for_task, output)
+        });
+    }
+
+    let mut parsed_by_shard = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        let (idx, shard_label, shard, output) = result.map_err(to_string)?;
+        match output {
+            Ok(output) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次复检修正",
+                    Some(&shard_label),
+                    "success",
+                    &format_model_log_content(&output, profile, Some(true)),
+                    output.reasoning.as_deref(),
+                    Some(&output.raw_response),
+                )?;
+                let parsed = match parse_batch_rewrite_output(&output.text, &shard) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        append_ai_log(
+                            state,
+                            Some(novel_id),
+                            &profile.id,
+                            "批次复检解析",
+                            Some(&shard_label),
+                            "error",
+                            &error,
+                            output.reasoning.as_deref(),
+                            Some(&output.raw_response),
+                        )?;
+                        return Err(format!("{}：{}", shard_label, error));
+                    }
+                };
+                parsed_by_shard.push((idx, parsed));
+            }
+            Err(error) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次复检修正",
+                    Some(&shard_label),
+                    "error",
+                    &error,
+                    None,
+                    None,
+                )?;
+                return Err(format!("{}：{}", shard_label, error));
+            }
+        }
+    }
+
+    parsed_by_shard.sort_by_key(|(idx, _)| *idx);
+    Ok(parsed_by_shard
+        .into_iter()
+        .flat_map(|(_, parsed)| parsed)
+        .collect())
+}
+
+fn split_chapters_for_parallelism(
+    chapters: &[Chapter],
+    rewrite_parallelism: usize,
+) -> Vec<Vec<Chapter>> {
+    if chapters.is_empty() {
+        return Vec::new();
+    }
+    let parallelism = normalize_rewrite_parallelism(rewrite_parallelism).min(chapters.len());
+    if parallelism <= 1 {
+        return vec![chapters.to_vec()];
+    }
+    let chunk_size = (chapters.len() + parallelism - 1) / parallelism;
+    chapters
+        .chunks(chunk_size)
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+fn format_shard_label(
+    batch_label: &str,
+    shard_index: usize,
+    shard_total: usize,
+    chapters: &[Chapter],
+) -> String {
+    if shard_total <= 1 {
+        return batch_label.to_string();
+    }
+    match (chapters.first(), chapters.last()) {
+        (Some(first), Some(last)) if first.index == last.index => {
+            format!(
+                "{} · 分片 {}/{} · 第{}章",
+                batch_label,
+                shard_index + 1,
+                shard_total,
+                first.index
+            )
+        }
+        (Some(first), Some(last)) => format!(
+            "{} · 分片 {}/{} · 第{}-{}章",
+            batch_label,
+            shard_index + 1,
+            shard_total,
+            first.index,
+            last.index
+        ),
+        _ => format!("{} · 分片 {}/{}", batch_label, shard_index + 1, shard_total),
+    }
+}
+
+fn format_shard_context(
+    shard_index: usize,
+    shard_total: usize,
+    rewrite_parallelism: usize,
+    batch_label: &str,
+    chapters: &[Chapter],
+) -> String {
+    if shard_total <= 1 {
+        return "当前为不并发模式，本次输入就是完整选中批次。".to_string();
+    }
+    let chapter_list = chapters
+        .iter()
+        .map(|chapter| format!("第{}章", chapter.index))
+        .collect::<Vec<_>>()
+        .join("、");
+    let chapter_range = match (chapters.first(), chapters.last()) {
+        (Some(first), Some(last)) if first.index == last.index => format!("第{}章", first.index),
+        (Some(first), Some(last)) => format!("第{}-{}章", first.index, last.index),
+        _ => "空分片".to_string(),
+    };
+    format!(
+        "当前输入是 {} 拆分出的并发分片 {}/{}，本分片实际只包含 {}：{}。只能处理和输出这些章节，严禁输出本分片外的任何章节、标题、正文或章节边界标记。所有分片共享同一份小说设定、一致性资产、姓名女性化规则和章节边界规则。请严格遵循这些全局规则，保持姓名映射、称谓、文风、剧情承接和女性化设定一致；不要因为只看到当前分片就改变人物设定或重置关系进展。当前设置的并发请求数为 {}。",
+        batch_label,
+        shard_index + 1,
+        shard_total,
+        chapter_range,
+        chapter_list,
+        normalize_rewrite_parallelism(rewrite_parallelism)
+    )
 }
 
 #[allow(dead_code)]
@@ -1581,11 +1767,7 @@ async fn start_rewrite_legacy(
     }
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
-    let canon_text = canon_assets
-        .iter()
-        .map(|asset| format!("## {}\n{}", asset.kind, asset.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let canon_text = build_compact_canon_text(&canon_assets);
 
     for chapter in chapters {
         update_job(
@@ -1601,7 +1783,7 @@ async fn start_rewrite_legacy(
             &state.client,
             &profile,
             &api_key,
-            "你是中文小说改写助手，任务是把男女主文本改写为自然的双女主百合文本。只输出改写后的正文。",
+            "你是中文小说改写助手，任务是把男女主文本改写为自然的双女主百合文本。只输出改写后的标题和正文。",
             &prompt,
             false,
         )
@@ -1615,7 +1797,7 @@ async fn start_rewrite_legacy(
                     "章节改写",
                     Some(&chapter.title),
                     "success",
-                    output.text.trim(),
+                    &format_model_log_content(&output, &profile, None),
                     output.reasoning.as_deref(),
                     Some(&output.raw_response),
                 )?;
@@ -2241,11 +2423,17 @@ async fn generate_text(
     user: &str,
     prefer_json_output: bool,
 ) -> Result<ModelOutput, String> {
-    if profile.provider.to_lowercase().contains("gemini") {
+    let started = Instant::now();
+    let input_chars = system.chars().count() + user.chars().count();
+    let mut output = if profile.provider.to_lowercase().contains("gemini") {
         generate_gemini(client, profile, api_key, system, user).await
     } else {
         generate_openai_compatible(client, profile, api_key, system, user, prefer_json_output).await
-    }
+    }?;
+    output.input_chars = input_chars;
+    output.output_chars = output.text.chars().count();
+    output.elapsed_ms = started.elapsed().as_millis();
+    Ok(output)
 }
 
 async fn generate_openai_compatible(
@@ -2322,6 +2510,9 @@ async fn generate_openai_compatible(
         text,
         reasoning,
         raw_response,
+        input_chars: 0,
+        output_chars: 0,
+        elapsed_ms: 0,
     })
 }
 
@@ -2409,6 +2600,9 @@ async fn generate_gemini(
         text,
         reasoning,
         raw_response,
+        input_chars: 0,
+        output_chars: 0,
+        elapsed_ms: 0,
     })
 }
 
@@ -2590,6 +2784,76 @@ fn format_batch_label(chapters: &[Chapter]) -> String {
     }
 }
 
+fn build_compact_canon_text(assets: &[CanonAsset]) -> String {
+    if assets.is_empty() {
+        return "无".to_string();
+    }
+
+    let compacted = assets
+        .iter()
+        .filter_map(|asset| {
+            let content = compact_canon_asset_content(&asset.kind, &asset.content);
+            if content.trim().is_empty() {
+                None
+            } else {
+                Some(format!("## {}\n{}", asset.kind, content))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if compacted.trim().is_empty() {
+        "无".to_string()
+    } else {
+        compacted
+    }
+}
+
+fn compact_canon_asset_content(kind: &str, content: &str) -> String {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let mut seen = HashSet::new();
+    let mut lines = Vec::new();
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        lines.push(trimmed.to_string());
+    }
+    let deduped = lines.join("\n");
+    let max_chars = canon_asset_char_limit(kind);
+    if deduped.chars().count() <= max_chars {
+        return deduped;
+    }
+
+    let head_limit = max_chars / 2;
+    let tail_limit = max_chars.saturating_sub(head_limit);
+    format!(
+        "{}\n\n[一致性资产已压缩：省略中间重复或历史内容]\n\n{}",
+        take_chars(&deduped, head_limit),
+        take_last_chars(&deduped, tail_limit)
+    )
+}
+
+fn canon_asset_char_limit(kind: &str) -> usize {
+    match kind {
+        "AI分析汇总" => 4_000,
+        "人物卡" | "人物关系" => 6_000,
+        "伏笔" | "术语表" => 5_000,
+        "地点" => 3_000,
+        _ => 3_000,
+    }
+}
+
+fn take_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn take_last_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
 fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
     let additional_names = if settings.additional_feminize_names.trim().is_empty() {
         "无".to_string()
@@ -2617,10 +2881,14 @@ fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
 
 姓名女性化规则：
 1. 主角姓名必须女性化，不能保留明显男性化姓名。
-2. 优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
-3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
-4. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
-5. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。"#,
+2. 章节标题和正文都必须检查主角姓名，标题中出现主角原名、男性化称号或男性身份时也必须改成女性化表达。
+3. 优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
+4. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
+5. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
+6. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。
+
+核心目标：
+让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。"#,
         settings.protagonist_name,
         additional_names,
         settings.bust,
@@ -2641,7 +2909,13 @@ fn rewrite_mode_label(mode: &str) -> &'static str {
 fn rewrite_mode_prompt(mode: &str) -> &'static str {
     match mode {
         "creative" => {
-            "改写模式规则：当前为创意模式。AI 在保留主线、人物关系、关键事件和章节顺序的同时，可以加入更多女性化描写，让读者更直观意识到主角从男性变为了女性；包括但不限于女性外貌描写、神态描写、女性细节，以及主角作为女性与周围人物互动方式的自然变化。新增内容必须服务于原剧情，不得破坏核心逻辑。"
+            r#"改写模式规则：当前为创意模式，此规则优先级高于普通的“中度再创作”约束。
+1. 必须让读者在每章都能明确感知主角已经从男性变为女性，而不是只替换姓名和代词。
+2. 在不改变主线、关键事件、章节顺序和核心逻辑的前提下，主动补充女性化细节：女性外貌、身形仪态、神态反应、衣着/发丝/气息等可感知细节，以及旁人看待女性主角时的称谓、距离感、保护欲、亲密互动或误会。
+3. 原文涉及男性身体、男性身份、男性社会称呼、男性动作习惯、男性气质展示时，必须改写为与设定身材和体型一致的女性表达；不能只删除这些内容。
+4. 主角与周围人物互动时，应自然体现她作为女性后的关系变化，例如语气、肢体距离、旁人态度、暧昧张力、同性亲密感和百合向情绪推进。
+5. 每章至少在关键场景中增加或强化 2-4 处女性化感知点；战斗、修炼、对话、日常和情感场景都要优先寻找可自然植入的位置。
+6. 新增内容必须贴合原剧情和原文风格，不要写成与当前情节无关的堆砌描写，不得破坏已有伏笔、战力逻辑和人物动机。"#
         }
         _ => {
             "改写模式规则：当前为严谨模式。AI 必须更加忠于原文，不做过大改动，不对主角添加过多额外女性化描写；但必要的女性化描写不能减少，原文本身已有的男性化描写在改写后必须自然转换为女性化描写。"
@@ -2927,7 +3201,7 @@ fn parse_batch_rewrite_output(
     let mut cursor = output.replace("\r\n", "\n").replace('\r', "\n");
     let mut parsed = Vec::with_capacity(expected_chapters.len());
 
-    for chapter in expected_chapters {
+    for (idx, chapter) in expected_chapters.iter().enumerate() {
         let start_marker = chapter_start_marker(chapter);
         let end_marker = chapter_end_marker(chapter);
         let start_pos = cursor
@@ -2940,35 +3214,63 @@ fn parse_batch_rewrite_output(
             ));
         }
         let after_start = cursor[start_pos + start_marker.len()..].to_string();
-        let end_pos = after_start
-            .find(&end_marker)
-            .ok_or_else(|| format!("AI 输出缺少章节结束标记：{}", end_marker))?;
-        let block = &after_start[..end_pos];
-        let text = clean_rewrite_block(block);
+        let (block, next_cursor) = if let Some(end_pos) = after_start.find(&end_marker) {
+            (
+                after_start[..end_pos].to_string(),
+                after_start[end_pos + end_marker.len()..].to_string(),
+            )
+        } else if let Some(next_chapter) = expected_chapters.get(idx + 1) {
+            let next_start_marker = chapter_start_marker(next_chapter);
+            let next_pos = after_start.find(&next_start_marker).ok_or_else(|| {
+                format!(
+                    "AI 输出缺少章节结束标记：{}，且无法定位下一章开始标记：{}",
+                    end_marker, next_start_marker
+                )
+            })?;
+            (
+                after_start[..next_pos].to_string(),
+                after_start[next_pos..].to_string(),
+            )
+        } else if !after_start.trim().is_empty() {
+            (after_start, String::new())
+        } else {
+            return Err(format!("AI 输出缺少章节结束标记：{}", end_marker));
+        };
+        let (title, text) = clean_rewrite_block(&block, &chapter.title);
         if text.trim().is_empty() {
             return Err(format!("章节 {} 的改写正文为空。", chapter.index));
         }
         parsed.push(ParsedChapterRewrite {
             id: chapter.id.clone(),
             index: chapter.index,
-            title: chapter.title.clone(),
+            title,
             text,
         });
-        cursor = after_start[end_pos + end_marker.len()..].to_string();
+        cursor = next_cursor;
     }
 
-    if !cursor.trim().is_empty() {
+    let trailing = cursor.trim();
+    if !trailing.is_empty() && !trailing.contains("YURI_REWRITE_CHAPTER_START") {
         return Err("AI 输出在最后一个章节结束标记后包含多余内容。".to_string());
     }
     Ok(parsed)
 }
 
-fn clean_rewrite_block(block: &str) -> String {
+fn clean_rewrite_block(block: &str, fallback_title: &str) -> (String, String) {
     let mut lines = block.trim().lines().collect::<Vec<_>>();
+    let mut title = fallback_title.trim().to_string();
     if lines.first().is_some_and(|line| {
         line.trim_start().starts_with("标题：") || line.trim_start().starts_with("标题:")
     }) {
-        lines.remove(0);
+        let title_line = lines.remove(0).trim().to_string();
+        let parsed_title = title_line
+            .strip_prefix("标题：")
+            .or_else(|| title_line.strip_prefix("标题:"))
+            .unwrap_or("")
+            .trim();
+        if !parsed_title.is_empty() {
+            title = parsed_title.to_string();
+        }
     }
     if lines
         .first()
@@ -2976,7 +3278,7 @@ fn clean_rewrite_block(block: &str) -> String {
     {
         lines.remove(0);
     }
-    lines.join("\n").trim().to_string()
+    (title, lines.join("\n").trim().to_string())
 }
 
 fn mark_chapters_rewrite_failed(
@@ -2986,6 +3288,23 @@ fn mark_chapters_rewrite_failed(
     for chapter in chapters {
         set_chapter_status(state, &chapter.id, "rewrite_status", "failed")?;
     }
+    Ok(())
+}
+
+fn save_parsed_rewrites(
+    state: &State<'_, AppState>,
+    rewrites: Vec<ParsedChapterRewrite>,
+) -> Result<(), String> {
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let tx = conn.transaction().map_err(to_string)?;
+    for rewrite in rewrites {
+        tx.execute(
+            "UPDATE chapters SET title = ?1, rewrite_text = ?2, rewrite_status = 'completed' WHERE id = ?3",
+            params![rewrite.title.trim(), rewrite.text.trim(), rewrite.id],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)?;
     Ok(())
 }
 
@@ -3025,61 +3344,103 @@ fn build_analysis_prompt_with_settings(chapter: &Chapter, settings: &NovelSettin
     )
 }
 
+#[allow(dead_code)]
 fn build_batch_rewrite_prompt_with_settings(
     chapters: &[Chapter],
     canon_text: &str,
     settings: &NovelSettings,
 ) -> String {
+    build_batch_rewrite_prompt_with_context(chapters, canon_text, settings, "")
+}
+
+fn build_batch_rewrite_prompt_with_context(
+    chapters: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+    shard_context: &str,
+) -> String {
+    let shard_context = if shard_context.trim().is_empty() {
+        "无".to_string()
+    } else {
+        shard_context.trim().to_string()
+    };
     format!(
         r#"改写要求：
 1. 将原本男女性别叙事自然改写为双女主百合叙事。
 2. 采用中度再创作：保留主线、冲突、章节顺序和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
-3. 清除所有原男性主角痕迹，包括代词、身体描述、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
-4. 主角姓名必须按同音或近音原则女性化，优先保留姓氏；例如萧炎改为萧妍，李火旺改为李火婉。其他指定姓名只在文本中实际出现时女性化。
-5. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
-6. 输入是一整个批次，必须一次性改写完整批次，不要逐章分开回答。
-7. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只改写正文内容。
-8. 只输出改写后的完整批次正文，不要解释、不要 Markdown 包裹。
+3. 标题和正文都必须改写：标题中的主角原名、男性身份、男性称谓、男性化意象也要同步女性化。
+4. 清除所有原男性主角痕迹，包括姓名、代词、身体描述、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
+5. 主角姓名必须按同音或近音原则女性化，优先保留姓氏；例如萧炎改为萧妍，李火旺改为李火婉。其他指定姓名只在文本中实际出现时女性化。
+6. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
+7. 输入可能是完整批次，也可能是并发分片；必须一次性改写当前输入中实际出现的全部章节，不要逐章分开回答。
+8. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只改写标题和正文内容。
+9. 只输出当前输入章节的改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
+{}
+
+并发分片上下文：
 {}
 
 一致性资产：
 {}
 
-原批次：
+当前输入章节：
 {}"#,
         build_rewrite_settings_prompt(settings),
+        shard_context,
         canon_text,
         build_batch_chapter_text(chapters, false)
     )
 }
 
+#[allow(dead_code)]
 fn build_batch_review_prompt_with_settings(
     chapters: &[Chapter],
     rewrites: &[ParsedChapterRewrite],
     settings: &NovelSettings,
 ) -> String {
+    build_batch_review_prompt_with_context(chapters, rewrites, settings, "")
+}
+
+fn build_batch_review_prompt_with_context(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+    shard_context: &str,
+) -> String {
+    let shard_context = if shard_context.trim().is_empty() {
+        "无".to_string()
+    } else {
+        shard_context.trim().to_string()
+    };
     format!(
         r#"请复检并自动修正以下批次改写稿。
 
 重点检查：
 1. 主角姓名是否已按规则女性化，且全批次一致。
-2. 其他指定姓名只在出现时女性化，且前后一致。
-3. 人称代词、称谓、身体描写、社会称呼和互动细节是否仍残留男性主角痕迹。
-4. 身材、体型和高级设定是否被遵守。
-5. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。
+2. 每章标题是否也完成女性化，标题里不能残留主角男性姓名、男性身份或男性称谓。
+3. 其他指定姓名只在出现时女性化，且前后一致。
+4. 人称代词、称谓、身体描写、外貌气质、社会称呼、动作习惯和互动细节是否仍残留男性主角痕迹。
+5. 身材、体型和高级设定是否被遵守。
+6. 如果当前为创意模式，检查每章关键场景是否有足够清晰的女性化感知点；若只是替换姓名/代词，应主动补充贴合原剧情的女性外貌、神态、互动距离、称谓变化、百合向情绪张力等细节。
+7. 改写后的标题和正文是否能让没读过原文的读者看不出主角原本是男性。
+8. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。
 
 输出要求：
 1. 如果发现问题，直接在正文中修正。
 2. 如果没有问题，原样输出改写稿。
-3. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只修正文内容。
-4. 只输出修正后的完整批次正文，不要解释、不要 Markdown 包裹。
+3. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只修正标题和正文内容。
+4. 只输出当前输入章节修正后的标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
+{}
+
+并发分片上下文：
 {}
 
 待复检改写稿：
 {}"#,
         build_rewrite_settings_prompt(settings),
+        shard_context,
         build_batch_rewrite_text(chapters, rewrites)
     )
 }
@@ -3094,10 +3455,11 @@ fn build_rewrite_prompt_with_settings(
         r#"改写要求：
 1. 将原本男女主叙事自然改写为双女主百合叙事。
 2. 采用中度再创作：保留主线、冲突、章节顺序和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
-3. 清除所有原男主痕迹，包括代词、身体描写、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
-4. 主角姓名必须按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉；其他指定姓名只在本章出现时女性化。
-5. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
-6. 保持中文网文可读性，只输出改写后的正文，不要解释。
+3. 标题和正文都必须改写，标题中的主角原名、男性身份、男性称谓、男性化意象也要同步女性化。
+4. 清除所有原男主痕迹，包括姓名、代词、身体描写、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
+5. 主角姓名必须按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉；其他指定姓名只在本章出现时女性化。
+6. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
+7. 保持中文网文可读性，只输出改写后的标题和正文，不要解释。
 
 {}
 
@@ -3115,10 +3477,20 @@ fn build_rewrite_prompt_with_settings(
     )
 }
 
+#[allow(dead_code)]
 fn build_batch_analysis_prompt(chapters: &[Chapter]) -> String {
+    build_batch_analysis_prompt_with_context(chapters, "")
+}
+
+fn build_batch_analysis_prompt_with_context(chapters: &[Chapter], shard_context: &str) -> String {
     let (start_index, end_index) = match (chapters.first(), chapters.last()) {
         (Some(first), Some(last)) => (first.index, last.index),
         _ => (0, 0),
+    };
+    let shard_context = if shard_context.trim().is_empty() {
+        "无".to_string()
+    } else {
+        shard_context.trim().to_string()
     };
     format!(
         r#"请只基于原文分析以下整个批次，并输出一个合法 JSON 对象。
@@ -3140,18 +3512,22 @@ fn build_batch_analysis_prompt(chapters: &[Chapter]) -> String {
 }}
 
 要求：
-1. 输入是一个完整批次，必须一次性分析完整批次。
-2. 只输出一份批次级一致性资产，不要按章节逐章输出，不要输出 `chapters` 数组。
+1. 输入可能是完整批次，也可能是并发分片；必须一次性分析当前输入中实际出现的全部章节。
+2. 只输出一份当前输入级一致性资产，不要按章节逐章输出，不要输出 `chapters` 数组。
 3. 不要补充原文没有的信息，不要改变原文人物、姓名、关系或剧情。
 4. 不要提出任何后续处理方向。
 5. JSON 字符串内部如果需要换行，必须写成 `\n`，不要在字符串里输出真实换行或其他控制字符。
 6. 只输出 JSON，不要解释、不要 Markdown。
 
-原文批次：
+并发分片上下文：
+{}
+
+当前输入章节：
 {}"#,
         start_index,
         end_index,
         chapters.len(),
+        shard_context,
         build_batch_analysis_chapter_text(chapters)
     )
 }
@@ -3213,8 +3589,9 @@ fn build_rewrite_prompt(chapter: &Chapter, canon_text: &str) -> String {
         r#"改写要求：
 1. 将原本男女主叙事自然改写为双女主百合叙事。
 2. 采用中度再创作：保留主线、冲突、章节顺序和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
-3. 清除所有原男主痕迹，包括代词、身体描写、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
-4. 保持中文网文可读性，只输出改写后的正文，不要解释。
+3. 标题和正文都必须改写，标题中的主角原名、男性身份、男性称谓、男性化意象也要同步女性化。
+4. 清除所有原男主痕迹，包括姓名、代词、身体描写、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
+5. 保持中文网文可读性，只输出改写后的标题和正文，不要解释。
 
 一致性资产：
 {}
@@ -3712,6 +4089,27 @@ fn append_ai_log(
     Ok(())
 }
 
+fn format_model_log_content(
+    output: &ModelOutput,
+    profile: &ModelProfile,
+    review_enabled: Option<bool>,
+) -> String {
+    let review_label = match review_enabled {
+        Some(true) => "开启",
+        Some(false) => "关闭",
+        None => "不适用",
+    };
+    format!(
+        "调用统计：\n- 输入字符数：{}\n- 输出字符数：{}\n- AI 调用耗时：{:.2} 秒\n- 复检：{}\n- 思考模式：{}\n\n{}",
+        output.input_chars,
+        output.output_chars,
+        output.elapsed_ms as f64 / 1000.0,
+        review_label,
+        profile.thinking_mode,
+        output.text.trim()
+    )
+}
+
 fn truncate_text(text: &str, max_chars: usize) -> String {
     let mut value = text.chars().take(max_chars).collect::<String>();
     if text.chars().count() > max_chars {
@@ -3845,10 +4243,28 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].id, "chapter-1");
         assert_eq!(parsed[0].index, 1);
+        assert_eq!(parsed[0].title, "第一章");
         assert_eq!(parsed[0].text, "改写一");
         assert_eq!(parsed[1].id, "chapter-2");
         assert_eq!(parsed[1].index, 2);
+        assert_eq!(parsed[1].title, "第二章");
         assert_eq!(parsed[1].text, "改写二");
+    }
+
+    #[test]
+    fn batch_rewrite_parser_extracts_rewritten_title() {
+        let chapters = vec![sample_chapter(1, "第一章 男儿志", "原文一")];
+        let output = format!(
+            "{}\n标题：第一章 少女志\n正文：\n改写一\n{}",
+            chapter_start_marker(&chapters[0]),
+            chapter_end_marker(&chapters[0])
+        );
+
+        let parsed = parse_batch_rewrite_output(&output, &chapters).expect("valid batch output");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].title, "第一章 少女志");
+        assert_eq!(parsed[0].text, "改写一");
     }
 
     #[test]
@@ -3872,6 +4288,67 @@ mod tests {
             chapter_end_marker(&chapters[0])
         );
         assert!(parse_batch_rewrite_output(&out_of_order, &chapters).is_err());
+    }
+
+    #[test]
+    fn batch_rewrite_parser_accepts_missing_end_marker_when_boundary_is_clear() {
+        let chapters = vec![
+            sample_chapter(1, "第一章", "原文一"),
+            sample_chapter(2, "第二章", "原文二"),
+        ];
+        let missing_first_end = format!(
+            "{}\n正文：\n改写一\n\n{}\n正文：\n改写二\n{}",
+            chapter_start_marker(&chapters[0]),
+            chapter_start_marker(&chapters[1]),
+            chapter_end_marker(&chapters[1])
+        );
+        let parsed = parse_batch_rewrite_output(&missing_first_end, &chapters)
+            .expect("next start marker is enough to recover missing end marker");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].text, "改写一");
+        assert_eq!(parsed[1].text, "改写二");
+
+        let missing_last_end = format!(
+            "{}\n正文：\n改写一\n{}\n\n{}\n正文：\n改写二",
+            chapter_start_marker(&chapters[0]),
+            chapter_end_marker(&chapters[0]),
+            chapter_start_marker(&chapters[1])
+        );
+        let parsed = parse_batch_rewrite_output(&missing_last_end, &chapters)
+            .expect("final non-empty block is enough to recover missing final end marker");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].text, "改写二");
+    }
+
+    #[test]
+    fn batch_rewrite_parser_ignores_extra_unexpected_chapters_after_expected_shard() {
+        let expected = vec![
+            sample_chapter(25, "第二十五章", "原文二十五"),
+            sample_chapter(26, "第二十六章", "原文二十六"),
+            sample_chapter(27, "第二十七章", "原文二十七"),
+        ];
+        let extra = vec![
+            sample_chapter(28, "第二十八章", "原文二十八"),
+            sample_chapter(29, "第二十九章", "原文二十九"),
+            sample_chapter(30, "第三十章", "原文三十"),
+        ];
+        let mut output = String::new();
+        for chapter in expected.iter().chain(extra.iter()) {
+            output.push_str(&format!(
+                "{}\n标题：{}\n正文：\n改写{}\n{}\n\n",
+                chapter_start_marker(chapter),
+                chapter.title,
+                chapter.index,
+                chapter_end_marker(chapter)
+            ));
+        }
+
+        let parsed = parse_batch_rewrite_output(&output, &expected)
+            .expect("extra unexpected chapter markers should be ignored after expected shard");
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].index, 25);
+        assert_eq!(parsed[2].index, 27);
     }
 
     #[test]
@@ -4088,6 +4565,95 @@ mod tests {
     }
 
     #[test]
+    fn app_review_setting_defaults_off_and_can_be_enabled() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+
+        assert!(!load_review_enabled(&conn).expect("load default review setting"));
+        assert_eq!(
+            load_rewrite_parallelism(&conn).expect("load default parallelism"),
+            6
+        );
+
+        save_review_enabled(&conn, true).expect("enable review");
+        assert!(load_review_enabled(&conn).expect("load enabled review setting"));
+
+        save_review_enabled(&conn, false).expect("disable review");
+        assert!(!load_review_enabled(&conn).expect("load disabled review setting"));
+
+        save_rewrite_parallelism(&conn, 10).expect("save parallelism");
+        assert_eq!(
+            load_rewrite_parallelism(&conn).expect("load parallelism"),
+            10
+        );
+        save_rewrite_parallelism(&conn, 2).expect("normalize invalid parallelism");
+        assert_eq!(
+            load_rewrite_parallelism(&conn).expect("load normalized parallelism"),
+            6
+        );
+    }
+
+    #[test]
+    fn rewrite_parallelism_splits_batch_into_contiguous_shards() {
+        let chapters = (1..=30)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
+            .collect::<Vec<_>>();
+
+        let six = split_chapters_for_parallelism(&chapters, 6);
+        assert_eq!(six.len(), 6);
+        assert!(six.iter().all(|shard| shard.len() == 5));
+        assert_eq!(six[0][0].index, 1);
+        assert_eq!(six[5][4].index, 30);
+
+        let three = split_chapters_for_parallelism(&chapters, 3);
+        assert_eq!(three.len(), 3);
+        assert!(three.iter().all(|shard| shard.len() == 10));
+
+        let ten = split_chapters_for_parallelism(&chapters, 10);
+        assert_eq!(ten.len(), 10);
+        assert!(ten.iter().all(|shard| shard.len() == 3));
+
+        let single = split_chapters_for_parallelism(&chapters, 1);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].len(), 30);
+    }
+
+    #[test]
+    fn shard_context_limits_model_to_current_shard_chapters() {
+        let chapters = (25..=27)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
+            .collect::<Vec<_>>();
+
+        let context = format_shard_context(8, 10, 10, "第1-30章", &chapters);
+
+        assert!(context.contains("分片 9/10"));
+        assert!(context.contains("第25-27章"));
+        assert!(context.contains("第25章、第26章、第27章"));
+        assert!(context.contains("严禁输出本分片外的任何章节"));
+    }
+
+    #[test]
+    fn canon_assets_are_compacted_before_rewrite_prompt() {
+        let huge_content = (0..1_200)
+            .map(|index| format!("人物设定行{index}：很长的一致性资产内容。"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let assets = vec![CanonAsset {
+            novel_id: "novel-1".to_string(),
+            kind: "AI分析汇总".to_string(),
+            content: huge_content.clone(),
+            updated_at: "now".to_string(),
+        }];
+
+        let compact = build_compact_canon_text(&assets);
+
+        assert!(compact.contains("AI分析汇总"));
+        assert!(compact.contains("一致性资产已压缩"));
+        assert!(compact.chars().count() < huge_content.chars().count());
+        assert!(compact.chars().count() < 4_500);
+    }
+
+    #[test]
     fn rewrite_settings_prompt_includes_selected_rewrite_mode() {
         let strict_settings = NovelSettings {
             novel_id: "novel-1".to_string(),
@@ -4108,9 +4674,42 @@ mod tests {
         assert!(strict_prompt.contains("严谨模式"));
         assert!(strict_prompt.contains("更加忠于原文"));
         assert!(strict_prompt.contains("不对主角添加过多额外女性化描写"));
+        assert!(strict_prompt.contains("章节标题和正文都必须检查主角姓名"));
+        assert!(strict_prompt.contains("看不出主角改写前曾是男性"));
+        assert!(strict_prompt.contains("男性化姓名、代词、称谓、身份、身体特征"));
         assert!(creative_prompt.contains("创意模式"));
-        assert!(creative_prompt.contains("更多女性化描写"));
-        assert!(creative_prompt.contains("女性外貌描写"));
+        assert!(creative_prompt.contains("优先级高于普通的“中度再创作”约束"));
+        assert!(creative_prompt.contains("每章都能明确感知主角已经从男性变为女性"));
+        assert!(creative_prompt.contains("每章至少在关键场景中增加或强化 2-4 处女性化感知点"));
+        assert!(creative_prompt.contains("同性亲密感和百合向情绪推进"));
+    }
+
+    #[test]
+    fn review_prompt_checks_creative_mode_strength() {
+        let chapter = sample_chapter(1, "第一章", "萧炎走进大厅。");
+        let settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            additional_feminize_names: "".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "creative".to_string(),
+            advanced_settings: "".to_string(),
+            updated_at: "now".to_string(),
+        };
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "萧妍走进大厅。".to_string(),
+        };
+        let prompt = build_batch_review_prompt_with_settings(&[chapter], &[rewrite], &settings);
+
+        assert!(prompt.contains("如果当前为创意模式"));
+        assert!(prompt.contains("只是替换姓名/代词"));
+        assert!(prompt.contains("每章标题是否也完成女性化"));
+        assert!(prompt.contains("女性外貌、神态、互动距离、称谓变化、百合向情绪张力"));
+        assert!(prompt.contains("看不出主角原本是男性"));
     }
 
     #[test]

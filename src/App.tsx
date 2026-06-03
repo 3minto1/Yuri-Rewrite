@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  ArrowLeft,
   BookOpen,
   CheckCircle2,
   ClipboardList,
@@ -115,6 +116,8 @@ type AiLog = {
 
 type AppSettings = {
   export_dir?: string | null;
+  review_enabled?: boolean;
+  rewrite_parallelism?: 1 | 3 | 6 | 10;
 };
 
 type UpdateCheckResult = {
@@ -596,7 +599,13 @@ export default function App() {
     try {
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
-      const saved = await invoke<AppSettings>("save_app_settings", { settings: { export_dir: selected } });
+      const saved = await invoke<AppSettings>("save_app_settings", {
+        settings: {
+          export_dir: selected,
+          review_enabled: settings.review_enabled ?? false,
+          rewrite_parallelism: settings.rewrite_parallelism ?? 6
+        }
+      });
       setSettings(saved);
       showNotice(`已设置导出目录：${saved.export_dir}`);
     } catch (error) {
@@ -610,9 +619,56 @@ export default function App() {
     setBusy("clear-export-dir");
     setNotice("");
     try {
-      const saved = await invoke<AppSettings>("save_app_settings", { settings: { export_dir: null } });
+      const saved = await invoke<AppSettings>("save_app_settings", {
+        settings: {
+          export_dir: null,
+          review_enabled: settings.review_enabled ?? false,
+          rewrite_parallelism: settings.rewrite_parallelism ?? 6
+        }
+      });
       setSettings(saved);
       showNotice("已恢复默认导出目录。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function toggleReviewEnabled() {
+    setBusy("review-setting");
+    setNotice("");
+    try {
+      const nextEnabled = !(settings.review_enabled ?? false);
+      const saved = await invoke<AppSettings>("save_app_settings", {
+        settings: {
+          export_dir: settings.export_dir ?? null,
+          review_enabled: nextEnabled,
+          rewrite_parallelism: settings.rewrite_parallelism ?? 6
+        }
+      });
+      setSettings(saved);
+      showNotice(nextEnabled ? "已开启改写复检。" : "已关闭改写复检。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function setRewriteParallelism(value: 1 | 3 | 6 | 10) {
+    setBusy("parallelism-setting");
+    setNotice("");
+    try {
+      const saved = await invoke<AppSettings>("save_app_settings", {
+        settings: {
+          export_dir: settings.export_dir ?? null,
+          review_enabled: settings.review_enabled ?? false,
+          rewrite_parallelism: value
+        }
+      });
+      setSettings(saved);
+      showNotice(value === 1 ? "已切换为不并发处理。" : `已设置分析/改写并发请求数：${value}。`);
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -927,6 +983,10 @@ export default function App() {
             <div className="page-heading">
               <h2>AI 调用日志</h2>
               <div className="panel-actions">
+                <button onClick={() => setActiveView("workspace")}>
+                  <ArrowLeft size={16} />
+                  返回
+                </button>
                 <button onClick={clearLogs} disabled={busy !== "" || logs.length === 0}>
                   <Trash2 size={16} />
                   清空
@@ -975,6 +1035,10 @@ export default function App() {
             <div className="page-heading">
               <h2>基本设定</h2>
               <div className="panel-actions">
+                <button onClick={() => setActiveView("workspace")}>
+                  <ArrowLeft size={16} />
+                  返回
+                </button>
                 <button onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings"}>
                   {busy === "novel-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                   保存
@@ -1042,6 +1106,12 @@ export default function App() {
           <div className="page-panel">
             <div className="page-heading">
               <h2>设置</h2>
+              <div className="panel-actions">
+                <button onClick={() => setActiveView("workspace")}>
+                  <ArrowLeft size={16} />
+                  返回
+                </button>
+              </div>
             </div>
             <section className="settings-section">
               <h3>导出目录</h3>
@@ -1054,6 +1124,44 @@ export default function App() {
                 <button onClick={clearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir"}>
                   恢复默认
                 </button>
+              </div>
+            </section>
+            <section className="settings-section">
+              <h3>改写复检</h3>
+              <div className="setting-toggle-row">
+                <button
+                  className={settings.review_enabled ? "setting-switch active" : "setting-switch"}
+                  onClick={toggleReviewEnabled}
+                  disabled={busy === "review-setting"}
+                  title="开启复检时AI改写完成后会检查一遍是否有疏漏，会增加改写时间"
+                >
+                  {settings.review_enabled ? "开启" : "关闭"}
+                </button>
+                <span>默认关闭，开启后每批改写会额外进行一次 AI 复检修正。</span>
+              </div>
+            </section>
+            <section className="settings-section">
+              <h3>分析/改写并发</h3>
+              <div
+                className="setting-toggle-row"
+                title="较高并发通常可以缩短分析和改写等待时间，但会同时增加请求数量；请求越多，触发限流、网络失败或分片解析失败的概率越高，也可能因每个分片都携带设定和一致性资产而略微增加 token 消耗。若频繁失败或服务商限流，请降低并发数。"
+              >
+                <div className="mode-toggle mode-toggle-four setting-parallelism" role="radiogroup" aria-label="分析和改写并发请求数">
+                  {([10, 6, 3, 1] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={(settings.rewrite_parallelism ?? 6) === value ? "active" : ""}
+                      aria-checked={(settings.rewrite_parallelism ?? 6) === value}
+                      role="radio"
+                      disabled={busy === "parallelism-setting"}
+                      onClick={() => setRewriteParallelism(value)}
+                    >
+                      {value === 1 ? "不并发" : value}
+                    </button>
+                  ))}
+                </div>
+                <span>默认 6：30 章会拆成 6 个请求，每个约 5 章；分析和改写共用该设置，并尽量共享设定和一致性资产。</span>
               </div>
             </section>
           </div>
@@ -1072,10 +1180,16 @@ export default function App() {
                   ))}
                 </select>
               </label>
-              <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
-                <Download size={17} />
-                TXT
-              </button>
+              <div className="compare-toolbar-actions">
+                <button onClick={() => setActiveView("workspace")}>
+                  <ArrowLeft size={17} />
+                  返回
+                </button>
+                <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
+                  <Download size={17} />
+                  TXT
+                </button>
+              </div>
             </div>
             {selectedChapter ? (
               <div className="large-compare-grid">

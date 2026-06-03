@@ -527,6 +527,35 @@ pre {
   margin-top: 12px;
 }
 
+.setting-toggle-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 12px;
+}
+
+.setting-toggle-row span {
+  color: #6d665d;
+  font-size: 14px;
+}
+
+.setting-switch {
+  min-width: 86px;
+}
+
+.setting-switch.active {
+  background: #2f6f6b;
+  border-color: #2f6f6b;
+  color: #fff;
+}
+
+.setting-parallelism {
+  max-width: 420px;
+  min-width: min(100%, 320px);
+  width: 100%;
+}
+
 .novel-settings-section {
   max-width: 980px;
 }
@@ -565,6 +594,10 @@ pre {
 
 .mode-toggle-three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mode-toggle-four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .mode-toggle button {
@@ -860,6 +893,7 @@ label {
 .compare-page-toolbar {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: space-between;
 }
@@ -871,6 +905,14 @@ label {
 
 .compare-page-toolbar button {
   flex: 0 0 auto;
+}
+
+.compare-toolbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
 .large-compare-grid {
