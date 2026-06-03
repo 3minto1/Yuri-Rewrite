@@ -1490,18 +1490,18 @@ async fn generate_rewrite_shards(
                 &client,
                 &profile_for_task,
                 &api_key,
-                "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须保留用户提供的章节边界标记，只输出当前输入章节改写后的标题和正文，不要输出输入外章节。",
+                "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和正文，不要输出输入外章节。",
                 &prompt,
                 false,
             )
             .await;
-            (idx, shard_label, shard_for_task, output)
+            (idx, shard_label, context, shard_for_task, output)
         });
     }
 
     let mut parsed_by_shard = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        let (idx, shard_label, shard, output) = result.map_err(to_string)?;
+        let (idx, shard_label, context, shard, output) = result.map_err(to_string)?;
         match output {
             Ok(output) => {
                 append_ai_log(
@@ -1529,7 +1529,27 @@ async fn generate_rewrite_shards(
                             output.reasoning.as_deref(),
                             Some(&output.raw_response),
                         )?;
-                        return Err(format!("{}：{}", shard_label, error));
+                        match retry_rewrite_shard_after_parse_error(
+                            state,
+                            novel_id,
+                            profile,
+                            api_key,
+                            &shard,
+                            canon_text,
+                            settings,
+                            &context,
+                            &shard_label,
+                            review_enabled,
+                            &error,
+                            &output.text,
+                        )
+                        .await
+                        {
+                            Ok(parsed) => parsed,
+                            Err(retry_error) => {
+                                return Err(format!("{}：{}", shard_label, retry_error));
+                            }
+                        }
                     }
                 };
                 parsed_by_shard.push((idx, parsed));
@@ -1591,23 +1611,32 @@ async fn generate_review_shards(
         let profile_for_task = profile.clone();
         let api_key = api_key.to_string();
         let shard_for_task = shard.clone();
+        let rewrite_shard_for_task = rewrite_shard.clone();
         tasks.spawn(async move {
             let output = generate_text(
                 &client,
                 &profile_for_task,
                 &api_key,
-                "你是中文小说改写质检与修正助手。检查并修正改写稿中的标题、姓名、代词、称谓、设定和逻辑问题，必须保留章节边界标记，只输出当前输入章节修正后的标题和正文，不要输出输入外章节。",
+                "你是中文小说改写质检与修正助手。检查并修正改写稿中的标题、姓名、代词、称谓、设定和逻辑问题，必须逐字保留章节边界标记，只输出当前输入章节的边界标记、标题和正文，不要输出输入外章节。",
                 &prompt,
                 false,
             )
             .await;
-            (idx, shard_label, shard_for_task, output)
+            (
+                idx,
+                shard_label,
+                context,
+                shard_for_task,
+                rewrite_shard_for_task,
+                output,
+            )
         });
     }
 
     let mut parsed_by_shard = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        let (idx, shard_label, shard, output) = result.map_err(to_string)?;
+        let (idx, shard_label, context, shard, rewrite_shard, output) =
+            result.map_err(to_string)?;
         match output {
             Ok(output) => {
                 append_ai_log(
@@ -1635,7 +1664,26 @@ async fn generate_review_shards(
                             output.reasoning.as_deref(),
                             Some(&output.raw_response),
                         )?;
-                        return Err(format!("{}：{}", shard_label, error));
+                        match retry_review_shard_after_parse_error(
+                            state,
+                            novel_id,
+                            profile,
+                            api_key,
+                            &shard,
+                            &rewrite_shard,
+                            settings,
+                            &context,
+                            &shard_label,
+                            &error,
+                            &output.text,
+                        )
+                        .await
+                        {
+                            Ok(parsed) => parsed,
+                            Err(retry_error) => {
+                                return Err(format!("{}：{}", shard_label, retry_error));
+                            }
+                        }
                     }
                 };
                 parsed_by_shard.push((idx, parsed));
@@ -1662,6 +1710,183 @@ async fn generate_review_shards(
         .into_iter()
         .flat_map(|(_, parsed)| parsed)
         .collect())
+}
+
+async fn retry_rewrite_shard_after_parse_error(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+    shard_context: &str,
+    shard_label: &str,
+    review_enabled: bool,
+    parse_error: &str,
+    bad_output: &str,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let retry_context = format!(
+        "{}\n\n修复重试：上一次改写输出无法解析，错误：{}。请完全重新输出当前分片，只输出当前分片要求的章节。每章必须包含原样章节开始标记、改写后标题、非空正文和原样章节结束标记。正文不能留空，不能输出当前分片外章节。",
+        shard_context.trim(),
+        parse_error
+    );
+    let base_prompt =
+        build_batch_rewrite_prompt_with_context(shard, canon_text, settings, retry_context.trim());
+    let prompt = format!(
+        "{}\n\n上一次无法解析的输出如下，仅供你避开格式错误，不要照抄空正文或错误边界：\n{}",
+        base_prompt,
+        truncate_text(bad_output, 12_000)
+    );
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说改写格式修复助手。必须重新输出当前分片的完整百合改写结果。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和非空正文，不要输出输入外章节。",
+        &prompt,
+        false,
+    )
+    .await;
+
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次改写重试",
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, Some(review_enabled)),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            match parse_batch_rewrite_output(&output.text, shard) {
+                Ok(parsed) => Ok(parsed),
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        "批次改写重试解析",
+                        Some(shard_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    Err(format!(
+                        "解析失败后已自动重试，但重试输出仍无法解析：{}",
+                        error
+                    ))
+                }
+            }
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次改写重试",
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(format!("解析失败后自动重试也失败：{}", error))
+        }
+    }
+}
+
+async fn retry_review_shard_after_parse_error(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    rewrite_shard: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+    shard_context: &str,
+    shard_label: &str,
+    parse_error: &str,
+    bad_output: &str,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let retry_context = format!(
+        "{}\n\n修复重试：上一次复检输出无法解析，错误：{}。请完全重新输出当前分片，只输出当前分片要求的章节。每章必须包含原样章节开始标记、修正后标题、非空正文和原样章节结束标记。正文不能留空，不能输出当前分片外章节。",
+        shard_context.trim(),
+        parse_error
+    );
+    let base_prompt = build_batch_review_prompt_with_context(
+        shard,
+        rewrite_shard,
+        settings,
+        retry_context.trim(),
+    );
+    let prompt = format!(
+        "{}\n\n上一次无法解析的复检输出如下，仅供你避开格式错误，不要照抄空正文或错误边界：\n{}",
+        base_prompt,
+        truncate_text(bad_output, 12_000)
+    );
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说改写质检格式修复助手。必须重新输出当前分片的完整修正版。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和非空正文，不要输出输入外章节。",
+        &prompt,
+        false,
+    )
+    .await;
+
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次复检重试",
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, Some(true)),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            match parse_batch_rewrite_output(&output.text, shard) {
+                Ok(parsed) => Ok(parsed),
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        "批次复检重试解析",
+                        Some(shard_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    Err(format!(
+                        "复检解析失败后已自动重试，但重试输出仍无法解析：{}",
+                        error
+                    ))
+                }
+            }
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次复检重试",
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(format!("复检解析失败后自动重试也失败：{}", error))
+        }
+    }
 }
 
 fn split_chapters_for_parallelism(
@@ -3198,44 +3423,77 @@ fn parse_batch_rewrite_output(
     output: &str,
     expected_chapters: &[Chapter],
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
-    let mut cursor = output.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = output.replace("\r\n", "\n").replace('\r', "\n");
+    let marker_error = parse_batch_rewrite_marker_output(&normalized, expected_chapters).err();
+    if marker_error.is_none() {
+        return parse_batch_rewrite_marker_output(&normalized, expected_chapters);
+    }
+    if marker_error
+        .as_deref()
+        .is_some_and(|error| error.contains("章节顺序不匹配"))
+    {
+        return Err(marker_error.unwrap());
+    }
+
+    match parse_markerless_rewrite_output(&normalized, expected_chapters) {
+        Ok(parsed) => Ok(parsed),
+        Err(fallback_error) => Err(match marker_error {
+            Some(error) => format!("{}；兜底解析也失败：{}", error, fallback_error),
+            None => fallback_error,
+        }),
+    }
+}
+
+fn parse_batch_rewrite_marker_output(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let mut cursor = output.to_string();
     let mut parsed = Vec::with_capacity(expected_chapters.len());
 
     for (idx, chapter) in expected_chapters.iter().enumerate() {
         let start_marker = chapter_start_marker(chapter);
         let end_marker = chapter_end_marker(chapter);
-        let start_pos = cursor
-            .find(&start_marker)
+        let (start_pos, start_len) = find_rewrite_marker(&cursor, chapter, "START")
             .ok_or_else(|| format!("AI 输出缺少章节开始标记：{}", start_marker))?;
-        if !cursor[..start_pos].trim().is_empty() {
+        let before_start = cursor[..start_pos].trim();
+        if !before_start.is_empty() && !before_start.contains("YURI_REWRITE_CHAPTER_START") {
             return Err(format!(
                 "AI 输出在章节 {} 开始标记前包含多余内容。",
                 chapter.index
             ));
         }
-        let after_start = cursor[start_pos + start_marker.len()..].to_string();
-        let (block, next_cursor) = if let Some(end_pos) = after_start.find(&end_marker) {
-            (
-                after_start[..end_pos].to_string(),
-                after_start[end_pos + end_marker.len()..].to_string(),
-            )
-        } else if let Some(next_chapter) = expected_chapters.get(idx + 1) {
-            let next_start_marker = chapter_start_marker(next_chapter);
-            let next_pos = after_start.find(&next_start_marker).ok_or_else(|| {
-                format!(
-                    "AI 输出缺少章节结束标记：{}，且无法定位下一章开始标记：{}",
-                    end_marker, next_start_marker
+        if contains_expected_rewrite_start_marker(before_start, &expected_chapters[idx + 1..]) {
+            return Err(format!(
+                "AI 输出章节顺序不匹配：在章节 {} 前出现了当前分片内的后续章节标记。",
+                chapter.index
+            ));
+        }
+        let after_start = cursor[start_pos + start_len..].to_string();
+        let (block, next_cursor) =
+            if let Some((end_pos, end_len)) = find_rewrite_marker(&after_start, chapter, "END") {
+                (
+                    after_start[..end_pos].to_string(),
+                    after_start[end_pos + end_len..].to_string(),
                 )
-            })?;
-            (
-                after_start[..next_pos].to_string(),
-                after_start[next_pos..].to_string(),
-            )
-        } else if !after_start.trim().is_empty() {
-            (after_start, String::new())
-        } else {
-            return Err(format!("AI 输出缺少章节结束标记：{}", end_marker));
-        };
+            } else if let Some(next_chapter) = expected_chapters.get(idx + 1) {
+                let next_start_marker = chapter_start_marker(next_chapter);
+                let (next_pos, _) = find_rewrite_marker(&after_start, next_chapter, "START")
+                    .ok_or_else(|| {
+                        format!(
+                            "AI 输出缺少章节结束标记：{}，且无法定位下一章开始标记：{}",
+                            end_marker, next_start_marker
+                        )
+                    })?;
+                (
+                    after_start[..next_pos].to_string(),
+                    after_start[next_pos..].to_string(),
+                )
+            } else if !after_start.trim().is_empty() {
+                (after_start, String::new())
+            } else {
+                return Err(format!("AI 输出缺少章节结束标记：{}", end_marker));
+            };
         let (title, text) = clean_rewrite_block(&block, &chapter.title);
         if text.trim().is_empty() {
             return Err(format!("章节 {} 的改写正文为空。", chapter.index));
@@ -3252,6 +3510,193 @@ fn parse_batch_rewrite_output(
     let trailing = cursor.trim();
     if !trailing.is_empty() && !trailing.contains("YURI_REWRITE_CHAPTER_START") {
         return Err("AI 输出在最后一个章节结束标记后包含多余内容。".to_string());
+    }
+    Ok(parsed)
+}
+
+fn find_rewrite_marker(text: &str, chapter: &Chapter, kind: &str) -> Option<(usize, usize)> {
+    let exact = if kind == "START" {
+        chapter_start_marker(chapter)
+    } else {
+        chapter_end_marker(chapter)
+    };
+    if let Some(pos) = text.find(&exact) {
+        return Some((pos, exact.len()));
+    }
+
+    let pattern = format!(
+        r#"<<<\s*YURI_REWRITE_CHAPTER_{}\s+index\s*=\s*{}(?:\s+id\s*=\s*[^>\s]+)?\s*>>>"#,
+        kind, chapter.index
+    );
+    let regex = Regex::new(&pattern).ok()?;
+    regex
+        .find(text)
+        .map(|mat| (mat.start(), mat.end() - mat.start()))
+}
+
+fn contains_expected_rewrite_start_marker(text: &str, chapters: &[Chapter]) -> bool {
+    chapters
+        .iter()
+        .any(|chapter| find_rewrite_marker(text, chapter, "START").is_some())
+}
+
+fn parse_markerless_rewrite_output(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let normalized = strip_rewrite_marker_lines(output);
+    if normalized.trim().is_empty() {
+        return Err("AI 输出为空，无法兜底解析。".to_string());
+    }
+
+    if let Ok(parsed) = parse_markerless_by_title_labels(&normalized, expected_chapters) {
+        return Ok(parsed);
+    }
+    if let Ok(parsed) = parse_markerless_by_expected_titles(&normalized, expected_chapters) {
+        return Ok(parsed);
+    }
+    if let Ok(parsed) = parse_markerless_by_heading_regex(&normalized, expected_chapters) {
+        return Ok(parsed);
+    }
+    if expected_chapters.len() == 1 {
+        let (title, text) = clean_rewrite_block(&normalized, &expected_chapters[0].title);
+        if !text.trim().is_empty() {
+            return Ok(vec![ParsedChapterRewrite {
+                id: expected_chapters[0].id.clone(),
+                index: expected_chapters[0].index,
+                title,
+                text,
+            }]);
+        }
+    }
+
+    Err("无法从无 marker 输出中稳定拆回当前分片章节。".to_string())
+}
+
+fn strip_rewrite_marker_lines(output: &str) -> String {
+    output
+        .trim()
+        .trim_start_matches("```text")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("<<<YURI_REWRITE_CHAPTER_START")
+                && !trimmed.starts_with("<<<YURI_REWRITE_CHAPTER_END")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_markerless_by_title_labels(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let lines = output.lines().collect::<Vec<_>>();
+    let starts = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("标题：") || trimmed.starts_with("标题:") {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if starts.len() != expected_chapters.len() {
+        return Err("标题行数量与分片章节数量不匹配。".to_string());
+    }
+
+    parse_markerless_line_blocks(&lines, &starts, expected_chapters)
+}
+
+fn parse_markerless_by_heading_regex(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let lines = output.lines().collect::<Vec<_>>();
+    let heading_re = chapter_heading_regex();
+    let starts = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim();
+            if !matches!(trimmed, "正文" | "正文：" | "正文:") && heading_re.is_match(trimmed)
+            {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if starts.len() != expected_chapters.len() {
+        return Err("章节标题数量与分片章节数量不匹配。".to_string());
+    }
+
+    parse_markerless_line_blocks(&lines, &starts, expected_chapters)
+}
+
+fn parse_markerless_line_blocks(
+    lines: &[&str],
+    starts: &[usize],
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let mut parsed = Vec::with_capacity(expected_chapters.len());
+    for (idx, chapter) in expected_chapters.iter().enumerate() {
+        let start = starts[idx];
+        let end = starts.get(idx + 1).copied().unwrap_or(lines.len());
+        let block = lines[start..end].join("\n");
+        let (title, text) = clean_rewrite_block(&block, &chapter.title);
+        if text.trim().is_empty() {
+            return Err(format!("章节 {} 的兜底改写正文为空。", chapter.index));
+        }
+        parsed.push(ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title,
+            text,
+        });
+    }
+    Ok(parsed)
+}
+
+fn parse_markerless_by_expected_titles(
+    output: &str,
+    expected_chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let mut positions = Vec::with_capacity(expected_chapters.len());
+    let mut search_from = 0usize;
+    for chapter in expected_chapters {
+        let title = chapter.title.trim();
+        if title.is_empty() {
+            return Err("章节标题为空，无法按标题兜底解析。".to_string());
+        }
+        let relative = output[search_from..]
+            .find(title)
+            .ok_or_else(|| format!("兜底解析找不到章节标题：{}", title))?;
+        let pos = search_from + relative;
+        positions.push(pos);
+        search_from = pos + title.len();
+    }
+
+    let mut parsed = Vec::with_capacity(expected_chapters.len());
+    for (idx, chapter) in expected_chapters.iter().enumerate() {
+        let start = positions[idx];
+        let end = positions.get(idx + 1).copied().unwrap_or(output.len());
+        let block = output[start..end].trim();
+        let (title, text) = clean_rewrite_block(block, &chapter.title);
+        if text.trim().is_empty() {
+            return Err(format!("章节 {} 的兜底改写正文为空。", chapter.index));
+        }
+        parsed.push(ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title,
+            text,
+        });
     }
     Ok(parsed)
 }
@@ -3373,8 +3818,8 @@ fn build_batch_rewrite_prompt_with_context(
 5. 主角姓名必须按同音或近音原则女性化，优先保留姓氏；例如萧炎改为萧妍，李火旺改为李火婉。其他指定姓名只在文本中实际出现时女性化。
 6. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
 7. 输入可能是完整批次，也可能是并发分片；必须一次性改写当前输入中实际出现的全部章节，不要逐章分开回答。
-8. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只改写标题和正文内容。
-9. 只输出当前输入章节的改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
+8. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
+9. 只输出当前输入章节的边界标记、改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
 {}
 
@@ -3429,8 +3874,8 @@ fn build_batch_review_prompt_with_context(
 输出要求：
 1. 如果发现问题，直接在正文中修正。
 2. 如果没有问题，原样输出改写稿。
-3. 必须保留每章的开始/结束边界标记、章节 id、章节序号和章节顺序；只修正标题和正文内容。
-4. 只输出当前输入章节修正后的标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
+3. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
+4. 只输出当前输入章节的边界标记、修正后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
 {}
 
@@ -4265,6 +4710,53 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].title, "第一章 少女志");
         assert_eq!(parsed[0].text, "改写一");
+    }
+
+    #[test]
+    fn batch_rewrite_parser_accepts_marker_with_wrong_id_when_index_matches() {
+        let chapters = vec![sample_chapter(4, "第四章", "原文四")];
+        let output = "<<<YURI_REWRITE_CHAPTER_START index=4 id=model-made-up-id>>>\n标题：第四章\n正文：\n改写四\n<<<YURI_REWRITE_CHAPTER_END index=4 id=model-made-up-id>>>";
+
+        let parsed = parse_batch_rewrite_output(output, &chapters)
+            .expect("index-matched marker should recover from wrong id");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].index, 4);
+        assert_eq!(parsed[0].text, "改写四");
+    }
+
+    #[test]
+    fn batch_rewrite_parser_recovers_markerless_title_body_output() {
+        let chapters = vec![
+            sample_chapter(4, "第四章", "原文四"),
+            sample_chapter(5, "第五章", "原文五"),
+            sample_chapter(6, "第六章", "原文六"),
+        ];
+        let output = "标题：第四章\n正文：\n改写四\n\n标题：第五章\n正文：\n改写五\n\n标题：第六章\n正文：\n改写六";
+
+        let parsed = parse_batch_rewrite_output(output, &chapters)
+            .expect("title/body output should be used as fallback");
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].index, 4);
+        assert_eq!(parsed[1].text, "改写五");
+        assert_eq!(parsed[2].index, 6);
+    }
+
+    #[test]
+    fn batch_rewrite_parser_ignores_non_marker_intro_before_first_marker() {
+        let chapters = vec![sample_chapter(4, "第四章", "原文四")];
+        let output = format!(
+            "好的，以下是当前分片。\n\n{}\n标题：第四章\n正文：\n改写四\n{}",
+            chapter_start_marker(&chapters[0]),
+            chapter_end_marker(&chapters[0])
+        );
+
+        let parsed = parse_batch_rewrite_output(&output, &chapters)
+            .expect("non-marker intro should not break marker parsing");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].text, "改写四");
     }
 
     #[test]

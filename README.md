@@ -65,7 +65,7 @@ npm run package:portable
 便携版默认输出到：
 
 ```text
-portable/YuriRewrite-v0.1.6-windows-x64.zip
+portable/YuriRewrite-v0.1.7-windows-x64.zip
 ```
 
 ## 使用说明
