@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   ClipboardList,
   Download,
   FilePlus2,
@@ -147,6 +149,12 @@ type ProfileDraft = {
   api_key: string;
 };
 
+type ModelSuggestion = {
+  providerKey: string;
+  label: string;
+  model: string;
+};
+
 type NovelSettingsDraft = {
   protagonist_name: string;
   rewritten_protagonist_name: string;
@@ -179,6 +187,15 @@ const emptyNovelSettings: NovelSettingsDraft = {
 
 const savedApiKeyMask = "********";
 const thinkingModeTooltip = "建议自动\n兼容性：OpenAI/OpenRouter/Gemini 可控；DeepSeek 官方多由模型名决定；不支持时会自动降级";
+const modelSuggestions: ModelSuggestion[] = [
+  { providerKey: "deepseek", label: "DeepSeek V4 Pro", model: "deepseek-v4-pro" },
+  { providerKey: "deepseek", label: "DeepSeek V4 Flash", model: "deepseek-v4-flash" }
+];
+
+function getModelSuggestions(profile: ProfileDraft) {
+  const providerHint = `${profile.provider} ${profile.base_url} ${profile.model}`.toLowerCase();
+  return modelSuggestions.filter((suggestion) => providerHint.includes(suggestion.providerKey));
+}
 
 const statusText: Record<string, string> = {
   pending: "待处理",
@@ -198,6 +215,7 @@ export default function App() {
   const [selectedBatchId, setSelectedBatchId] = useState("");
   const [openNovelMenuId, setOpenNovelMenuId] = useState("");
   const [openModelMenu, setOpenModelMenu] = useState(false);
+  const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
   const [novelSettingsDraft, setNovelSettingsDraft] = useState<NovelSettingsDraft>(emptyNovelSettings);
@@ -222,6 +240,16 @@ export default function App() {
     [detail, selectedBatchId]
   );
 
+  const autoProgressPercent = useMemo(() => {
+    if (!job || job.job_type !== "auto" || job.total_chapters <= 0) return 0;
+    return Math.min(100, Math.max(0, Math.round((job.current_chapter / job.total_chapters) * 100)));
+  }, [job]);
+
+  const detectedModelSuggestions = useMemo(
+    () => getModelSuggestions(profileDraft),
+    [profileDraft.provider, profileDraft.base_url, profileDraft.model]
+  );
+
   const hasCompleteNovelSettings = Boolean(
     detail?.settings?.protagonist_name?.trim() && detail.settings.bust?.trim() && detail.settings.body_type?.trim()
   );
@@ -229,6 +257,29 @@ export default function App() {
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<Job>("job-progress", (event) => {
+      if (event.payload.job_type !== "auto") return;
+      setJob(event.payload);
+    }).then((handler) => {
+      if (cancelled) {
+        handler();
+      } else {
+        unlisten = handler;
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (detectedModelSuggestions.length === 0) setOpenModelSuggestions(false);
+  }, [detectedModelSuggestions.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1001,10 +1052,20 @@ export default function App() {
         {job && activeView === "workspace" && (
           <div className={`job-strip ${job.status}`}>
             <CheckCircle2 size={17} />
-            <span>
-              {job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/{job.total_chapters} ·{" "}
-              {job.message}
-            </span>
+            <div className="job-content">
+              <span>
+                {job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/{job.total_chapters} ·{" "}
+                {job.message}
+              </span>
+              {job.job_type === "auto" && (
+                <div className="job-progress-row" aria-label={`一键分析改写进度 ${autoProgressPercent}%`}>
+                  <div className="job-progress-bar">
+                    <div className="job-progress-fill" style={{ width: `${autoProgressPercent}%` }} />
+                  </div>
+                  <strong>{autoProgressPercent}%</strong>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1317,7 +1378,43 @@ export default function App() {
                 </label>
                 <label>
                   模型名
-                  <input value={profileDraft.model} onChange={(event) => setProfileDraft({ ...profileDraft, model: event.target.value })} />
+                  <div className="model-name-control">
+                    <input
+                      value={profileDraft.model}
+                      onChange={(event) => setProfileDraft({ ...profileDraft, model: event.target.value })}
+                    />
+                    {detectedModelSuggestions.length > 0 && (
+                      <button
+                        type="button"
+                        className="model-suggestion-trigger"
+                        title="选择检测到的服务商模型"
+                        aria-label="选择检测到的服务商模型"
+                        aria-expanded={openModelSuggestions}
+                        onClick={() => setOpenModelSuggestions((open) => !open)}
+                      >
+                        <ChevronDown size={16} />
+                      </button>
+                    )}
+                    {openModelSuggestions && detectedModelSuggestions.length > 0 && (
+                      <div className="model-suggestion-menu" role="listbox">
+                        {detectedModelSuggestions.map((suggestion) => (
+                          <button
+                            type="button"
+                            key={suggestion.model}
+                            role="option"
+                            aria-selected={profileDraft.model === suggestion.model}
+                            onClick={() => {
+                              setProfileDraft((draft) => ({ ...draft, model: suggestion.model }));
+                              setOpenModelSuggestions(false);
+                            }}
+                          >
+                            <span>{suggestion.label}</span>
+                            <small>{suggestion.model}</small>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </label>
                 <label>
                   Temperature

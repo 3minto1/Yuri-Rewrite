@@ -431,10 +431,57 @@ pre {
   color: #244331;
 }
 
+.job-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.job-content > span {
+  overflow-wrap: anywhere;
+}
+
+.job-progress-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 42px;
+}
+
+.job-progress-bar {
+  background: rgba(36, 67, 49, 0.14);
+  border-radius: 999px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.job-progress-fill {
+  background: #2f837c;
+  border-radius: inherit;
+  height: 100%;
+  transition: width 220ms ease;
+}
+
+.job-progress-row strong {
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+}
+
 .job-strip.failed {
   background: #fff0ee;
   border-color: #efbbb5;
   color: #7a231c;
+}
+
+.job-strip.failed .job-progress-bar {
+  background: rgba(122, 35, 28, 0.14);
+}
+
+.job-strip.failed .job-progress-fill {
+  background: #c54f45;
 }
 
 .content-grid {
@@ -720,6 +767,69 @@ pre {
 .model-panel .panel-actions button {
   flex: 1 1 98px;
   min-width: 0;
+}
+
+.model-name-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  position: relative;
+}
+
+.model-name-control input {
+  border-bottom-right-radius: 0;
+  border-right: 0;
+  border-top-right-radius: 0;
+  min-width: 0;
+}
+
+.model-suggestion-trigger {
+  align-items: center;
+  border-bottom-left-radius: 0;
+  border-top-left-radius: 0;
+  justify-content: center;
+  min-height: 36px;
+  min-width: 0;
+  padding: 0;
+}
+
+.model-suggestion-menu {
+  background: #ffffff;
+  border: 1px solid #d8d2c7;
+  border-radius: 7px;
+  box-shadow: 0 12px 28px rgba(34, 28, 22, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  left: 0;
+  padding: 4px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 5px);
+  z-index: 30;
+}
+
+.model-suggestion-menu button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: #2f2d2a;
+  display: flex;
+  justify-content: space-between;
+  min-height: auto;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.model-suggestion-menu button:hover {
+  background: #f3eee7;
+}
+
+.model-suggestion-menu small {
+  color: #82776d;
+  font-size: 12px;
+  margin-left: 12px;
+  white-space: nowrap;
 }
 
 @media (max-width: 1180px) {

@@ -13,7 +13,7 @@ use std::{
     sync::Mutex,
     time::Instant,
 };
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "YuriRewrite";
@@ -146,6 +146,17 @@ struct Job {
     message: String,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct JobProgress {
+    id: String,
+    novel_id: String,
+    job_type: String,
+    status: String,
+    current_chapter: i64,
+    total_chapters: i64,
+    message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1155,6 +1166,7 @@ async fn start_rewrite(
 async fn start_analyze_rewrite_all(
     novel_id: String,
     profile_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
@@ -1176,6 +1188,7 @@ async fn start_analyze_rewrite_all(
     }
 
     let mut job = create_job(&state, &novel_id, "auto", batches.len() as i64)?;
+    emit_job_progress(&app, &job, "running", 0, "准备开始一键分析改写");
     let output_dir = {
         let conn = state.conn.lock().map_err(to_string)?;
         resolve_rewrite_export_dir(&conn, &state.data_dir)?
@@ -1184,13 +1197,10 @@ async fn start_analyze_rewrite_all(
 
     for (idx, batch) in batches.iter().enumerate() {
         let current = (idx + 1) as i64;
-        update_job(
-            &state,
-            &job.id,
-            "running",
-            current,
-            &format!("正在分析第 {} 批", current),
-        )?;
+        let completed = idx as i64;
+        let analysis_message = format!("正在分析第 {} 批", current);
+        update_job(&state, &job.id, "running", completed, &analysis_message)?;
+        emit_job_progress(&app, &job, "running", completed, &analysis_message);
         let chapters = {
             let conn = state.conn.lock().map_err(to_string)?;
             load_chapters_for_batch(&conn, &novel_id, &batch.id)?
@@ -1201,22 +1211,20 @@ async fn start_analyze_rewrite_all(
         if let Err(error) =
             analyze_chapters_for_auto(&state, &novel_id, &profile, &api_key, &chapters).await
         {
-            update_job(&state, &job.id, "failed", current, &error)?;
+            update_job(&state, &job.id, "failed", completed, &error)?;
+            emit_job_progress(&app, &job, "failed", completed, &error);
             job = get_job(job.id.clone(), state)?;
             return Ok(job);
         }
 
-        update_job(
-            &state,
-            &job.id,
-            "running",
-            current,
-            &format!("正在改写第 {} 批", current),
-        )?;
+        let rewrite_message = format!("正在改写第 {} 批", current);
+        update_job(&state, &job.id, "running", completed, &rewrite_message)?;
+        emit_job_progress(&app, &job, "running", completed, &rewrite_message);
         if let Err(error) =
             rewrite_chapters_for_auto(&state, &novel_id, &profile, &api_key, &batch.id).await
         {
-            update_job(&state, &job.id, "failed", current, &error)?;
+            update_job(&state, &job.id, "failed", completed, &error)?;
+            emit_job_progress(&app, &job, "failed", completed, &error);
             job = get_job(job.id.clone(), state)?;
             return Ok(job);
         }
@@ -1232,6 +1240,9 @@ async fn start_analyze_rewrite_all(
             chinese_batch_label(batch.batch_index)
         ));
         fs::write(&batch_path, body).map_err(to_string)?;
+        let exported_message = format!("已输出第 {} 批：{}", current, batch_path.to_string_lossy());
+        update_job(&state, &job.id, "running", current, &exported_message)?;
+        emit_job_progress(&app, &job, "running", current, &exported_message);
     }
 
     let all_chapters = {
@@ -1249,6 +1260,13 @@ async fn start_analyze_rewrite_all(
         batches.len() as i64,
         &format!("一键分析改写完成，已输出：{}", full_path.to_string_lossy()),
     )?;
+    emit_job_progress(
+        &app,
+        &job,
+        "completed",
+        batches.len() as i64,
+        &format!("一键分析改写完成，已输出：{}", full_path.to_string_lossy()),
+    );
     get_job(job.id, state)
 }
 
@@ -3680,7 +3698,14 @@ fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
 7. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致；并发分片和后续批次也必须继续使用同一份映射表。
 
 核心目标：
-让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。"#,
+让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。
+
+一致性硬性要求：
+1. 人物外貌特征必须前后一致。发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态一旦由原文、设定或一致性资产确立，后续章节不得随意改变；例如上一章是金发，下一章不能无理由变成红发。
+2. 如果原文没有明确外貌，不要每章随机发明互相矛盾的新特征；需要补充女性化描写时，应使用与已建立设定兼容的细节，并保持后续复用。
+3. 人物关系和百合向情绪推进必须连续。暧昧、信任、依赖、吃醋、保护欲、亲密距离等变化要承接前文，不能上一章刚建立的关系下一章突然重置。
+4. 称谓、代词、身份和旁人态度必须统一。主角已经女性化后，旁人对她的称呼、视线、互动距离、社会评价也要自然匹配女性身份，不能在不同章节反复摇摆。
+5. 新增女性化细节必须服务当前剧情和人物状态，不得为了强调性别而制造与原文战力、性格、伏笔、剧情逻辑冲突的描写。"#,
         settings.protagonist_name,
         rewritten_name,
         additional_names,
@@ -4381,14 +4406,18 @@ fn build_batch_rewrite_prompt_with_context(
     format!(
         r#"改写要求：
 1. 将原本男女性别叙事自然改写为双女主百合叙事。
-2. 采用中度再创作：保留主线、冲突、章节顺序和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
+2. 采用中度再创作：保留主线、冲突、章节顺序、战力逻辑、人物动机和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
 3. 标题和正文都必须改写：标题中的主角原名、男性身份、男性称谓、男性化意象也要同步女性化。
-4. 清除所有原男性主角痕迹，包括姓名、代词、身体描述、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
-5. 主角姓名必须按同音或近音原则女性化，优先保留姓氏；例如萧炎改为萧妍，李火旺改为李火婉。其他指定姓名只在文本中实际出现时女性化。
+4. 清除所有原男性主角痕迹，包括姓名、代词、身体描述、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示；所有相关内容都要自然转换为女性主角表达。
+5. 主角姓名和指定 NPC 姓名必须严格使用一致性资产中的“姓名映射表”。没有映射时才按同音或近音原则女性化，优先保留姓氏；例如萧炎改为萧妍，李火旺改为李火婉。
 6. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
-7. 输入可能是完整批次，也可能是并发分片；必须一次性改写当前输入中实际出现的全部章节，不要逐章分开回答。
-8. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
-9. 只输出当前输入章节的边界标记、改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
+7. 人物外貌特征必须前后一致。发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态一旦由原文、设定或一致性资产确立，后续章节不得随意改变；例如上一章是金发，下一章不能无理由变成红发。
+8. 如果原文没有明确外貌，不要每章随机发明互相矛盾的新特征；需要补充女性化描写时，应使用与已建立设定兼容的细节，并保持后续复用。
+9. 百合向关系推进必须承接前文。暧昧、信任、依赖、吃醋、保护欲、亲密距离、旁人态度和称谓变化要符合当前剧情阶段，不能突然重置或跳跃。
+10. 女性化细节要覆盖正文和标题，也要覆盖旁人的视线、评价、互动距离和社会称呼；但新增内容必须服务当前剧情，不得破坏原文战力、伏笔、人物性格和逻辑。
+11. 输入可能是完整批次，也可能是并发分片；必须一次性改写当前输入中实际出现的全部章节，不要逐章分开回答。
+12. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
+13. 只输出当前输入章节的边界标记、改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
 {}
 
@@ -4438,7 +4467,10 @@ fn build_batch_review_prompt_with_context(
 5. 身材、体型和高级设定是否被遵守。
 6. 如果当前为创意模式，检查每章关键场景是否有足够清晰的女性化感知点；若只是替换姓名/代词，应主动补充贴合原剧情的女性外貌、神态、互动距离、称谓变化、百合向情绪张力等细节。
 7. 改写后的标题和正文是否能让没读过原文的读者看不出主角原本是男性。
-8. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。
+8. 人物外貌特征是否前后一致：发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态不能在不同章节无理由变化。
+9. 百合向关系推进是否承接前文：暧昧、信任、依赖、吃醋、保护欲、亲密距离、称谓和旁人态度不能突然重置或跳跃。
+10. 女性化补充是否贴合剧情和一致性资产，不能为了强调性别而破坏原文战力、伏笔、人物性格和逻辑。
+11. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。
 
 输出要求：
 1. 如果发现问题，直接在正文中修正。
@@ -4926,6 +4958,25 @@ fn update_job(
     )
     .map_err(to_string)?;
     Ok(())
+}
+
+fn emit_job_progress(
+    app: &AppHandle,
+    job: &Job,
+    status: &str,
+    current_chapter: i64,
+    message: &str,
+) {
+    let progress = JobProgress {
+        id: job.id.clone(),
+        novel_id: job.novel_id.clone(),
+        job_type: job.job_type.clone(),
+        status: status.to_string(),
+        current_chapter,
+        total_chapters: job.total_chapters,
+        message: message.to_string(),
+    };
+    let _ = app.emit("job-progress", progress);
 }
 
 fn set_chapter_status(
@@ -5740,6 +5791,9 @@ mod tests {
         assert!(strict_prompt.contains("章节标题和正文都必须检查主角姓名"));
         assert!(strict_prompt.contains("看不出主角改写前曾是男性"));
         assert!(strict_prompt.contains("男性化姓名、代词、称谓、身份、身体特征"));
+        assert!(strict_prompt.contains("人物外貌特征必须前后一致"));
+        assert!(strict_prompt.contains("上一章是金发，下一章不能无理由变成红发"));
+        assert!(strict_prompt.contains("人物关系和百合向情绪推进必须连续"));
         assert!(creative_prompt.contains("创意模式"));
         assert!(creative_prompt.contains("优先级高于普通的“中度再创作”约束"));
         assert!(creative_prompt.contains("每章都能明确感知主角已经从男性变为女性"));
@@ -5814,6 +5868,35 @@ mod tests {
     }
 
     #[test]
+    fn batch_rewrite_prompt_requires_yuri_and_appearance_consistency() {
+        let chapter = sample_chapter(1, "第一章", "萧炎走进大厅。");
+        let settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            rewritten_protagonist_name: "萧妍".to_string(),
+            additional_feminize_names: "".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: "".to_string(),
+            updated_at: "now".to_string(),
+        };
+
+        let prompt = build_batch_rewrite_prompt_with_settings(
+            &[chapter],
+            "姓名映射表：萧炎 -> 萧妍",
+            &settings,
+        );
+
+        assert!(prompt.contains("双女主百合叙事"));
+        assert!(prompt.contains("清除所有原男性主角痕迹"));
+        assert!(prompt.contains("人物外貌特征必须前后一致"));
+        assert!(prompt.contains("上一章是金发，下一章不能无理由变成红发"));
+        assert!(prompt.contains("百合向关系推进必须承接前文"));
+        assert!(prompt.contains("不能突然重置或跳跃"));
+    }
+
+    #[test]
     fn review_prompt_checks_creative_mode_strength() {
         let chapter = sample_chapter(1, "第一章", "萧炎走进大厅。");
         let settings = NovelSettings {
@@ -5840,6 +5923,9 @@ mod tests {
         assert!(prompt.contains("每章标题是否也完成女性化"));
         assert!(prompt.contains("女性外貌、神态、互动距离、称谓变化、百合向情绪张力"));
         assert!(prompt.contains("看不出主角原本是男性"));
+        assert!(prompt.contains("人物外貌特征是否前后一致"));
+        assert!(prompt.contains("百合向关系推进是否承接前文"));
+        assert!(prompt.contains("不能为了强调性别而破坏原文战力"));
     }
 
     #[test]
