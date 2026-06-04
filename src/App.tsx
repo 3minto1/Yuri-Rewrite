@@ -14,11 +14,13 @@ import {
   KeyRound,
   Loader2,
   MoreHorizontal,
+  Pause,
   Play,
   RefreshCw,
   Save,
   Settings,
   Sparkles,
+  Square,
   Trash2
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -150,9 +152,15 @@ type ProfileDraft = {
 };
 
 type ModelSuggestion = {
-  providerKey: string;
   label: string;
   model: string;
+};
+
+type ModelSuggestionGroup = {
+  id: string;
+  baseTerms: string[];
+  modelTerms: string[];
+  models: ModelSuggestion[];
 };
 
 type NovelSettingsDraft = {
@@ -186,20 +194,119 @@ const emptyNovelSettings: NovelSettingsDraft = {
 };
 
 const savedApiKeyMask = "********";
-const thinkingModeTooltip = "建议自动\n兼容性：OpenAI/OpenRouter/Gemini 可控；DeepSeek 官方多由模型名决定；不支持时会自动降级";
-const modelSuggestions: ModelSuggestion[] = [
-  { providerKey: "deepseek", label: "DeepSeek V4 Pro", model: "deepseek-v4-pro" },
-  { providerKey: "deepseek", label: "DeepSeek V4 Flash", model: "deepseek-v4-flash" }
+const thinkingModeTooltip =
+  "建议自动；分析阶段通常关闭更快\n兼容性：OpenAI 推理模型可控；DeepSeek V4 与 Kimi K2.5 支持 thinking 开关；Gemini 2.5 用 thinkingBudget；SiliconFlow 推理模型用 thinking_budget；Claude 原生 API 支持 extended/adaptive thinking；MiniMax/MiMo/Claude 转发取决于服务商，不支持时会自动降级";
+const modelSuggestionGroups: ModelSuggestionGroup[] = [
+  {
+    id: "deepseek",
+    baseTerms: ["deepseek"],
+    modelTerms: ["deepseek"],
+    models: [
+      { label: "DeepSeek V4 Pro", model: "deepseek-v4-pro" },
+      { label: "DeepSeek V4 Flash", model: "deepseek-v4-flash" }
+    ]
+  },
+  {
+    id: "openai",
+    baseTerms: ["api.openai.com", "openai.azure.com"],
+    modelTerms: ["gpt-", "o3", "o4"],
+    models: [
+      { label: "GPT-5.2", model: "gpt-5.2" },
+      { label: "GPT-5.2 Pro", model: "gpt-5.2-pro" },
+      { label: "GPT-5.1", model: "gpt-5.1" },
+      { label: "GPT-5", model: "gpt-5" },
+      { label: "GPT-5 Mini", model: "gpt-5-mini" },
+      { label: "GPT-5 Nano", model: "gpt-5-nano" },
+      { label: "o3 Pro", model: "o3-pro" },
+      { label: "o3", model: "o3" },
+      { label: "GPT-4.1", model: "gpt-4.1" },
+      { label: "GPT-4.1 Mini", model: "gpt-4.1-mini" },
+      { label: "GPT-4o Mini", model: "gpt-4o-mini" }
+    ]
+  },
+  {
+    id: "kimi",
+    baseTerms: ["moonshot", "kimi"],
+    modelTerms: ["moonshot", "kimi"],
+    models: [
+      { label: "Kimi K2.6", model: "kimi-k2.6" },
+      { label: "Kimi K2.5", model: "kimi-k2.5" },
+      { label: "Moonshot V1 128K", model: "moonshot-v1-128k" },
+      { label: "Moonshot V1 32K", model: "moonshot-v1-32k" },
+      { label: "Moonshot V1 8K", model: "moonshot-v1-8k" }
+    ]
+  },
+  {
+    id: "minimax",
+    baseTerms: ["minimax"],
+    modelTerms: ["minimax", "m2-her"],
+    models: [
+      { label: "MiniMax M3", model: "MiniMax-M3" },
+      { label: "MiniMax M2.7", model: "MiniMax-M2.7" },
+      { label: "MiniMax M2.7 Highspeed", model: "MiniMax-M2.7-highspeed" },
+      { label: "MiniMax M2.5", model: "MiniMax-M2.5" },
+      { label: "MiniMax M2.5 Highspeed", model: "MiniMax-M2.5-highspeed" },
+      { label: "MiniMax M2.1", model: "MiniMax-M2.1" },
+      { label: "MiniMax M2.1 Highspeed", model: "MiniMax-M2.1-highspeed" },
+      { label: "MiniMax M2", model: "MiniMax-M2" },
+      { label: "M2-her", model: "M2-her" }
+    ]
+  },
+  {
+    id: "mimo",
+    baseTerms: ["xiaomimimo", "mimo.xiaomi", "mimo.mi.com", "mimo"],
+    modelTerms: ["mimo-"],
+    models: [
+      { label: "MiMo V2.5 Pro", model: "mimo-v2.5-pro" },
+      { label: "MiMo V2.5", model: "mimo-v2.5" },
+      { label: "MiMo V2 Flash", model: "mimo-v2-flash" }
+    ]
+  },
+  {
+    id: "siliconflow",
+    baseTerms: ["siliconflow"],
+    modelTerms: ["qwen/", "thudm/", "deepseek-ai/", "internlm/", "mistralai/"],
+    models: [
+      { label: "Qwen2 72B Instruct", model: "Qwen/Qwen2-72B-Instruct" },
+      { label: "Qwen2 57B A14B Instruct", model: "Qwen/Qwen2-57B-A14B-Instruct" },
+      { label: "Qwen2 7B Instruct", model: "Qwen/Qwen2-7B-Instruct" },
+      { label: "Qwen2 1.5B Instruct", model: "Qwen/Qwen2-1.5B-Instruct" },
+      { label: "GLM-4 9B Chat", model: "THUDM/glm-4-9b-chat" },
+      { label: "ChatGLM3 6B", model: "THUDM/chatglm3-6b" },
+      { label: "DeepSeek Coder V2 Instruct", model: "deepseek-ai/DeepSeek-Coder-V2-Instruct" },
+      { label: "DeepSeek V2 Chat", model: "deepseek-ai/DeepSeek-V2-Chat" },
+      { label: "InternLM2.5 7B Chat", model: "internlm/internlm2_5-7b-chat" },
+      { label: "Mistral 7B Instruct v0.2", model: "mistralai/Mistral-7B-Instruct-v0.2" }
+    ]
+  },
+  {
+    id: "claude",
+    baseTerms: ["anthropic", "claude"],
+    modelTerms: ["claude-"],
+    models: [
+      { label: "Claude Opus 4.8", model: "claude-opus-4-8" },
+      { label: "Claude Sonnet 4.6", model: "claude-sonnet-4-6" },
+      { label: "Claude Haiku 4.5", model: "claude-haiku-4-5-20251001" }
+    ]
+  }
 ];
 
 function getModelSuggestions(profile: ProfileDraft) {
-  const providerHint = `${profile.provider} ${profile.base_url} ${profile.model}`.toLowerCase();
-  return modelSuggestions.filter((suggestion) => providerHint.includes(suggestion.providerKey));
+  const baseHint = profile.base_url.toLowerCase();
+  const modelHint = profile.model.toLowerCase();
+  const baseMatched = modelSuggestionGroups.find((group) => group.baseTerms.some((term) => baseHint.includes(term)));
+  if (baseMatched) return baseMatched.models;
+  const modelMatched = modelSuggestionGroups.find((group) => group.modelTerms.some((term) => modelHint.includes(term)));
+  return modelMatched?.models ?? [];
 }
 
 const statusText: Record<string, string> = {
   pending: "待处理",
   running: "进行中",
+  pausing: "暂停中",
+  paused: "已暂停",
+  terminating: "终止中",
+  terminated: "已终止",
   completed: "完成",
   failed: "失败",
   imported: "已导入"
@@ -222,6 +329,8 @@ export default function App() {
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "logs" | "settings">("workspace");
   const [busy, setBusy] = useState("");
+  const [autoRunState, setAutoRunState] = useState<"idle" | "running" | "paused" | "stopping">("idle");
+  const [autoControlBusy, setAutoControlBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [noticeDuration, setNoticeDuration] = useState(5000);
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
@@ -264,6 +373,15 @@ export default function App() {
     void listen<Job>("job-progress", (event) => {
       if (event.payload.job_type !== "auto") return;
       setJob(event.payload);
+      if (event.payload.status === "running") {
+        setAutoRunState("running");
+      } else if (event.payload.status === "paused") {
+        setAutoRunState("paused");
+      } else if (event.payload.status === "pausing" || event.payload.status === "terminating") {
+        setAutoRunState("stopping");
+      } else if (["completed", "failed", "terminated"].includes(event.payload.status)) {
+        setAutoRunState("idle");
+      }
     }).then((handler) => {
       if (cancelled) {
         handler();
@@ -351,11 +469,19 @@ export default function App() {
     await refreshLogs();
   }
 
-  async function loadNovel(novelId: string) {
+  async function loadNovel(novelId: string, options: { preserveBatchId?: string; preserveChapterId?: string } = {}) {
     const next = await invoke<NovelDetail>("get_novel_detail", { novelId });
     setDetail(next);
-    setSelectedChapterId(next.chapters[0]?.id ?? "");
-    setSelectedBatchId(next.batches[0]?.id ?? "");
+    const nextChapterId =
+      options.preserveChapterId && next.chapters.some((chapter) => chapter.id === options.preserveChapterId)
+        ? options.preserveChapterId
+        : next.chapters[0]?.id ?? "";
+    const nextBatchId =
+      options.preserveBatchId && next.batches.some((batch) => batch.id === options.preserveBatchId)
+        ? options.preserveBatchId
+        : next.batches[0]?.id ?? "";
+    setSelectedChapterId(nextChapterId);
+    setSelectedBatchId(nextBatchId);
     setNovelSettingsDraft(
       next.settings
         ? {
@@ -503,6 +629,7 @@ export default function App() {
     try {
       const input = {
         ...profileDraft,
+        id: profileDraft.id && selectedProfileId === profileDraft.id ? profileDraft.id : undefined,
         name: profileDraft.name.trim(),
         provider: profileDraft.provider.trim(),
         base_url: profileDraft.base_url.trim(),
@@ -519,6 +646,13 @@ export default function App() {
     } finally {
       setBusy("");
     }
+  }
+
+  function createNewModelProfile() {
+    setSelectedProfileId("");
+    setProfileDraft(emptyProfile);
+    setOpenModelMenu(false);
+    showNotice("已切换为新建模型配置，填写后点击保存。");
   }
 
   async function deleteSelectedModelProfile() {
@@ -609,12 +743,63 @@ export default function App() {
         batchId: selectedBatch.id
       });
       setJob(result);
-      await loadNovel(detail.novel.id);
+      await loadNovel(detail.novel.id, { preserveBatchId: selectedBatch.id, preserveChapterId: selectedChapterId });
       await refreshLogs(detail.novel.id);
       if (kind === "rewrite" && result.status === "completed") {
         setActiveView("compare");
       }
       showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runAnalyzeRewriteCurrentBatch() {
+    if (!detail || !selectedProfileId) {
+      showNotice("请先导入小说并选择模型配置。");
+      return;
+    }
+    if (!hasCompleteNovelSettings) {
+      showNotice("请先填写设定");
+      setSettingsDialog("basic");
+      return;
+    }
+    if (!selectedBatch) {
+      showNotice("当前小说没有可处理的批次。");
+      return;
+    }
+    const batchId = selectedBatch.id;
+    const novelId = detail.novel.id;
+    setBusy("auto-batch");
+    setNotice("");
+    try {
+      const analysisResult = await invoke<Job>("start_analysis", {
+        novelId,
+        profileId: selectedProfileId,
+        batchId
+      });
+      setJob(analysisResult);
+      if (analysisResult.status !== "completed") {
+        await loadNovel(novelId, { preserveBatchId: batchId, preserveChapterId: selectedChapterId });
+        await refreshLogs(novelId);
+        showNotice(`${analysisResult.status}：${analysisResult.message}`);
+        return;
+      }
+
+      const rewriteResult = await invoke<Job>("start_rewrite", {
+        novelId,
+        profileId: selectedProfileId,
+        batchId
+      });
+      setJob(rewriteResult);
+      await loadNovel(novelId, { preserveBatchId: batchId, preserveChapterId: selectedChapterId });
+      await refreshLogs(novelId);
+      if (rewriteResult.status === "completed") {
+        setActiveView("compare");
+      }
+      showNotice(rewriteResult.status === "completed" ? rewriteResult.message : `${rewriteResult.status}：${rewriteResult.message}`);
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -633,6 +818,7 @@ export default function App() {
       return;
     }
     setBusy("auto");
+    setAutoRunState("running");
     setNotice("");
     try {
       const result = await invoke<Job>("start_analyze_rewrite_all", {
@@ -643,13 +829,50 @@ export default function App() {
       await loadNovel(detail.novel.id);
       await refreshLogs(detail.novel.id);
       if (result.status === "completed") {
+        setAutoRunState("idle");
         setActiveView("compare");
+      } else if (result.status === "paused") {
+        setAutoRunState("paused");
+      } else if (result.status === "terminated" || result.status === "failed") {
+        setAutoRunState("idle");
       }
       showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
+      setAutoRunState("idle");
       showNotice(String(error));
     } finally {
       setBusy("");
+    }
+  }
+
+  async function pauseAnalyzeRewriteAll() {
+    if (!detail || autoRunState !== "running") return;
+    setAutoControlBusy(true);
+    try {
+      const result = await invoke<Job>("pause_analyze_rewrite_all", { novelId: detail.novel.id });
+      setJob(result);
+      setAutoRunState("stopping");
+      showNotice(result.message);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setAutoControlBusy(false);
+    }
+  }
+
+  async function terminateAnalyzeRewriteAll() {
+    if (!detail || autoRunState === "idle") return;
+    setAutoControlBusy(true);
+    try {
+      const result = await invoke<Job>("terminate_analyze_rewrite_all", { novelId: detail.novel.id });
+      setJob(result);
+      setAutoRunState("idle");
+      showNotice(result.message);
+    } catch (error) {
+      setAutoRunState("idle");
+      showNotice(String(error));
+    } finally {
+      setAutoControlBusy(false);
     }
   }
 
@@ -999,7 +1222,7 @@ export default function App() {
               {activeView === "logs"
                 ? "查看 AI 调用的思考过程与原始输出"
                 : activeView === "settings"
-                  ? "配置导出目录"
+                  ? ""
                   : activeView === "novel-settings"
                     ? detail
                       ? `绑定《${detail.novel.title}》的改写规则`
@@ -1013,19 +1236,55 @@ export default function App() {
           </div>
           {activeView === "workspace" && (
             <div className="topbar-actions">
+              {autoRunState !== "idle" && (
+                <>
+                  <button
+                    onClick={autoRunState === "paused" ? runAnalyzeRewriteAll : pauseAnalyzeRewriteAll}
+                    disabled={autoControlBusy || autoRunState === "stopping"}
+                    title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
+                  >
+                    {autoControlBusy || autoRunState === "stopping" ? (
+                      <Loader2 className="spin" size={17} />
+                    ) : autoRunState === "paused" ? (
+                      <Play size={17} />
+                    ) : (
+                      <Pause size={17} />
+                    )}
+                    {autoRunState === "paused" ? "继续" : "暂停"}
+                  </button>
+                  <button onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy} title="终止一键分析改写">
+                    {autoControlBusy ? <Loader2 className="spin" size={17} /> : <Square size={17} />}
+                    终止
+                  </button>
+                </>
+              )}
               <button
                 onClick={runAnalyzeRewriteAll}
-                disabled={!detail || !selectedProfileId || busy !== ""}
+                disabled={!detail || !selectedProfileId || busy !== "" || autoRunState !== "idle"}
                 title="AI自动分析改写全文，耗时较久"
               >
                 {busy === "auto" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
                 一键分析改写
               </button>
-              <button onClick={() => runJob("analysis")} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== ""}>
+              <button
+                onClick={runAnalyzeRewriteCurrentBatch}
+                disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+                title="AI自动分析并改写当前选中批次"
+              >
+                {busy === "auto-batch" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
+                一键分析改写当前批次
+              </button>
+              <button
+                onClick={() => runJob("analysis")}
+                disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+              >
                 {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
                 分析
               </button>
-              <button onClick={() => runJob("rewrite")} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== ""}>
+              <button
+                onClick={() => runJob("rewrite")}
+                disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+              >
                 {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
                 改写
               </button>
@@ -1338,6 +1597,10 @@ export default function App() {
               <div className="panel-heading">
                 <h2>模型配置</h2>
                 <div className="panel-actions">
+                  <button onClick={createNewModelProfile} disabled={busy !== ""}>
+                    <FilePlus2 size={16} />
+                    新建
+                  </button>
                   <button onClick={testProfile} disabled={!selectedProfileId || busy === "test"}>
                     {busy === "test" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
                     测试模型

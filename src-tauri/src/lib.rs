@@ -6,12 +6,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -19,11 +19,21 @@ use uuid::Uuid;
 const KEYRING_SERVICE: &str = "YuriRewrite";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/3minto1/Yuri-Rewrite";
 const GITHUB_LATEST_RELEASE_URL: &str = "https://github.com/3minto1/Yuri-Rewrite/releases/latest";
+const AUTO_RUN_PAUSED: &str = "__YURI_AUTO_RUN_PAUSED__";
+const AUTO_RUN_TERMINATED: &str = "__YURI_AUTO_RUN_TERMINATED__";
 
 struct AppState {
     conn: Mutex<Connection>,
     client: Client,
     data_dir: PathBuf,
+    auto_runs: Mutex<HashMap<String, AutoRunControl>>,
+}
+
+#[derive(Debug, Clone)]
+struct AutoRunControl {
+    status: String,
+    completed_batches: i64,
+    job_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -251,6 +261,7 @@ pub fn run() {
                 conn: Mutex::new(conn),
                 client: Client::new(),
                 data_dir,
+                auto_runs: Mutex::new(HashMap::new()),
             });
             Ok(())
         })
@@ -274,6 +285,8 @@ pub fn run() {
             start_analysis,
             start_rewrite,
             start_analyze_rewrite_all,
+            pause_analyze_rewrite_all,
+            terminate_analyze_rewrite_all,
             get_job,
             export_novel,
             open_github_url,
@@ -1169,6 +1182,7 @@ async fn start_analyze_rewrite_all(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
+    let resume_from = prepare_auto_run(&state, &novel_id)?;
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
     let (novel, batches) = {
@@ -1188,7 +1202,14 @@ async fn start_analyze_rewrite_all(
     }
 
     let mut job = create_job(&state, &novel_id, "auto", batches.len() as i64)?;
-    emit_job_progress(&app, &job, "running", 0, "准备开始一键分析改写");
+    register_auto_run_job(&state, &novel_id, &job.id, resume_from)?;
+    let start_message = if resume_from > 0 {
+        format!("继续一键分析改写，将从第 {} 批重新开始", resume_from + 1)
+    } else {
+        "准备开始一键分析改写".to_string()
+    };
+    update_job(&state, &job.id, "running", resume_from, &start_message)?;
+    emit_job_progress(&app, &job, "running", resume_from, &start_message);
     let output_dir = {
         let conn = state.conn.lock().map_err(to_string)?;
         resolve_rewrite_export_dir(&conn, &state.data_dir)?
@@ -1197,7 +1218,13 @@ async fn start_analyze_rewrite_all(
 
     for (idx, batch) in batches.iter().enumerate() {
         let current = (idx + 1) as i64;
+        if current <= resume_from {
+            continue;
+        }
         let completed = idx as i64;
+        if let Some(status) = requested_auto_run_stop(&state, &novel_id)? {
+            return finish_stopped_auto_run(&state, &app, job, completed, &status);
+        }
         let analysis_message = format!("正在分析第 {} 批", current);
         update_job(&state, &job.id, "running", completed, &analysis_message)?;
         emit_job_progress(&app, &job, "running", completed, &analysis_message);
@@ -1211,20 +1238,31 @@ async fn start_analyze_rewrite_all(
         if let Err(error) =
             analyze_chapters_for_auto(&state, &novel_id, &profile, &api_key, &chapters).await
         {
+            if error == AUTO_RUN_PAUSED || error == AUTO_RUN_TERMINATED {
+                return finish_stopped_auto_run(&state, &app, job, completed, &error);
+            }
             update_job(&state, &job.id, "failed", completed, &error)?;
             emit_job_progress(&app, &job, "failed", completed, &error);
+            clear_auto_run(&state, &novel_id)?;
             job = get_job(job.id.clone(), state)?;
             return Ok(job);
         }
 
+        if let Some(status) = requested_auto_run_stop(&state, &novel_id)? {
+            return finish_stopped_auto_run(&state, &app, job, completed, &status);
+        }
         let rewrite_message = format!("正在改写第 {} 批", current);
         update_job(&state, &job.id, "running", completed, &rewrite_message)?;
         emit_job_progress(&app, &job, "running", completed, &rewrite_message);
         if let Err(error) =
             rewrite_chapters_for_auto(&state, &novel_id, &profile, &api_key, &batch.id).await
         {
+            if error == AUTO_RUN_PAUSED || error == AUTO_RUN_TERMINATED {
+                return finish_stopped_auto_run(&state, &app, job, completed, &error);
+            }
             update_job(&state, &job.id, "failed", completed, &error)?;
             emit_job_progress(&app, &job, "failed", completed, &error);
+            clear_auto_run(&state, &novel_id)?;
             job = get_job(job.id.clone(), state)?;
             return Ok(job);
         }
@@ -1242,6 +1280,7 @@ async fn start_analyze_rewrite_all(
         fs::write(&batch_path, body).map_err(to_string)?;
         let exported_message = format!("已输出第 {} 批：{}", current, batch_path.to_string_lossy());
         update_job(&state, &job.id, "running", current, &exported_message)?;
+        set_auto_run_completed(&state, &novel_id, current)?;
         emit_job_progress(&app, &job, "running", current, &exported_message);
     }
 
@@ -1267,7 +1306,18 @@ async fn start_analyze_rewrite_all(
         batches.len() as i64,
         &format!("一键分析改写完成，已输出：{}", full_path.to_string_lossy()),
     );
+    clear_auto_run(&state, &novel_id)?;
     get_job(job.id, state)
+}
+
+#[tauri::command]
+fn pause_analyze_rewrite_all(novel_id: String, state: State<AppState>) -> Result<Job, String> {
+    request_auto_run_stop(&state, &novel_id, "pause_requested")
+}
+
+#[tauri::command]
+fn terminate_analyze_rewrite_all(novel_id: String, state: State<AppState>) -> Result<Job, String> {
+    request_auto_run_stop(&state, &novel_id, "terminate_requested")
 }
 
 async fn analyze_chapters_for_auto(
@@ -1294,8 +1344,10 @@ async fn analyze_chapters_for_auto(
         rewrite_parallelism,
     )
     .await
-    .inspect_err(|_| {
-        let _ = mark_chapters_analysis_failed(state, chapters);
+    .inspect_err(|error| {
+        if error != &AUTO_RUN_PAUSED && error != &AUTO_RUN_TERMINATED {
+            let _ = mark_chapters_analysis_failed(state, chapters);
+        }
     })?;
 
     save_parsed_analyses(state, novel_id, chapters, parsed_analysis)?;
@@ -1340,8 +1392,8 @@ async fn analyze_batch_with_parallelism(
     }
 
     let mut parsed_by_shard = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        let (idx, shard_label, context, shard, output) = result.map_err(to_string)?;
+    while let Some(result) = next_auto_join(&mut tasks, state, novel_id).await? {
+        let (idx, shard_label, context, shard, output) = result;
         match output {
             Ok(output) => {
                 append_ai_log(
@@ -1955,8 +2007,10 @@ async fn rewrite_chapters_for_auto(
         rewrite_parallelism,
     )
     .await
-    .inspect_err(|_| {
-        let _ = mark_chapters_rewrite_failed(state, &chapters);
+    .inspect_err(|error| {
+        if error != &AUTO_RUN_PAUSED && error != &AUTO_RUN_TERMINATED {
+            let _ = mark_chapters_rewrite_failed(state, &chapters);
+        }
     })?;
 
     save_parsed_rewrites(state, final_rewrite)?;
@@ -2045,8 +2099,8 @@ async fn generate_rewrite_shards(
     }
 
     let mut parsed_by_shard = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        let (idx, shard_label, context, shard, output) = result.map_err(to_string)?;
+    while let Some(result) = next_auto_join(&mut tasks, state, novel_id).await? {
+        let (idx, shard_label, context, shard, output) = result;
         match output {
             Ok(output) => {
                 append_ai_log(
@@ -2179,9 +2233,8 @@ async fn generate_review_shards(
     }
 
     let mut parsed_by_shard = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        let (idx, shard_label, context, shard, rewrite_shard, output) =
-            result.map_err(to_string)?;
+    while let Some(result) = next_auto_join(&mut tasks, state, novel_id).await? {
+        let (idx, shard_label, context, shard, rewrite_shard, output) = result;
         match output {
             Ok(output) => {
                 append_ai_log(
@@ -2604,6 +2657,10 @@ async fn start_rewrite_legacy(
 
 #[tauri::command]
 fn get_job(job_id: String, state: State<AppState>) -> Result<Job, String> {
+    load_job(&state, &job_id)
+}
+
+fn load_job(state: &State<'_, AppState>, job_id: &str) -> Result<Job, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     conn.query_row(
         "SELECT id, novel_id, job_type, status, current_chapter, total_chapters, message, created_at, updated_at FROM jobs WHERE id = ?1",
@@ -3201,6 +3258,48 @@ fn load_model_profile(
     .map_err(to_string)
 }
 
+fn is_mimo_profile(profile: &ModelProfile) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = profile.base_url.to_ascii_lowercase();
+    let model = profile.model.to_ascii_lowercase();
+    provider.contains("mimo")
+        || provider.contains("xiaomi")
+        || base.contains("mimo")
+        || base.contains("xiaomi")
+        || model.contains("mimo-")
+}
+
+fn prepare_prompt_for_profile(
+    profile: &ModelProfile,
+    system: &str,
+    user: &str,
+) -> (String, String) {
+    if is_mimo_profile(profile) {
+        (
+            sanitize_prompt_for_mimo(system),
+            sanitize_prompt_for_mimo(user),
+        )
+    } else {
+        (system.to_string(), user.to_string())
+    }
+}
+
+fn sanitize_prompt_for_mimo(text: &str) -> String {
+    let replacements = [
+        ("身材：巨乳", "身形风格：成熟曲线"),
+        ("身材：平胸", "身形风格：清瘦纤细"),
+        ("体型：萝莉", "体型：娇小少女感"),
+        ("巨乳", "成熟曲线"),
+        ("平胸", "清瘦纤细"),
+        ("萝莉", "娇小少女感"),
+    ];
+    let mut sanitized = text.to_string();
+    for (from, to) in replacements {
+        sanitized = sanitized.replace(from, to);
+    }
+    sanitized
+}
+
 async fn generate_text(
     client: &Client,
     profile: &ModelProfile,
@@ -3210,11 +3309,13 @@ async fn generate_text(
     prefer_json_output: bool,
 ) -> Result<ModelOutput, String> {
     let started = Instant::now();
+    let (system, user) = prepare_prompt_for_profile(profile, system, user);
     let input_chars = system.chars().count() + user.chars().count();
     let mut output = if profile.provider.to_lowercase().contains("gemini") {
-        generate_gemini(client, profile, api_key, system, user).await
+        generate_gemini(client, profile, api_key, &system, &user).await
     } else {
-        generate_openai_compatible(client, profile, api_key, system, user, prefer_json_output).await
+        generate_openai_compatible(client, profile, api_key, &system, &user, prefer_json_output)
+            .await
     }?;
     output.input_chars = input_chars;
     output.output_chars = output.text.chars().count();
@@ -3269,6 +3370,14 @@ async fn generate_openai_compatible(
                 .as_object_mut()
                 .expect("payload is an object")
                 .remove("reasoning");
+            retry_payload
+                .as_object_mut()
+                .expect("payload is an object")
+                .remove("thinking");
+            retry_payload
+                .as_object_mut()
+                .expect("payload is an object")
+                .remove("thinking_budget");
             let retry_response = client
                 .post(endpoint)
                 .bearer_auth(api_key.trim())
@@ -3284,6 +3393,9 @@ async fn generate_openai_compatible(
         }
         Err(error) => return Err(error),
     };
+    if let Some(error) = openai_content_filter_error(&value, &model) {
+        return Err(error);
+    }
     let text = value["choices"][0]["message"]["content"]
         .as_str()
         .map(|text| text.to_string())
@@ -3405,6 +3517,26 @@ async fn response_json_or_error(
     Ok((value, body))
 }
 
+fn openai_content_filter_error(value: &serde_json::Value, model: &str) -> Option<String> {
+    let choice = &value["choices"][0];
+    let finish_reason = choice["finish_reason"].as_str().unwrap_or_default();
+    let content = choice["message"]["content"].as_str().unwrap_or_default();
+    let content_lower = content.to_ascii_lowercase();
+    if finish_reason == "content_filter"
+        || content_lower.contains("request was rejected")
+        || content_lower.contains("considered high risk")
+    {
+        Some(format!(
+            "模型内容安全策略拦截，未返回可解析文本。模型：{}；finish_reason：{}；返回内容：{}。可尝试降低创意模式强度、关闭复检、减少单次章节数，或更换对长篇改写更宽松的模型。",
+            model,
+            if finish_reason.is_empty() { "未知" } else { finish_reason },
+            if content.trim().is_empty() { "空" } else { content.trim() }
+        ))
+    } else {
+        None
+    }
+}
+
 fn compact_error_body(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -3441,6 +3573,23 @@ fn is_deepseek_profile(profile: &ModelProfile, base_url: &str, model: &str) -> b
     provider.contains("deepseek") || base.contains("deepseek") || model.contains("deepseek")
 }
 
+fn is_kimi_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    provider.contains("kimi")
+        || provider.contains("moonshot")
+        || base.contains("moonshot")
+        || base.contains("kimi")
+        || model.contains("kimi")
+}
+
+fn is_siliconflow_profile(profile: &ModelProfile, base_url: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    provider.contains("siliconflow") || base.contains("siliconflow")
+}
+
 fn apply_openai_compatible_thinking_control(
     payload: &mut serde_json::Value,
     profile: &ModelProfile,
@@ -3474,17 +3623,26 @@ fn apply_reasoning_parameter(
         return true;
     }
 
-    if base.contains("api.openai.com") || is_openai_reasoning_model(&model_lower) {
-        payload["reasoning_effort"] = json!(if enabled { "medium" } else { "none" });
+    if is_deepseek_profile(profile, base_url, model) {
+        payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
+        if enabled {
+            payload["reasoning_effort"] = json!("high");
+        }
         return true;
     }
 
-    if is_deepseek_profile(profile, base_url, model) && !base.contains("api.deepseek.com") {
-        payload["reasoning"] = if enabled {
-            json!({ "enabled": true, "effort": "medium" })
-        } else {
-            json!({ "effort": "none" })
-        };
+    if is_kimi_profile(profile, base_url, model) {
+        payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
+        return true;
+    }
+
+    if is_siliconflow_profile(profile, base_url) {
+        payload["thinking_budget"] = json!(if enabled { 1024 } else { 0 });
+        return true;
+    }
+
+    if base.contains("api.openai.com") || is_openai_reasoning_model(&model_lower) {
+        payload["reasoning_effort"] = json!(if enabled { "medium" } else { "none" });
         return true;
     }
 
@@ -3699,6 +3857,13 @@ fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
 
 核心目标：
 让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。
+
+人物性别与代词一致性规则：
+1. 只允许主角、用户填写的“其他需要女性化的人物姓名”、以及一致性资产“姓名映射表”中明确存在映射的人物进行性别转换。
+2. 其他未指定人物必须保持原文性别、身份、称谓和人称代词：原文男性配角继续使用男性身份与“他/父亲/兄弟/少爷/公子”等符合原文的表达；原文女性配角继续使用女性身份与“她/母亲/姐妹/小姐”等符合原文的表达。
+3. 不得因为百合改写目标而把所有重要配角、敌人、长辈、师父、兄弟、父亲或旁观者都改成女性；也不得在不同章节中让同一配角一会儿是男性、一会儿是女性。
+4. 对性别不明或原文暂未明确的人物，应保持中性称呼或沿用原文称谓，等一致性资产或原文后续明确后再固定；不要凭空改成女性或男性。
+5. 改写时必须参考一致性资产中的人物卡、人物关系、姓名映射表和原文上下文，确保每个人物的性别、代词、称谓、亲属关系和社会身份跨章节一致。
 
 一致性硬性要求：
 1. 人物外貌特征必须前后一致。发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态一旦由原文、设定或一致性资产确立，后续章节不得随意改变；例如上一章是金发，下一章不能无理由变成红发。
@@ -4411,13 +4576,15 @@ fn build_batch_rewrite_prompt_with_context(
 4. 清除所有原男性主角痕迹，包括姓名、代词、身体描述、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示；所有相关内容都要自然转换为女性主角表达。
 5. 主角姓名和指定 NPC 姓名必须严格使用一致性资产中的“姓名映射表”。没有映射时才按同音或近音原则女性化，优先保留姓氏；例如萧炎改为萧妍，李火旺改为李火婉。
 6. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
-7. 人物外貌特征必须前后一致。发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态一旦由原文、设定或一致性资产确立，后续章节不得随意改变；例如上一章是金发，下一章不能无理由变成红发。
-8. 如果原文没有明确外貌，不要每章随机发明互相矛盾的新特征；需要补充女性化描写时，应使用与已建立设定兼容的细节，并保持后续复用。
-9. 百合向关系推进必须承接前文。暧昧、信任、依赖、吃醋、保护欲、亲密距离、旁人态度和称谓变化要符合当前剧情阶段，不能突然重置或跳跃。
-10. 女性化细节要覆盖正文和标题，也要覆盖旁人的视线、评价、互动距离和社会称呼；但新增内容必须服务当前剧情，不得破坏原文战力、伏笔、人物性格和逻辑。
-11. 输入可能是完整批次，也可能是并发分片；必须一次性改写当前输入中实际出现的全部章节，不要逐章分开回答。
-12. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
-13. 只输出当前输入章节的边界标记、改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
+7. 只有主角、用户指定的额外女性化人物、以及姓名映射表中明确存在映射的人物可以性别转换；其他配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别、身份、称谓和人称代词，不得跨章节忽男忽女。
+8. 对未指定性转的人物，原文男性继续使用男性代词/称谓，原文女性继续使用女性代词/称谓，性别不明者保持原文称谓或中性表达，等原文或一致性资产明确后再固定。
+9. 人物外貌特征必须前后一致。发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态一旦由原文、设定或一致性资产确立，后续章节不得随意改变；例如上一章是金发，下一章不能无理由变成红发。
+10. 如果原文没有明确外貌，不要每章随机发明互相矛盾的新特征；需要补充女性化描写时，应使用与已建立设定兼容的细节，并保持后续复用。
+11. 百合向关系推进必须承接前文。暧昧、信任、依赖、吃醋、保护欲、亲密距离、旁人态度和称谓变化要符合当前剧情阶段，不能突然重置或跳跃。
+12. 女性化细节要覆盖正文和标题，也要覆盖旁人的视线、评价、互动距离和社会称呼；但新增内容必须服务当前剧情，不得破坏原文战力、伏笔、人物性格和逻辑。
+13. 输入可能是完整批次，也可能是并发分片；必须一次性改写当前输入中实际出现的全部章节，不要逐章分开回答。
+14. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
+15. 只输出当前输入章节的边界标记、改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
 {}
 
@@ -4470,7 +4637,8 @@ fn build_batch_review_prompt_with_context(
 8. 人物外貌特征是否前后一致：发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态不能在不同章节无理由变化。
 9. 百合向关系推进是否承接前文：暧昧、信任、依赖、吃醋、保护欲、亲密距离、称谓和旁人态度不能突然重置或跳跃。
 10. 女性化补充是否贴合剧情和一致性资产，不能为了强调性别而破坏原文战力、伏笔、人物性格和逻辑。
-11. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。
+11. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者是否被误改性别；同一人物在不同章节中的他/她、先生/小姐、父亲/母亲、兄弟/姐妹、少爷/小姐等代词和称谓是否前后一致。
+12. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。
 
 输出要求：
 1. 如果发现问题，直接在正文中修正。
@@ -4505,7 +4673,8 @@ fn build_rewrite_prompt_with_settings(
 4. 清除所有原男主痕迹，包括姓名、代词、身体描写、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
 5. 主角姓名必须按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉；其他指定姓名只在本章出现时女性化。
 6. 按基本设定中的身材和体型调整外貌、动作和互动细节，不要出现与设定冲突的描写。
-7. 保持中文网文可读性，只输出改写后的标题和正文，不要解释。
+7. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲和旁观者必须保持原文性别、代词、称谓和身份一致，不得因为百合改写目标被误改成女性或跨章节忽男忽女。
+8. 保持中文网文可读性，只输出改写后的标题和正文，不要解释。
 
 {}
 
@@ -4549,21 +4718,22 @@ fn build_batch_analysis_prompt_with_context(chapters: &[Chapter], shard_context:
     "chapter_count": {}
   }},
   "outline": ["本批次原文主线、关键事件和状态变化，按时间顺序概括"],
-  "characters": ["本批次出现的重要人物、别名、身份、外貌、性格、动机、能力或状态变化"],
+  "characters": ["本批次出现的重要人物、别名、原文性别线索、原文人称代词、身份、称谓、外貌、性格、动机、能力或状态变化"],
   "relationships": ["本批次人物关系与关系变化"],
   "locations": ["本批次地点、场景和空间关系"],
   "foreshadowing": ["本批次伏笔、悬念、回收或关键信息"],
   "terms": ["本批次术语、组织、物品、功法、系统规则等"],
-  "names": ["本批次出现的人名、称谓、别名和指代对象"]
+  "names": ["本批次出现的人名、称谓、别名、指代对象、对应人物的原文性别或性别不明状态"]
 }}
 
 要求：
 1. 输入可能是完整批次，也可能是并发分片；必须一次性分析当前输入中实际出现的全部章节。
 2. 只输出一份当前输入级一致性资产，不要按章节逐章输出，不要输出 `chapters` 数组。
 3. 不要补充原文没有的信息，不要改变原文人物、姓名、关系或剧情。
-4. 不要提出任何后续处理方向。
-5. JSON 字符串内部如果需要换行，必须写成 `\n`，不要在字符串里输出真实换行或其他控制字符。
-6. 只输出 JSON，不要解释、不要 Markdown。
+4. 必须尽量记录人物的原文性别线索、代词、称谓和亲属身份；无法确定时写“性别不明”，不要猜测。
+5. 不要提出任何后续处理方向。
+6. JSON 字符串内部如果需要换行，必须写成 `\n`，不要在字符串里输出真实换行或其他控制字符。
+7. 只输出 JSON，不要解释、不要 Markdown。
 
 并发分片上下文：
 {}
@@ -4584,19 +4754,20 @@ fn build_analysis_prompt(chapter: &Chapter) -> String {
         r#"请只基于原文分析以下章节，并输出合法 JSON：
 {{
   "outline": "本章原文大纲",
-  "characters": ["原文人物、别名、身份、外貌、性格、动机、能力或状态变化"],
+  "characters": ["原文人物、别名、原文性别线索、原文人称代词、身份、称谓、外貌、性格、动机、能力或状态变化"],
   "relationships": ["原文人物关系与关系变化"],
   "locations": ["原文地点、场景和空间关系"],
   "foreshadowing": ["原文伏笔、悬念、回收或关键信息"],
   "terms": ["原文术语、组织、物品、功法、系统规则等"],
-  "names": ["原文出现的人名、称谓、别名和指代对象"]
+  "names": ["原文出现的人名、称谓、别名、指代对象、对应人物的原文性别或性别不明状态"]
 }}
 
 要求：
 1. 只提取和维护原文一致性资产。
 2. 不要提出任何后续处理方向。
 3. 不要补充原文没有的信息，不要改变原文人物、姓名、关系或剧情。
-4. 只输出 JSON，不要 Markdown。
+4. 必须尽量记录人物的原文性别线索、代词、称谓和亲属身份；无法确定时写“性别不明”，不要猜测。
+5. 只输出 JSON，不要 Markdown。
 
 章节标题：{}
 
@@ -4637,7 +4808,8 @@ fn build_rewrite_prompt(chapter: &Chapter, canon_text: &str) -> String {
 2. 采用中度再创作：保留主线、冲突、章节顺序和关键伏笔，但可以调整互动、细节动作、称谓、外貌描述和关系推进。
 3. 标题和正文都必须改写，标题中的主角原名、男性身份、男性称谓、男性化意象也要同步女性化。
 4. 清除所有原男主痕迹，包括姓名、代词、身体描写、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示。
-5. 保持中文网文可读性，只输出改写后的标题和正文，不要解释。
+5. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲和旁观者必须保持原文性别、代词、称谓和身份一致，不得因为百合改写目标被误改成女性或跨章节忽男忽女。
+6. 保持中文网文可读性，只输出改写后的标题和正文，不要解释。
 
 一致性资产：
 {}
@@ -4958,6 +5130,174 @@ fn update_job(
     )
     .map_err(to_string)?;
     Ok(())
+}
+
+fn prepare_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<i64, String> {
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    let resume_from = runs
+        .get(novel_id)
+        .filter(|control| control.status == "paused")
+        .map(|control| control.completed_batches)
+        .unwrap_or(0);
+    if let Some(control) = runs.get(novel_id) {
+        if control.status == "running" || control.status == "pause_requested" {
+            return Err("一键分析改写正在运行，请先暂停或终止当前任务。".to_string());
+        }
+    }
+    runs.insert(
+        novel_id.to_string(),
+        AutoRunControl {
+            status: "running".to_string(),
+            completed_batches: resume_from,
+            job_id: None,
+        },
+    );
+    Ok(resume_from)
+}
+
+fn register_auto_run_job(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    job_id: &str,
+    completed_batches: i64,
+) -> Result<(), String> {
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    let control = runs
+        .entry(novel_id.to_string())
+        .or_insert_with(|| AutoRunControl {
+            status: "running".to_string(),
+            completed_batches,
+            job_id: None,
+        });
+    control.status = "running".to_string();
+    control.completed_batches = completed_batches;
+    control.job_id = Some(job_id.to_string());
+    Ok(())
+}
+
+fn set_auto_run_completed(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    completed_batches: i64,
+) -> Result<(), String> {
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    if let Some(control) = runs.get_mut(novel_id) {
+        control.completed_batches = completed_batches;
+    }
+    Ok(())
+}
+
+fn requested_auto_run_stop(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+) -> Result<Option<String>, String> {
+    let runs = state.auto_runs.lock().map_err(to_string)?;
+    Ok(runs.get(novel_id).and_then(|control| {
+        if control.status == "pause_requested" {
+            Some(AUTO_RUN_PAUSED.to_string())
+        } else if control.status == "terminate_requested" {
+            Some(AUTO_RUN_TERMINATED.to_string())
+        } else {
+            None
+        }
+    }))
+}
+
+fn request_auto_run_stop(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    status: &str,
+) -> Result<Job, String> {
+    let (job_id, completed_batches, message, job_status) = {
+        let mut runs = state.auto_runs.lock().map_err(to_string)?;
+        let control = runs
+            .get_mut(novel_id)
+            .ok_or_else(|| "当前没有正在运行的一键分析改写任务。".to_string())?;
+        control.status = status.to_string();
+        let job_id = control
+            .job_id
+            .clone()
+            .ok_or_else(|| "当前一键任务尚未创建进度记录。".to_string())?;
+        let message = if status == "terminate_requested" {
+            "正在终止一键分析改写，当前未输出批次将不会保存。"
+        } else {
+            "正在暂停一键分析改写，当前未输出批次将从头重跑。"
+        };
+        let job_status = if status == "terminate_requested" {
+            "terminating"
+        } else {
+            "pausing"
+        };
+        (
+            job_id,
+            control.completed_batches,
+            message.to_string(),
+            job_status.to_string(),
+        )
+    };
+    update_job(state, &job_id, &job_status, completed_batches, &message)?;
+    load_job(state, &job_id)
+}
+
+fn finish_stopped_auto_run(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    status_marker: &str,
+) -> Result<Job, String> {
+    if status_marker == AUTO_RUN_TERMINATED {
+        let message = "一键分析改写已终止。下次点击将从头开始新的执行。";
+        update_job(state, &job.id, "terminated", completed_batches, message)?;
+        emit_job_progress(app, &job, "terminated", completed_batches, message);
+        clear_auto_run(state, &job.novel_id)?;
+    } else {
+        let message = format!(
+            "一键分析改写已暂停。继续后将从第 {} 批重新开始。",
+            completed_batches + 1
+        );
+        update_job(state, &job.id, "paused", completed_batches, &message)?;
+        emit_job_progress(app, &job, "paused", completed_batches, &message);
+        let mut runs = state.auto_runs.lock().map_err(to_string)?;
+        runs.insert(
+            job.novel_id.clone(),
+            AutoRunControl {
+                status: "paused".to_string(),
+                completed_batches,
+                job_id: Some(job.id.clone()),
+            },
+        );
+    }
+    load_job(state, &job.id)
+}
+
+fn clear_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    runs.remove(novel_id);
+    Ok(())
+}
+
+async fn next_auto_join<T: Send + 'static>(
+    tasks: &mut tokio::task::JoinSet<T>,
+    state: &State<'_, AppState>,
+    novel_id: &str,
+) -> Result<Option<T>, String> {
+    loop {
+        tokio::select! {
+            result = tasks.join_next() => {
+                return match result {
+                    Some(result) => result.map(Some).map_err(to_string),
+                    None => Ok(None),
+                };
+            }
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                if let Some(status) = requested_auto_run_stop(state, novel_id)? {
+                    tasks.abort_all();
+                    return Err(status);
+                }
+            }
+        }
+    }
 }
 
 fn emit_job_progress(
@@ -5794,6 +6134,9 @@ mod tests {
         assert!(strict_prompt.contains("人物外貌特征必须前后一致"));
         assert!(strict_prompt.contains("上一章是金发，下一章不能无理由变成红发"));
         assert!(strict_prompt.contains("人物关系和百合向情绪推进必须连续"));
+        assert!(strict_prompt.contains("只允许主角、用户填写的“其他需要女性化的人物姓名”"));
+        assert!(strict_prompt.contains("其他未指定人物必须保持原文性别、身份、称谓和人称代词"));
+        assert!(strict_prompt.contains("不得因为百合改写目标而把所有重要配角"));
         assert!(creative_prompt.contains("创意模式"));
         assert!(creative_prompt.contains("优先级高于普通的“中度再创作”约束"));
         assert!(creative_prompt.contains("每章都能明确感知主角已经从男性变为女性"));
@@ -5894,6 +6237,8 @@ mod tests {
         assert!(prompt.contains("上一章是金发，下一章不能无理由变成红发"));
         assert!(prompt.contains("百合向关系推进必须承接前文"));
         assert!(prompt.contains("不能突然重置或跳跃"));
+        assert!(prompt.contains("其他配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别"));
+        assert!(prompt.contains("原文男性继续使用男性代词/称谓"));
     }
 
     #[test]
@@ -5926,6 +6271,23 @@ mod tests {
         assert!(prompt.contains("人物外貌特征是否前后一致"));
         assert!(prompt.contains("百合向关系推进是否承接前文"));
         assert!(prompt.contains("不能为了强调性别而破坏原文战力"));
+        assert!(
+            prompt.contains("未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者是否被误改性别")
+        );
+        assert!(prompt.contains("同一人物在不同章节中的他/她"));
+    }
+
+    #[test]
+    fn analysis_prompt_tracks_original_gender_pronouns_without_rewrite_rules() {
+        let chapter = sample_chapter(1, "第一章", "萧炎和父亲说话，旁边的少女点头。");
+        let prompt = build_batch_analysis_prompt(&[chapter]);
+
+        assert!(prompt.contains("原文性别线索"));
+        assert!(prompt.contains("原文人称代词"));
+        assert!(prompt.contains("性别不明"));
+        assert!(!prompt.contains("百合"));
+        assert!(!prompt.contains("女性化"));
+        assert!(!prompt.contains("代词替换"));
     }
 
     #[test]
@@ -5998,6 +6360,42 @@ mod tests {
         ));
         assert_eq!(payload["reasoning_effort"], "medium");
 
+        profile.base_url = "https://api.deepseek.com/v1".to_string();
+        profile.model = "deepseek-v4-pro".to_string();
+        profile.thinking_mode = "off".to_string();
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload["thinking"]["type"], "disabled");
+
+        profile.base_url = "https://api.moonshot.ai/v1".to_string();
+        profile.model = "kimi-k2.5".to_string();
+        profile.thinking_mode = "on".to_string();
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload["thinking"]["type"], "enabled");
+
+        profile.base_url = "https://api.siliconflow.cn/v1".to_string();
+        profile.model = "Qwen/Qwen3-235B-A22B-Thinking-2507".to_string();
+        profile.thinking_mode = "off".to_string();
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload["thinking_budget"], 0);
+
         profile.provider = "gemini".to_string();
         profile.model = "gemini-2.5-flash".to_string();
         profile.thinking_mode = "off".to_string();
@@ -6007,6 +6405,56 @@ mod tests {
             payload["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             0
         );
+    }
+
+    #[test]
+    fn mimo_prompts_are_sanitized_to_reduce_content_filter_risk() {
+        let profile = ModelProfile {
+            id: "profile-1".to_string(),
+            name: "MiMo".to_string(),
+            provider: "openai-compatible".to_string(),
+            base_url: "https://api.xiaomimimo.com/v1".to_string(),
+            model: "mimo-v2.5-pro".to_string(),
+            temperature: 0.7,
+            thinking_mode: "auto".to_string(),
+            has_api_key: true,
+            updated_at: "now".to_string(),
+        };
+
+        let (system, user) = prepare_prompt_for_profile(
+            &profile,
+            "双女主百合文本",
+            "百合向关系、亲密互动暗示、身体描写、体型：萝莉、身材：巨乳、平胸",
+        );
+
+        assert!(system.contains("双女主百合文本"));
+        assert!(user.contains("百合向关系"));
+        assert!(user.contains("亲密互动暗示"));
+        assert!(user.contains("身体描写"));
+        assert!(user.contains("体型：娇小少女感"));
+        assert!(user.contains("身形风格：成熟曲线"));
+        assert!(user.contains("清瘦纤细"));
+        assert!(!user.contains("巨乳"));
+        assert!(!user.contains("萝莉"));
+        assert!(!user.contains("平胸"));
+    }
+
+    #[test]
+    fn openai_content_filter_response_is_reported_before_parsing() {
+        let value = json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {
+                    "content": "The request was rejected because it was considered high risk"
+                }
+            }]
+        });
+
+        let error = openai_content_filter_error(&value, "mimo-v2.5-pro").expect("content filter");
+
+        assert!(error.contains("模型内容安全策略拦截"));
+        assert!(error.contains("mimo-v2.5-pro"));
+        assert!(error.contains("content_filter"));
     }
 
     #[test]

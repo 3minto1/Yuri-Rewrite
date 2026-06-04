@@ -388,6 +388,10 @@ pre {
   margin: 5px 0 0;
 }
 
+.topbar p:empty {
+  display: none;
+}
+
 .topbar-actions {
   display: flex;
   flex-wrap: wrap;
@@ -801,6 +805,8 @@ pre {
   flex-direction: column;
   gap: 2px;
   left: 0;
+  max-height: 260px;
+  overflow: auto;
   padding: 4px;
   position: absolute;
   right: 0;
