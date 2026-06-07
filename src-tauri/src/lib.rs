@@ -3389,8 +3389,7 @@ fn decode_text(bytes: &[u8]) -> (String, String) {
 }
 
 fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
-    let heading_re = chapter_heading_regex();
-    let matches = heading_re.find_iter(text).collect::<Vec<_>>();
+    let matches = chapter_heading_matches(text);
     if matches.is_empty() {
         return SplitResult {
             chapters: chunk_without_headings(novel_id, text),
@@ -3428,11 +3427,133 @@ fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
     }
 }
 
+fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
+    let heading_re = chapter_heading_regex();
+    let matches = heading_re.find_iter(text).collect::<Vec<_>>();
+    if !matches.is_empty() {
+        return matches;
+    }
+    let loose_heading_re = loose_numbered_chapter_heading_regex();
+    let loose_matches = loose_heading_re.find_iter(text).collect::<Vec<_>>();
+    if loose_numbered_headings_are_plausible(&loose_matches) {
+        loose_matches
+    } else {
+        Vec::new()
+    }
+}
+
 fn chapter_heading_regex() -> Regex {
     Regex::new(
-        r#"(?m)^[\s\u{feff}　]*(?:[【〔［「『《（(\[]?\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册]\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:卷|篇|部|章|回|幕|册|话|节|季|段)\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[\s:：、.．\-—_·|]*.{0,80}|[上中下前后终外]\s*(?:卷|篇|部|章|册)[\s:：、.．\-—_·|]*.{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)\s*[0-9０-９IVXLCDMivxlcdm]+[\s:：、.．\-—_·|]*.{0,80}|[【〔［「『《（(\[]?\s*(?:序章|楔子|引子|前言|正文|终章|尾声|后记|番外(?:篇|章)?|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|[0-9０-９]{1,5}\.?\s*|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12}\s*|(?:第?\s*)?[0-9０-９]{1,5}\s*[、.．:：\-—_·|]\s*.{1,80}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,8}\s*[、.．:：\-—_·|]\s*.{1,80}|[（(]?[0-9０-９]{1,5}[）)]\s*.{0,80}|[【〔［「『《（(\[].{1,40}[】〕］」』》）)\]]|={2,6}.{1,60}={2,6})[\s　]*$"#,
+        r#"(?m)^[\s\u{feff}　]*(?:[【〔［「『《（(\[]?\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册夜案场弹折更]\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:卷|篇|部|章|回|幕|册|话|节|季|段|夜|案|场|弹|折|更)\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[\s:：、.．\-—_·|]*.{0,80}|[上中下前后终外]\s*(?:卷|篇|部|章|册)[\s:：、.．\-—_·|]*.{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)\s*[0-9０-９IVXLCDMivxlcdm]+[\s:：、.．\-—_·|]*.{0,80}|[【〔［「『《（(\[]?\s*(?:序章|楔子|引子|前言|正文|终章|尾声|后记|番外(?:篇|章)?|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:第?\s*)?[0-9０-９]{1,5}\s*[、.．:：\-—_·|]\s*.{1,80}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,8}\s*[、.．:：\-—_·|]\s*.{1,80}|[（(]?[0-9０-９]{1,5}[）)]\s*.{0,80}|[【〔［「『《（(\[].{1,40}[】〕］」』》）)\]]|={2,6}.{1,60}={2,6})[\s　]*$"#,
     )
     .expect("valid chapter regex")
+}
+
+fn loose_numbered_chapter_heading_regex() -> Regex {
+    Regex::new(
+        r#"(?m)^[\s\u{feff}　]*(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})[ \t　]+[^ \t　\r\n，。！？；;,.、:：\-—_·|][^\r\n]{1,59}[\s　]*$"#,
+    )
+    .expect("valid loose numbered chapter regex")
+}
+
+fn loose_numbered_headings_are_plausible(matches: &[regex::Match<'_>]) -> bool {
+    if matches.len() < 2 {
+        return false;
+    }
+    let ordinals = matches
+        .iter()
+        .filter_map(|mat| parse_loose_numbered_heading_ordinal(mat.as_str()))
+        .collect::<Vec<_>>();
+    if ordinals.len() != matches.len() || ordinals.first().is_none_or(|value| *value > 3) {
+        return false;
+    }
+    ordinals.windows(2).all(|pair| pair[1] == pair[0] + 1)
+}
+
+fn parse_loose_numbered_heading_ordinal(line: &str) -> Option<u64> {
+    let token = line
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　')
+        .split_whitespace()
+        .next()?;
+    parse_fullwidth_digits(token).or_else(|| parse_chinese_ordinal(token))
+}
+
+fn parse_fullwidth_digits(token: &str) -> Option<u64> {
+    let mut normalized = String::new();
+    for ch in token.chars() {
+        let digit = match ch {
+            '0'..='9' => ch,
+            '０' => '0',
+            '１' => '1',
+            '２' => '2',
+            '３' => '3',
+            '４' => '4',
+            '５' => '5',
+            '６' => '6',
+            '７' => '7',
+            '８' => '8',
+            '９' => '9',
+            _ => return None,
+        };
+        normalized.push(digit);
+    }
+    normalized.parse::<u64>().ok().filter(|value| *value > 0)
+}
+
+fn parse_chinese_ordinal(token: &str) -> Option<u64> {
+    let mut total = 0;
+    let mut section = 0;
+    let mut number = 0;
+    let mut seen = false;
+    for ch in token.chars() {
+        if let Some(value) = chinese_ordinal_digit(ch) {
+            number = value;
+            seen = true;
+        } else if let Some(unit) = chinese_ordinal_unit(ch) {
+            seen = true;
+            if unit == 10_000 {
+                section = (section + number.max(1)) * unit;
+                total += section;
+                section = 0;
+            } else {
+                section += number.max(1) * unit;
+            }
+            number = 0;
+        } else {
+            return None;
+        }
+    }
+    if !seen {
+        return None;
+    }
+    let value = total + section + number;
+    (value > 0).then_some(value)
+}
+
+fn chinese_ordinal_digit(ch: char) -> Option<u64> {
+    match ch {
+        '零' | '〇' | 'O' => Some(0),
+        '一' | '壹' => Some(1),
+        '二' | '贰' | '两' => Some(2),
+        '三' | '叁' => Some(3),
+        '四' | '肆' => Some(4),
+        '五' | '伍' => Some(5),
+        '六' | '陆' => Some(6),
+        '七' | '柒' => Some(7),
+        '八' | '捌' => Some(8),
+        '九' | '玖' => Some(9),
+        _ => None,
+    }
+}
+
+fn chinese_ordinal_unit(ch: char) -> Option<u64> {
+    match ch {
+        '十' | '拾' => Some(10),
+        '百' | '佰' => Some(100),
+        '千' | '仟' => Some(1000),
+        '万' | '萬' => Some(10_000),
+        _ => None,
+    }
 }
 
 fn chunk_without_headings(novel_id: &str, text: &str) -> Vec<Chapter> {
@@ -7062,8 +7183,12 @@ mod tests {
             "Part 3 - After",
             "Episode 4",
             "No. 5",
-            "12",
-            "一百七十",
+            "第1夜 雨中旧案",
+            "第2案 无声证词",
+            "第3场 天台重逢",
+            "第4弹 她的反击",
+            "第5折 灯下回身",
+            "第6更 月色正好",
             "1、这就是标题",
             "二十四、我瞎编的标题",
             "（11）我奶常山赵子龙",
@@ -7076,5 +7201,50 @@ mod tests {
                 "expected heading match: {title}"
             );
         }
+    }
+
+    #[test]
+    fn loose_numbered_headings_are_used_only_without_standard_headings() {
+        let text = "001 不应作为章节\n这一行会留在正文里。\n第1章 正式开始\n这里是内容甲\n第2章 继续推进\n这里是内容乙";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 2);
+        assert_eq!(split.chapters[0].title, "第1章 正式开始");
+        assert!(split.chapters[0].original_text.contains("这里是内容甲"));
+    }
+
+    #[test]
+    fn loose_numbered_headings_detect_sequential_numbered_titles() {
+        let text = "001 初遇\n这里是内容甲\n002 再会\n这里是内容乙\n003 终局\n这里是内容丙";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 3);
+        assert_eq!(split.chapters[0].title, "001 初遇");
+        assert_eq!(split.chapters[1].title, "002 再会");
+        assert_eq!(split.chapters[2].title, "003 终局");
+    }
+
+    #[test]
+    fn loose_numbered_headings_detect_sequential_chinese_numbered_titles() {
+        let text = "一 初遇\n这里是内容甲\n二 再会\n这里是内容乙\n三 终局\n这里是内容丙";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 3);
+        assert_eq!(split.chapters[0].title, "一 初遇");
+        assert_eq!(split.chapters[1].title, "二 再会");
+        assert_eq!(split.chapters[2].title, "三 终局");
+    }
+
+    #[test]
+    fn loose_numbered_headings_reject_nonsequential_numbered_lists() {
+        let text = "1 普通列表项\n这里是内容甲\n3 跳号列表项\n这里是内容乙\n7 又一个列表项\n这里是内容丙";
+        let split = split_chapters("novel-1", text);
+
+        assert!(!split.detected_chapters);
+        assert_eq!(split.chapters.len(), 1);
+        assert_eq!(split.chapters[0].title, "自动分段 1");
     }
 }

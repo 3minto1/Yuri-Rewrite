@@ -489,13 +489,14 @@ pre {
 }
 
 .content-grid {
-  align-items: start;
+  align-items: stretch;
   display: grid;
+  flex: 1;
   gap: 14px;
   grid-template-columns: minmax(320px, 0.8fr) minmax(560px, 1.6fr);
-  grid-template-rows: auto minmax(360px, 1fr);
+  grid-template-rows: minmax(0, 0.88fr) minmax(0, 1.12fr);
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 14px 22px 22px;
 }
 
@@ -708,6 +709,10 @@ pre {
   padding: 12px;
 }
 
+.estimate-panel.collapsed {
+  padding-bottom: 12px;
+}
+
 .estimate-heading {
   align-items: center;
   display: flex;
@@ -716,16 +721,42 @@ pre {
   margin-bottom: 10px;
 }
 
+.estimate-panel.collapsed .estimate-heading {
+  margin-bottom: 0;
+}
+
 .estimate-heading h2 {
   font-size: 15px;
   letter-spacing: 0;
   margin: 0;
 }
 
+.estimate-heading-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
 .estimate-heading span,
 .estimate-grid span {
   color: #6e675d;
   font-size: 12px;
+}
+
+.estimate-toggle {
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  width: 28px;
+}
+
+.estimate-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.estimate-panel.collapsed .estimate-toggle svg {
+  transform: rotate(180deg);
 }
 
 .estimate-grid {
@@ -814,9 +845,7 @@ pre {
 }
 
 .model-panel {
-  max-height: none;
-  min-height: 360px;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .model-panel .panel-actions {
@@ -826,6 +855,42 @@ pre {
 .model-panel .panel-actions button {
   flex: 1 1 98px;
   min-width: 0;
+}
+
+.model-scroll {
+  flex: 1;
+  min-height: 0;
+  padding-right: 8px;
+}
+
+.model-scroll,
+.chapter-list,
+.asset-stack {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-color: #aaa39a #f0ece4;
+  scrollbar-width: thin;
+}
+
+.model-scroll::-webkit-scrollbar,
+.chapter-list::-webkit-scrollbar,
+.asset-stack::-webkit-scrollbar {
+  width: 10px;
+}
+
+.model-scroll::-webkit-scrollbar-thumb,
+.chapter-list::-webkit-scrollbar-thumb,
+.asset-stack::-webkit-scrollbar-thumb {
+  background: #aaa39a;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+}
+
+.model-scroll::-webkit-scrollbar-track,
+.chapter-list::-webkit-scrollbar-track,
+.asset-stack::-webkit-scrollbar-track {
+  background: #f0ece4;
+  border-radius: 999px;
 }
 
 .diagnosis-panel {
@@ -997,7 +1062,7 @@ pre {
   }
 
   .model-panel {
-    max-height: none;
+    min-height: 0;
   }
 }
 
@@ -1008,7 +1073,7 @@ pre {
 
   .content-grid {
     grid-template-columns: minmax(280px, 1fr);
-    grid-template-rows: none;
+    grid-template-rows: repeat(3, minmax(0, 1fr));
   }
 
   .settings-rewritten-name-field,
@@ -1022,7 +1087,7 @@ pre {
   }
 
   .model-panel {
-    max-height: none;
+    min-height: 0;
   }
 }
 
@@ -1041,11 +1106,14 @@ label {
 
 .canon-panel {
   grid-row: span 2;
+  overflow: hidden;
 }
 
 .asset-stack {
   gap: 14px;
-  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 8px;
 }
 
 .canon-panel textarea {
@@ -1137,12 +1205,63 @@ label {
   border-color: #245fc8;
 }
 
+.quickstart-dialog {
+  background: #f7edf1 url("/quick-start-bg.png") center top / 100% auto no-repeat;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(18, 13, 24, 0.42);
+  color: #211d1a;
+  max-height: min(760px, calc(100vh - 96px));
+  max-width: 460px;
+  overflow: hidden;
+  width: min(460px, 100%);
+}
+
+.quickstart-content {
+  background: linear-gradient(rgba(255, 250, 244, 0.52), rgba(255, 250, 244, 0.64));
+  backdrop-filter: blur(0.4px);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: min(720px, calc(100vh - 120px));
+  padding: 28px;
+}
+
+.quickstart-content h2 {
+  font-size: 24px;
+  letter-spacing: 0;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.quickstart-content ol {
+  display: grid;
+  gap: 11px;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.quickstart-content li {
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.6;
+  text-shadow: 0 1px 10px rgba(255, 255, 255, 0.7);
+}
+
+.quickstart-confirm {
+  align-self: flex-end;
+  min-width: 108px;
+}
+
 .chapter-list-panel {
-  min-height: 260px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chapter-list {
-  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 8px;
 }
 
 .chapter-item {

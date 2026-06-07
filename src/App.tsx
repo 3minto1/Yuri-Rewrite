@@ -11,6 +11,7 @@ import {
   FilePlus2,
   FolderOpen,
   Github,
+  HelpCircle,
   KeyRound,
   Loader2,
   MoreHorizontal,
@@ -225,6 +226,7 @@ const emptyNovelSettings: NovelSettingsDraft = {
 };
 
 const savedApiKeyMask = "********";
+const quickStartSeenKey = "yuri-rewrite.quick-start-seen";
 const thinkingModeTooltip =
   "建议自动；分析阶段通常关闭更快\n兼容性：OpenAI 推理模型可控；DeepSeek V4 与 Kimi K2.5 支持 thinking 开关；Gemini 2.5 用 thinkingBudget；SiliconFlow 推理模型用 thinking_budget；Claude 原生 API 支持 extended/adaptive thinking；MiniMax/MiMo/Claude 转发取决于服务商，不支持时会自动降级";
 const modelSuggestionGroups: ModelSuggestionGroup[] = [
@@ -357,6 +359,7 @@ export default function App() {
   const [logs, setLogs] = useState<AiLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
+  const [estimateCollapsed, setEstimateCollapsed] = useState(false);
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [novelSettingsDraft, setNovelSettingsDraft] = useState<NovelSettingsDraft>(emptyNovelSettings);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
@@ -369,6 +372,7 @@ export default function App() {
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
+  const [showQuickStart, setShowQuickStart] = useState(false);
   const originalCompareRef = useRef<HTMLPreElement | null>(null);
   const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
 
@@ -398,6 +402,13 @@ export default function App() {
 
   useEffect(() => {
     void refreshAll();
+    try {
+      if (window.localStorage.getItem(quickStartSeenKey) !== "true") {
+        setShowQuickStart(true);
+      }
+    } catch {
+      setShowQuickStart(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -1156,6 +1167,15 @@ export default function App() {
     );
   }
 
+  function closeQuickStart() {
+    try {
+      window.localStorage.setItem(quickStartSeenKey, "true");
+    } catch {
+      // Ignore storage failures; closing the dialog for this session still works.
+    }
+    setShowQuickStart(false);
+  }
+
   return (
     <main className="app-shell">
       <nav className="app-menu">
@@ -1172,6 +1192,10 @@ export default function App() {
           disabled={!detail}
         >
           设定
+        </button>
+        <button className="app-menu-item" onClick={() => setShowQuickStart(true)}>
+          <HelpCircle size={16} />
+          帮助
         </button>
         <div className="app-menu-spacer" />
         <button className="app-menu-item" onClick={openGithubRepository} disabled={busy !== ""}>
@@ -1697,58 +1721,73 @@ export default function App() {
             </div>
           )}
           {detail && jobEstimate && (
-            <section className="estimate-panel" aria-label="任务预估">
+            <section className={`estimate-panel ${estimateCollapsed ? "collapsed" : ""}`} aria-label="任务预估">
               <div className="estimate-heading">
                 <h2>任务预估</h2>
-                <span>
-                  并发 {jobEstimate.parallelism} · 复检{jobEstimate.review_enabled ? "开启" : "关闭"}
-                </span>
-              </div>
-              <div className="estimate-grid">
-                <div>
-                  <span>全文规模</span>
-                  <strong>
-                    {formatNumber(jobEstimate.novel_chapters)} 章 · {formatNumber(jobEstimate.novel_chars)} 字 ·{" "}
-                    {formatNumber(jobEstimate.novel_batches)} 批
-                  </strong>
-                </div>
-                <div>
-                  <span>当前批次</span>
-                  <strong>
-                    {formatNumber(jobEstimate.selected_batch_chapters)} 章 ·{" "}
-                    {formatNumber(jobEstimate.selected_batch_chars)} 字
-                  </strong>
-                </div>
-                <div>
-                  <span>预计请求数</span>
-                  <strong>
-                    当前 {formatNumber(jobEstimate.current_batch_requests)} · 全文{" "}
-                    {formatNumber(jobEstimate.full_run_requests)}
-                  </strong>
-                </div>
-                <div>
-                  <span>预计等待</span>
-                  <strong>
-                    当前 {formatSeconds(jobEstimate.estimated_current_batch_seconds)} · 全文{" "}
-                    {formatSeconds(jobEstimate.estimated_full_run_seconds)}
-                  </strong>
-                </div>
-                <div>
-                  <span>历史调用</span>
-                  <strong>
-                    成功 {formatNumber(jobEstimate.recent_success_calls)} · 失败{" "}
-                    {formatNumber(jobEstimate.recent_failed_calls)} · 平均{" "}
-                    {formatSeconds(jobEstimate.average_call_seconds)}
-                  </strong>
-                </div>
-                <div>
-                  <span>历史字符</span>
-                  <strong>
-                    输入 {formatNumber(jobEstimate.average_input_chars)} · 输出{" "}
-                    {formatNumber(jobEstimate.average_output_chars)}
-                  </strong>
+                <div className="estimate-heading-actions">
+                  {!estimateCollapsed && (
+                    <span>
+                      并发 {jobEstimate.parallelism} · 复检{jobEstimate.review_enabled ? "开启" : "关闭"}
+                    </span>
+                  )}
+                  <button
+                    className="icon-button estimate-toggle"
+                    title={estimateCollapsed ? "展开任务预估详情" : "隐藏任务预估详情"}
+                    aria-label={estimateCollapsed ? "展开任务预估详情" : "隐藏任务预估详情"}
+                    aria-expanded={!estimateCollapsed}
+                    onClick={() => setEstimateCollapsed((value) => !value)}
+                  >
+                    <ChevronDown size={17} />
+                  </button>
                 </div>
               </div>
+              {!estimateCollapsed && (
+                <div className="estimate-grid">
+                  <div>
+                    <span>全文规模</span>
+                    <strong>
+                      {formatNumber(jobEstimate.novel_chapters)} 章 · {formatNumber(jobEstimate.novel_chars)} 字 ·{" "}
+                      {formatNumber(jobEstimate.novel_batches)} 批
+                    </strong>
+                  </div>
+                  <div>
+                    <span>当前批次</span>
+                    <strong>
+                      {formatNumber(jobEstimate.selected_batch_chapters)} 章 ·{" "}
+                      {formatNumber(jobEstimate.selected_batch_chars)} 字
+                    </strong>
+                  </div>
+                  <div>
+                    <span>预计请求数</span>
+                    <strong>
+                      当前 {formatNumber(jobEstimate.current_batch_requests)} · 全文{" "}
+                      {formatNumber(jobEstimate.full_run_requests)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>预计等待</span>
+                    <strong>
+                      当前 {formatSeconds(jobEstimate.estimated_current_batch_seconds)} · 全文{" "}
+                      {formatSeconds(jobEstimate.estimated_full_run_seconds)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>历史调用</span>
+                    <strong>
+                      成功 {formatNumber(jobEstimate.recent_success_calls)} · 失败{" "}
+                      {formatNumber(jobEstimate.recent_failed_calls)} · 平均{" "}
+                      {formatSeconds(jobEstimate.average_call_seconds)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>历史字符</span>
+                    <strong>
+                      输入 {formatNumber(jobEstimate.average_input_chars)} · 输出{" "}
+                      {formatNumber(jobEstimate.average_output_chars)}
+                    </strong>
+                  </div>
+                </div>
+              )}
             </section>
           )}
           <div className="content-grid">
@@ -1770,132 +1809,134 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <div className="form-grid model-form-grid">
-                <label>
-                  名称
-                  <input value={profileDraft.name} onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })} />
-                </label>
-                <label>
-                  Provider
-                  <select
-                    value={profileDraft.provider}
-                    onChange={(event) =>
-                      setProfileDraft({
-                        ...profileDraft,
-                        provider: event.target.value,
-                        base_url:
-                          event.target.value === "gemini"
-                            ? "https://generativelanguage.googleapis.com/v1beta"
-                            : profileDraft.base_url
-                      })
-                    }
-                  >
-                    <option value="openai-compatible">OpenAI 兼容</option>
-                    <option value="gemini">Google Gemini</option>
-                  </select>
-                </label>
-                <label>
-                  Base URL
-                  <input value={profileDraft.base_url} onChange={(event) => setProfileDraft({ ...profileDraft, base_url: event.target.value })} />
-                </label>
-                <label>
-                  模型名
-                  <div className="model-name-control">
+              <div className="model-scroll">
+                <div className="form-grid model-form-grid">
+                  <label>
+                    名称
+                    <input value={profileDraft.name} onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })} />
+                  </label>
+                  <label>
+                    Provider
+                    <select
+                      value={profileDraft.provider}
+                      onChange={(event) =>
+                        setProfileDraft({
+                          ...profileDraft,
+                          provider: event.target.value,
+                          base_url:
+                            event.target.value === "gemini"
+                              ? "https://generativelanguage.googleapis.com/v1beta"
+                              : profileDraft.base_url
+                        })
+                      }
+                    >
+                      <option value="openai-compatible">OpenAI 兼容</option>
+                      <option value="gemini">Google Gemini</option>
+                    </select>
+                  </label>
+                  <label>
+                    Base URL
+                    <input value={profileDraft.base_url} onChange={(event) => setProfileDraft({ ...profileDraft, base_url: event.target.value })} />
+                  </label>
+                  <label>
+                    模型名
+                    <div className="model-name-control">
+                      <input
+                        value={profileDraft.model}
+                        onChange={(event) => setProfileDraft({ ...profileDraft, model: event.target.value })}
+                      />
+                      {detectedModelSuggestions.length > 0 && (
+                        <button
+                          type="button"
+                          className="model-suggestion-trigger"
+                          title="选择检测到的服务商模型"
+                          aria-label="选择检测到的服务商模型"
+                          aria-expanded={openModelSuggestions}
+                          onClick={() => setOpenModelSuggestions((open) => !open)}
+                        >
+                          <ChevronDown size={16} />
+                        </button>
+                      )}
+                      {openModelSuggestions && detectedModelSuggestions.length > 0 && (
+                        <div className="model-suggestion-menu" role="listbox">
+                          {detectedModelSuggestions.map((suggestion) => (
+                            <button
+                              type="button"
+                              key={suggestion.model}
+                              role="option"
+                              aria-selected={profileDraft.model === suggestion.model}
+                              onClick={() => {
+                                setProfileDraft((draft) => ({ ...draft, model: suggestion.model }));
+                                setOpenModelSuggestions(false);
+                              }}
+                            >
+                              <span>{suggestion.label}</span>
+                              <small>{suggestion.model}</small>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                  <label>
+                    Temperature
                     <input
-                      value={profileDraft.model}
-                      onChange={(event) => setProfileDraft({ ...profileDraft, model: event.target.value })}
+                      type="number"
+                      min="0"
+                      max="2"
+                      step="0.1"
+                      value={profileDraft.temperature}
+                      onChange={(event) => setProfileDraft({ ...profileDraft, temperature: Number(event.target.value) })}
                     />
-                    {detectedModelSuggestions.length > 0 && (
+                  </label>
+                  <label className="mode-field thinking-mode-field form-full" title={thinkingModeTooltip}>
+                    <span>思考模式</span>
+                    <div className="mode-toggle mode-toggle-three" role="radiogroup" aria-label="思考模式">
                       <button
                         type="button"
-                        className="model-suggestion-trigger"
-                        title="选择检测到的服务商模型"
-                        aria-label="选择检测到的服务商模型"
-                        aria-expanded={openModelSuggestions}
-                        onClick={() => setOpenModelSuggestions((open) => !open)}
+                        className={profileDraft.thinking_mode === "auto" ? "active" : ""}
+                        role="radio"
+                        aria-checked={profileDraft.thinking_mode === "auto"}
+                        title={thinkingModeTooltip}
+                        onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "auto" })}
                       >
-                        <ChevronDown size={16} />
+                        自动
                       </button>
-                    )}
-                    {openModelSuggestions && detectedModelSuggestions.length > 0 && (
-                      <div className="model-suggestion-menu" role="listbox">
-                        {detectedModelSuggestions.map((suggestion) => (
-                          <button
-                            type="button"
-                            key={suggestion.model}
-                            role="option"
-                            aria-selected={profileDraft.model === suggestion.model}
-                            onClick={() => {
-                              setProfileDraft((draft) => ({ ...draft, model: suggestion.model }));
-                              setOpenModelSuggestions(false);
-                            }}
-                          >
-                            <span>{suggestion.label}</span>
-                            <small>{suggestion.model}</small>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </label>
-                <label>
-                  Temperature
-                  <input
-                    type="number"
-                    min="0"
-                    max="2"
-                    step="0.1"
-                    value={profileDraft.temperature}
-                    onChange={(event) => setProfileDraft({ ...profileDraft, temperature: Number(event.target.value) })}
-                  />
-                </label>
-                <label className="mode-field thinking-mode-field form-full" title={thinkingModeTooltip}>
-                  <span>思考模式</span>
-                  <div className="mode-toggle mode-toggle-three" role="radiogroup" aria-label="思考模式">
-                    <button
-                      type="button"
-                      className={profileDraft.thinking_mode === "auto" ? "active" : ""}
-                      role="radio"
-                      aria-checked={profileDraft.thinking_mode === "auto"}
-                      title={thinkingModeTooltip}
-                      onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "auto" })}
-                    >
-                      自动
-                    </button>
-                    <button
-                      type="button"
-                      className={profileDraft.thinking_mode === "off" ? "active" : ""}
-                      role="radio"
-                      aria-checked={profileDraft.thinking_mode === "off"}
-                      title={thinkingModeTooltip}
-                      onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "off" })}
-                    >
-                      关闭
-                    </button>
-                    <button
-                      type="button"
-                      className={profileDraft.thinking_mode === "on" ? "active" : ""}
-                      role="radio"
-                      aria-checked={profileDraft.thinking_mode === "on"}
-                      title={thinkingModeTooltip}
-                      onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "on" })}
-                    >
-                      开启
-                    </button>
-                  </div>
-                </label>
-                <label>
-                  API Key
-                  <input
-                    type="password"
-                    value={profileDraft.api_key}
-                    placeholder={selectedProfileId ? "留空则不保存 Key" : "填写 API Key 后保存"}
-                    onFocus={() => {
-                      if (profileDraft.api_key === savedApiKeyMask) setProfileDraft({ ...profileDraft, api_key: "" });
-                    }}
-                    onChange={(event) => setProfileDraft({ ...profileDraft, api_key: event.target.value })}
-                  />
-                </label>
+                      <button
+                        type="button"
+                        className={profileDraft.thinking_mode === "off" ? "active" : ""}
+                        role="radio"
+                        aria-checked={profileDraft.thinking_mode === "off"}
+                        title={thinkingModeTooltip}
+                        onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "off" })}
+                      >
+                        关闭
+                      </button>
+                      <button
+                        type="button"
+                        className={profileDraft.thinking_mode === "on" ? "active" : ""}
+                        role="radio"
+                        aria-checked={profileDraft.thinking_mode === "on"}
+                        title={thinkingModeTooltip}
+                        onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "on" })}
+                      >
+                        开启
+                      </button>
+                    </div>
+                  </label>
+                  <label>
+                    API Key
+                    <input
+                      type="password"
+                      value={profileDraft.api_key}
+                      placeholder={selectedProfileId ? "留空则不保存 Key" : "填写 API Key 后保存"}
+                      onFocus={() => {
+                        if (profileDraft.api_key === savedApiKeyMask) setProfileDraft({ ...profileDraft, api_key: "" });
+                      }}
+                      onChange={(event) => setProfileDraft({ ...profileDraft, api_key: event.target.value })}
+                    />
+                  </label>
+                </div>
               </div>
             </section>
 
@@ -2051,6 +2092,28 @@ export default function App() {
                 </footer>
               </>
             )}
+          </div>
+        </div>
+      )}
+      {showQuickStart && (
+        <div className="modal-backdrop">
+          <div className="quickstart-dialog" role="dialog" aria-modal="true" aria-labelledby="quickstart-title">
+            <div className="quickstart-content">
+              <h2 id="quickstart-title">快速上手</h2>
+              <ol>
+                <li>点击导入 TXT，选择小说文件。</li>
+                <li>填写模型配置，保存后点击诊断模型。</li>
+                <li>进入设定，填写主角姓名和改写模式。</li>
+                <li>查看任务预估，确认批次数、请求数和预计等待。</li>
+                <li>回到工作台，点击一键分析改写当前批次或全文。</li>
+                <li>运行中可以暂停、继续或终止全文任务。</li>
+                <li>改写完成后到对比页面检查并导出 TXT。</li>
+                <li>需要调整质量时，可降低并发或开启改写复检。</li>
+              </ol>
+              <button className="dialog-primary quickstart-confirm" onClick={closeQuickStart}>
+                确定
+              </button>
+            </div>
           </div>
         </div>
       )}
