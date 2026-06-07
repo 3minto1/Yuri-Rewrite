@@ -140,6 +140,37 @@ type UpdateDownloadResult = {
   version: string;
 };
 
+type JobEstimate = {
+  novel_chapters: number;
+  novel_chars: number;
+  novel_batches: number;
+  selected_batch_chapters: number;
+  selected_batch_chars: number;
+  parallelism: number;
+  review_enabled: boolean;
+  current_batch_requests: number;
+  full_run_requests: number;
+  average_call_seconds?: number | null;
+  estimated_current_batch_seconds?: number | null;
+  estimated_full_run_seconds?: number | null;
+  recent_success_calls: number;
+  recent_failed_calls: number;
+  average_input_chars?: number | null;
+  average_output_chars?: number | null;
+};
+
+type DiagnosisStatus = "ok" | "warning" | "failed";
+
+type ModelDiagnosis = {
+  status: DiagnosisStatus;
+  recommended_thinking_mode?: "auto" | "off" | "on" | null;
+  checks: Array<{
+    name: string;
+    status: DiagnosisStatus;
+    message: string;
+  }>;
+};
+
 type ProfileDraft = {
   id?: string;
   name: string;
@@ -325,6 +356,8 @@ export default function App() {
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
+  const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
+  const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [novelSettingsDraft, setNovelSettingsDraft] = useState<NovelSettingsDraft>(emptyNovelSettings);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "logs" | "settings">("workspace");
@@ -437,6 +470,7 @@ export default function App() {
 
   useEffect(() => {
     const profile = profiles.find((item) => item.id === selectedProfileId);
+    setModelDiagnosis(null);
     if (!profile) return;
     setProfileDraft({
       id: profile.id,
@@ -454,6 +488,30 @@ export default function App() {
     if (originalCompareRef.current) originalCompareRef.current.scrollTop = 0;
     if (rewriteCompareRef.current) rewriteCompareRef.current.scrollTop = 0;
   }, [selectedChapterId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadEstimate() {
+      if (!detail) {
+        setJobEstimate(null);
+        return;
+      }
+      try {
+        const estimate = await invoke<JobEstimate>("estimate_job_cost", {
+          novelId: detail.novel.id,
+          batchId: selectedBatchId || null,
+          profileId: selectedProfileId || null
+        });
+        if (!cancelled) setJobEstimate(estimate);
+      } catch {
+        if (!cancelled) setJobEstimate(null);
+      }
+    }
+    void loadEstimate();
+    return () => {
+      cancelled = true;
+    };
+  }, [detail?.novel.id, selectedBatchId, selectedProfileId, settings.review_enabled, settings.rewrite_parallelism]);
 
   async function refreshAll() {
     const [novelRows, profileRows, appSettings] = await Promise.all([
@@ -681,19 +739,22 @@ export default function App() {
     }
   }
 
-  async function testProfile() {
+  async function diagnoseProfile() {
     if (!selectedProfileId) {
       showNotice("请先保存并选择一个模型配置。");
       return;
     }
-    setBusy("test");
+    setBusy("diagnose");
     setNotice("");
+    setModelDiagnosis(null);
     try {
-      const result = await invoke<{ ok: boolean; message: string }>("test_model_profile", {
+      const result = await invoke<ModelDiagnosis>("diagnose_model_profile", {
         profileId: selectedProfileId
       });
+      setModelDiagnosis(result);
       await refreshLogs();
-      showNotice(result.ok ? `连接成功：${result.message}` : `连接失败：${result.message}`);
+      const label = result.status === "ok" ? "诊断通过" : result.status === "warning" ? "诊断有警告" : "诊断失败";
+      showNotice(label);
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -1043,6 +1104,28 @@ export default function App() {
     return title || `第 ${chapter.index} 章`;
   }
 
+  function formatNumber(value?: number | null) {
+    if (value === null || value === undefined) return "暂无";
+    return new Intl.NumberFormat("zh-CN").format(Math.round(value));
+  }
+
+  function formatSeconds(value?: number | null) {
+    if (value === null || value === undefined) return "暂无历史数据";
+    if (value < 60) return `${value.toFixed(1)} 秒`;
+    const minutes = Math.floor(value / 60);
+    const seconds = Math.round(value % 60);
+    if (minutes < 60) return `${minutes} 分 ${seconds} 秒`;
+    const hours = Math.floor(minutes / 60);
+    const restMinutes = minutes % 60;
+    return `${hours} 小时 ${restMinutes} 分`;
+  }
+
+  function diagnosisStatusText(status: DiagnosisStatus) {
+    if (status === "ok") return "通过";
+    if (status === "warning") return "警告";
+    return "失败";
+  }
+
   function renderRewriteModeControl() {
     return (
       <div className="mode-field">
@@ -1306,6 +1389,27 @@ export default function App() {
                 </button>
               </div>
             )}
+          </div>
+        )}
+        {modelDiagnosis && (
+          <div className={`diagnosis-panel diagnosis-top-panel ${modelDiagnosis.status}`}>
+            <div className="diagnosis-heading">
+              <strong>诊断结果：{diagnosisStatusText(modelDiagnosis.status)}</strong>
+              {modelDiagnosis.recommended_thinking_mode && (
+                <span>建议思考模式：{modelDiagnosis.recommended_thinking_mode}</span>
+              )}
+            </div>
+            <div className="diagnosis-list">
+              {modelDiagnosis.checks.map((check) => (
+                <div className={`diagnosis-item ${check.status}`} key={`${check.name}-${check.message}`}>
+                  <span>{diagnosisStatusText(check.status)}</span>
+                  <div>
+                    <strong>{check.name}</strong>
+                    <p>{check.message}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
         {job && activeView === "workspace" && (
@@ -1592,6 +1696,61 @@ export default function App() {
               </span>
             </div>
           )}
+          {detail && jobEstimate && (
+            <section className="estimate-panel" aria-label="任务预估">
+              <div className="estimate-heading">
+                <h2>任务预估</h2>
+                <span>
+                  并发 {jobEstimate.parallelism} · 复检{jobEstimate.review_enabled ? "开启" : "关闭"}
+                </span>
+              </div>
+              <div className="estimate-grid">
+                <div>
+                  <span>全文规模</span>
+                  <strong>
+                    {formatNumber(jobEstimate.novel_chapters)} 章 · {formatNumber(jobEstimate.novel_chars)} 字 ·{" "}
+                    {formatNumber(jobEstimate.novel_batches)} 批
+                  </strong>
+                </div>
+                <div>
+                  <span>当前批次</span>
+                  <strong>
+                    {formatNumber(jobEstimate.selected_batch_chapters)} 章 ·{" "}
+                    {formatNumber(jobEstimate.selected_batch_chars)} 字
+                  </strong>
+                </div>
+                <div>
+                  <span>预计请求数</span>
+                  <strong>
+                    当前 {formatNumber(jobEstimate.current_batch_requests)} · 全文{" "}
+                    {formatNumber(jobEstimate.full_run_requests)}
+                  </strong>
+                </div>
+                <div>
+                  <span>预计等待</span>
+                  <strong>
+                    当前 {formatSeconds(jobEstimate.estimated_current_batch_seconds)} · 全文{" "}
+                    {formatSeconds(jobEstimate.estimated_full_run_seconds)}
+                  </strong>
+                </div>
+                <div>
+                  <span>历史调用</span>
+                  <strong>
+                    成功 {formatNumber(jobEstimate.recent_success_calls)} · 失败{" "}
+                    {formatNumber(jobEstimate.recent_failed_calls)} · 平均{" "}
+                    {formatSeconds(jobEstimate.average_call_seconds)}
+                  </strong>
+                </div>
+                <div>
+                  <span>历史字符</span>
+                  <strong>
+                    输入 {formatNumber(jobEstimate.average_input_chars)} · 输出{" "}
+                    {formatNumber(jobEstimate.average_output_chars)}
+                  </strong>
+                </div>
+              </div>
+            </section>
+          )}
           <div className="content-grid">
             <section className="panel model-panel">
               <div className="panel-heading">
@@ -1601,9 +1760,9 @@ export default function App() {
                     <FilePlus2 size={16} />
                     新建
                   </button>
-                  <button onClick={testProfile} disabled={!selectedProfileId || busy === "test"}>
-                    {busy === "test" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
-                    测试模型
+                  <button onClick={diagnoseProfile} disabled={!selectedProfileId || busy === "diagnose"}>
+                    {busy === "diagnose" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
+                    诊断模型
                   </button>
                   <button onClick={saveProfile} disabled={busy === "profile"}>
                     {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}

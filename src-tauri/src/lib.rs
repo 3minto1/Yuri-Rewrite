@@ -199,6 +199,41 @@ struct ModelOutput {
     input_chars: usize,
     output_chars: usize,
     elapsed_ms: u128,
+    retried_without_thinking: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct JobEstimate {
+    novel_chapters: usize,
+    novel_chars: usize,
+    novel_batches: usize,
+    selected_batch_chapters: usize,
+    selected_batch_chars: usize,
+    parallelism: usize,
+    review_enabled: bool,
+    current_batch_requests: usize,
+    full_run_requests: usize,
+    average_call_seconds: Option<f64>,
+    estimated_current_batch_seconds: Option<f64>,
+    estimated_full_run_seconds: Option<f64>,
+    recent_success_calls: usize,
+    recent_failed_calls: usize,
+    average_input_chars: Option<usize>,
+    average_output_chars: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelDiagnosis {
+    status: String,
+    recommended_thinking_mode: Option<String>,
+    checks: Vec<ModelDiagnosisCheck>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelDiagnosisCheck {
+    name: String,
+    status: String,
+    message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -274,6 +309,8 @@ pub fn run() {
             delete_model_profile,
             list_model_profiles,
             test_model_profile,
+            diagnose_model_profile,
+            estimate_job_cost,
             list_ai_logs,
             clear_ai_logs,
             get_app_settings,
@@ -431,6 +468,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "rewrite_mode",
         "TEXT NOT NULL DEFAULT 'strict'",
     )?;
+    migrate_api_keys_to_keyring(conn)?;
     Ok(())
 }
 
@@ -456,6 +494,23 @@ fn ensure_column(
     Ok(())
 }
 
+fn migrate_api_keys_to_keyring(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id, api_key FROM model_profiles WHERE api_key IS NOT NULL AND trim(api_key) != ''",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for (profile_id, api_key) in rows {
+        let _ = write_api_key(&profile_id, &api_key);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String> {
     let bytes = fs::read(&file_path).map_err(to_string)?;
@@ -475,15 +530,16 @@ fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String
         created_at: Utc::now().to_rfc3339(),
     };
     let split = split_chapters(&novel.id, &text);
-    let conn = state.conn.lock().map_err(to_string)?;
-    conn.execute(
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let tx = conn.transaction().map_err(to_string)?;
+    tx.execute(
         "INSERT INTO novels (id, title, source_path, encoding, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![novel.id, novel.title, novel.source_path, novel.encoding, novel.status, novel.created_at],
     )
     .map_err(to_string)?;
 
     for chapter in &split.chapters {
-        conn.execute(
+        tx.execute(
             "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_status, rewrite_status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 'pending')",
             params![chapter.id, chapter.novel_id, chapter.index, chapter.title, chapter.original_text],
         )
@@ -491,14 +547,15 @@ fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String
     }
 
     create_chapter_batches(
-        &conn,
+        &tx,
         &state.data_dir,
         &novel.id,
         &split.chapters,
         split.detected_chapters,
     )
     .map_err(to_string)?;
-    seed_canon_assets(&conn, &novel.id).map_err(to_string)?;
+    seed_canon_assets(&tx, &novel.id).map_err(to_string)?;
+    tx.commit().map_err(to_string)?;
     Ok(novel)
 }
 
@@ -545,37 +602,39 @@ fn get_novel_detail(novel_id: String, state: State<AppState>) -> Result<NovelDet
 
 #[tauri::command]
 fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(to_string)?;
+    let mut conn = state.conn.lock().map_err(to_string)?;
     let batch_dir = state.data_dir.join("chapter_batches").join(&novel_id);
-    if batch_dir.exists() {
-        fs::remove_dir_all(&batch_dir).map_err(to_string)?;
-    }
-    conn.execute(
+    let tx = conn.transaction().map_err(to_string)?;
+    tx.execute(
         "DELETE FROM novel_settings WHERE novel_id = ?1",
         params![novel_id],
     )
     .map_err(to_string)?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM chapter_batches WHERE novel_id = ?1",
         params![novel_id],
     )
     .map_err(to_string)?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM chapters WHERE novel_id = ?1",
         params![novel_id],
     )
     .map_err(to_string)?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM canon_assets WHERE novel_id = ?1",
         params![novel_id],
     )
     .map_err(to_string)?;
-    conn.execute("DELETE FROM jobs WHERE novel_id = ?1", params![novel_id])
+    tx.execute("DELETE FROM jobs WHERE novel_id = ?1", params![novel_id])
         .map_err(to_string)?;
-    conn.execute("DELETE FROM ai_logs WHERE novel_id = ?1", params![novel_id])
+    tx.execute("DELETE FROM ai_logs WHERE novel_id = ?1", params![novel_id])
         .map_err(to_string)?;
-    conn.execute("DELETE FROM novels WHERE id = ?1", params![novel_id])
+    tx.execute("DELETE FROM novels WHERE id = ?1", params![novel_id])
         .map_err(to_string)?;
+    tx.commit().map_err(to_string)?;
+    if batch_dir.exists() {
+        fs::remove_dir_all(&batch_dir).map_err(to_string)?;
+    }
     Ok(())
 }
 
@@ -592,10 +651,12 @@ fn save_model_profile(
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "********")
         .map(str::to_string);
-    let conn = state.conn.lock().map_err(to_string)?;
+    let mut db_api_key_fallback = None;
     if let Some(value) = &api_key {
         let _ = write_api_key(&id, value);
+        db_api_key_fallback = Some(value.clone());
     }
+    let conn = state.conn.lock().map_err(to_string)?;
     let thinking_mode = normalize_thinking_mode(input.thinking_mode.as_deref())?;
     let profile = ModelProfile {
         id: id.clone(),
@@ -621,7 +682,11 @@ fn save_model_profile(
             temperature = excluded.temperature,
             thinking_mode = excluded.thinking_mode,
             updated_at = excluded.updated_at,
-            api_key = COALESCE(excluded.api_key, model_profiles.api_key)
+            api_key = CASE
+                WHEN ?9 IS NOT NULL THEN excluded.api_key
+                WHEN ?10 IS NOT NULL THEN NULL
+                ELSE model_profiles.api_key
+            END
         "#,
         params![
             profile.id,
@@ -632,6 +697,7 @@ fn save_model_profile(
             profile.temperature,
             profile.thinking_mode,
             profile.updated_at,
+            db_api_key_fallback,
             api_key
         ],
     )
@@ -860,6 +926,7 @@ fn get_novel_settings(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn save_novel_settings(
     novel_id: String,
     protagonist_name: String,
@@ -943,6 +1010,79 @@ fn list_chapter_batches(
 }
 
 #[tauri::command]
+fn estimate_job_cost(
+    novel_id: String,
+    batch_id: Option<String>,
+    profile_id: Option<String>,
+    state: State<AppState>,
+) -> Result<JobEstimate, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let chapters = load_chapters(&conn, &novel_id)?;
+    let batches = load_chapter_batches(&conn, &novel_id)?;
+    let parallelism = load_rewrite_parallelism(&conn)?;
+    let review_enabled = load_review_enabled(&conn)?;
+    let selected_batch = batch_id
+        .as_deref()
+        .and_then(|id| load_chapters_for_batch(&conn, &novel_id, id).ok())
+        .or_else(|| {
+            batches
+                .first()
+                .and_then(|batch| load_chapters_for_batch(&conn, &novel_id, &batch.id).ok())
+        })
+        .unwrap_or_default();
+    let current_batch_requests =
+        estimate_requests_for_chapters(&selected_batch, parallelism, review_enabled);
+    let current_batch_wait_stages =
+        estimate_wait_stages_for_chapters(&selected_batch, review_enabled);
+    let full_run_requests = batches
+        .iter()
+        .map(|batch| {
+            load_chapters_for_batch(&conn, &novel_id, &batch.id)
+                .map(|batch_chapters| {
+                    estimate_requests_for_chapters(&batch_chapters, parallelism, review_enabled)
+                })
+                .unwrap_or(0)
+        })
+        .sum::<usize>();
+    let full_run_wait_stages = batches
+        .iter()
+        .map(|batch| {
+            load_chapters_for_batch(&conn, &novel_id, &batch.id)
+                .map(|batch_chapters| {
+                    estimate_wait_stages_for_chapters(&batch_chapters, review_enabled)
+                })
+                .unwrap_or(0)
+        })
+        .sum::<usize>();
+    let stats = profile_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .and_then(|id| load_recent_model_stats(&conn, id).ok())
+        .unwrap_or_default();
+    let average_call_seconds = stats.average_call_seconds();
+    Ok(JobEstimate {
+        novel_chapters: chapters.len(),
+        novel_chars: chapters.iter().map(chapter_text_chars).sum(),
+        novel_batches: batches.len(),
+        selected_batch_chapters: selected_batch.len(),
+        selected_batch_chars: selected_batch.iter().map(chapter_text_chars).sum(),
+        parallelism,
+        review_enabled,
+        current_batch_requests,
+        full_run_requests,
+        average_call_seconds,
+        estimated_current_batch_seconds: average_call_seconds
+            .map(|seconds| seconds * current_batch_wait_stages as f64),
+        estimated_full_run_seconds: average_call_seconds
+            .map(|seconds| seconds * full_run_wait_stages as f64),
+        recent_success_calls: stats.success_calls,
+        recent_failed_calls: stats.failed_calls,
+        average_input_chars: stats.average_input_chars(),
+        average_output_chars: stats.average_output_chars(),
+    })
+}
+
+#[tauri::command]
 async fn test_model_profile(
     profile_id: String,
     state: State<'_, AppState>,
@@ -995,6 +1135,141 @@ async fn test_model_profile(
             })
         }
     }
+}
+
+#[tauri::command]
+async fn diagnose_model_profile(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> Result<ModelDiagnosis, String> {
+    let profile = load_model_profile(&state, &profile_id)?;
+    let mut checks = Vec::new();
+    let api_key = match read_stored_api_key(&state, &profile.id) {
+        Ok(api_key) => {
+            checks.push(diagnosis_check(
+                "API Key",
+                "ok",
+                "已找到本地保存的 API Key。",
+            ));
+            api_key
+        }
+        Err(error) => {
+            checks.push(diagnosis_check(
+                "API Key",
+                "failed",
+                &format!("无法读取 API Key：{}", error),
+            ));
+            let diagnosis = build_model_diagnosis(checks, Some("auto"));
+            append_diagnosis_log(&state, &profile.id, &diagnosis)?;
+            return Ok(diagnosis);
+        }
+    };
+
+    let mut recommended_thinking_mode = None;
+    let chat_output = generate_text(
+        &state.client,
+        &profile,
+        &api_key,
+        "你是一个模型诊断助手。只回复指定内容。",
+        "请只回复：连接成功。",
+        false,
+    )
+    .await;
+    match chat_output {
+        Ok(output) => {
+            checks.push(diagnosis_check(
+                "普通响应",
+                "ok",
+                &format!("模型已返回正文：{}", compact_log_line(&output.text, 80)),
+            ));
+            if profile.thinking_mode == "auto" {
+                checks.push(diagnosis_check(
+                    "思考模式",
+                    "ok",
+                    "当前为自动模式，不额外注入 thinking 参数。",
+                ));
+            } else if output.retried_without_thinking {
+                recommended_thinking_mode = Some("auto".to_string());
+                checks.push(diagnosis_check(
+                    "思考模式",
+                    "warning",
+                    "当前服务商不接受所选 thinking 参数，已移除参数后重试成功；建议改为自动。",
+                ));
+            } else {
+                checks.push(diagnosis_check(
+                    "思考模式",
+                    "ok",
+                    "当前 thinking 设置在普通响应测试中可用。",
+                ));
+            }
+        }
+        Err(error) => {
+            if profile.thinking_mode != "auto" {
+                recommended_thinking_mode = Some("auto".to_string());
+            }
+            checks.push(diagnosis_check(
+                "普通响应",
+                "failed",
+                &format!("模型调用失败：{}", error),
+            ));
+            checks.push(diagnosis_check(
+                "思考模式",
+                if profile.thinking_mode == "auto" {
+                    "warning"
+                } else {
+                    "failed"
+                },
+                if profile.thinking_mode == "auto" {
+                    "普通响应失败，无法确认 thinking 兼容性。"
+                } else {
+                    "普通响应失败，建议先切回自动模式排除 thinking 参数兼容问题。"
+                },
+            ));
+            let diagnosis = build_model_diagnosis(checks, recommended_thinking_mode.as_deref());
+            append_diagnosis_log(&state, &profile.id, &diagnosis)?;
+            return Ok(diagnosis);
+        }
+    }
+
+    let json_output = generate_text(
+        &state.client,
+        &profile,
+        &api_key,
+        "你是一个 JSON 诊断助手。必须只输出合法 JSON，不要 Markdown。",
+        r#"请只输出 {"ok": true}。"#,
+        true,
+    )
+    .await;
+    match json_output {
+        Ok(output) => match parse_jsonish_value(&output.text) {
+            Ok(value) if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) => {
+                checks.push(diagnosis_check(
+                    "JSON 输出",
+                    "ok",
+                    "模型可以返回可解析 JSON。",
+                ));
+            }
+            Ok(_) => checks.push(diagnosis_check(
+                "JSON 输出",
+                "warning",
+                "模型返回了 JSON，但内容不符合诊断约定；分析仍可能需要重试。",
+            )),
+            Err(error) => checks.push(diagnosis_check(
+                "JSON 输出",
+                "warning",
+                &format!("模型响应不是稳定 JSON：{}", error),
+            )),
+        },
+        Err(error) => checks.push(diagnosis_check(
+            "JSON 输出",
+            "warning",
+            &format!("JSON 诊断调用失败：{}", error),
+        )),
+    }
+
+    let diagnosis = build_model_diagnosis(checks, recommended_thinking_mode.as_deref());
+    append_diagnosis_log(&state, &profile.id, &diagnosis)?;
+    Ok(diagnosis)
 }
 
 #[tauri::command]
@@ -1345,7 +1620,7 @@ async fn analyze_chapters_for_auto(
     )
     .await
     .inspect_err(|error| {
-        if error != &AUTO_RUN_PAUSED && error != &AUTO_RUN_TERMINATED {
+        if error != AUTO_RUN_PAUSED && error != AUTO_RUN_TERMINATED {
             let _ = mark_chapters_analysis_failed(state, chapters);
         }
     })?;
@@ -1467,6 +1742,7 @@ async fn analyze_batch_with_parallelism(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retry_analysis_shard_after_parse_error(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -2008,7 +2284,7 @@ async fn rewrite_chapters_for_auto(
     )
     .await
     .inspect_err(|error| {
-        if error != &AUTO_RUN_PAUSED && error != &AUTO_RUN_TERMINATED {
+        if error != AUTO_RUN_PAUSED && error != AUTO_RUN_TERMINATED {
             let _ = mark_chapters_rewrite_failed(state, &chapters);
         }
     })?;
@@ -2017,6 +2293,7 @@ async fn rewrite_chapters_for_auto(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn rewrite_batch_with_parallelism(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -2058,6 +2335,7 @@ async fn rewrite_batch_with_parallelism(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn generate_rewrite_shards(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -2177,6 +2455,7 @@ async fn generate_rewrite_shards(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn generate_review_shards(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -2310,6 +2589,7 @@ async fn generate_review_shards(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retry_rewrite_shard_after_parse_error(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -2397,6 +2677,7 @@ async fn retry_rewrite_shard_after_parse_error(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retry_review_shard_after_parse_error(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -2498,11 +2779,129 @@ fn split_chapters_for_parallelism(
     if parallelism <= 1 {
         return vec![chapters.to_vec()];
     }
-    let chunk_size = (chapters.len() + parallelism - 1) / parallelism;
+    let chunk_size = chapters.len().div_ceil(parallelism);
     chapters
         .chunks(chunk_size)
         .map(|chunk| chunk.to_vec())
         .collect()
+}
+
+fn estimate_requests_for_chapters(
+    chapters: &[Chapter],
+    rewrite_parallelism: usize,
+    review_enabled: bool,
+) -> usize {
+    if chapters.is_empty() {
+        return 0;
+    }
+    let shard_count = split_chapters_for_parallelism(chapters, rewrite_parallelism).len();
+    shard_count * if review_enabled { 3 } else { 2 }
+}
+
+fn estimate_wait_stages_for_chapters(chapters: &[Chapter], review_enabled: bool) -> usize {
+    if chapters.is_empty() {
+        0
+    } else if review_enabled {
+        3
+    } else {
+        2
+    }
+}
+
+fn chapter_text_chars(chapter: &Chapter) -> usize {
+    chapter.title.chars().count() + chapter.original_text.chars().count()
+}
+
+#[derive(Default)]
+struct RecentModelStats {
+    success_calls: usize,
+    failed_calls: usize,
+    total_elapsed_seconds: f64,
+    elapsed_samples: usize,
+    total_input_chars: usize,
+    input_samples: usize,
+    total_output_chars: usize,
+    output_samples: usize,
+}
+
+impl RecentModelStats {
+    fn average_call_seconds(&self) -> Option<f64> {
+        if self.elapsed_samples == 0 {
+            None
+        } else {
+            Some(self.total_elapsed_seconds / self.elapsed_samples as f64)
+        }
+    }
+
+    fn average_input_chars(&self) -> Option<usize> {
+        self.total_input_chars.checked_div(self.input_samples)
+    }
+
+    fn average_output_chars(&self) -> Option<usize> {
+        self.total_output_chars.checked_div(self.output_samples)
+    }
+}
+
+fn load_recent_model_stats(
+    conn: &Connection,
+    profile_id: &str,
+) -> Result<RecentModelStats, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT status, content FROM ai_logs WHERE profile_id = ?1 ORDER BY created_at DESC LIMIT 80",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map(params![profile_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(to_string)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string)?;
+    let mut stats = RecentModelStats::default();
+    for (status, content) in rows {
+        if status == "success" {
+            stats.success_calls += 1;
+            if let Some(value) = extract_usize_after_label(&content, "输入字符数：") {
+                stats.total_input_chars += value;
+                stats.input_samples += 1;
+            }
+            if let Some(value) = extract_usize_after_label(&content, "输出字符数：") {
+                stats.total_output_chars += value;
+                stats.output_samples += 1;
+            }
+            if let Some(value) = extract_f64_after_label(&content, "AI 调用耗时：") {
+                stats.total_elapsed_seconds += value;
+                stats.elapsed_samples += 1;
+            }
+        } else if status == "error" {
+            stats.failed_calls += 1;
+        }
+    }
+    Ok(stats)
+}
+
+fn extract_usize_after_label(text: &str, label: &str) -> Option<usize> {
+    extract_value_after_label(text, label)?
+        .parse::<usize>()
+        .ok()
+}
+
+fn extract_f64_after_label(text: &str, label: &str) -> Option<f64> {
+    extract_value_after_label(text, label)?.parse::<f64>().ok()
+}
+
+fn extract_value_after_label(text: &str, label: &str) -> Option<String> {
+    let rest = text.split_once(label)?.1.trim_start();
+    let value = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect::<String>();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn format_shard_label(
@@ -2923,7 +3322,7 @@ fn is_newer_version(candidate: &str, current: &str) -> bool {
 
 fn version_number_parts(version: &str) -> Vec<u64> {
     normalize_release_version(version)
-        .split(|ch| ch == '.' || ch == '-' || ch == '+')
+        .split(['.', '-', '+'])
         .filter_map(|part| part.parse::<u64>().ok())
         .collect()
 }
@@ -3358,6 +3757,7 @@ async fn generate_openai_compatible(
         .send()
         .await
         .map_err(to_string)?;
+    let mut retried_without_thinking = false;
     let (value, raw_response) = match response_json_or_error(response).await {
         Ok(result) => result,
         Err(error) if added_thinking_control => {
@@ -3385,11 +3785,14 @@ async fn generate_openai_compatible(
                 .send()
                 .await
                 .map_err(to_string)?;
-            response_json_or_error(retry_response)
-                .await
-                .map_err(|retry_error| {
-                    format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
-                })?
+            let retry_result =
+                response_json_or_error(retry_response)
+                    .await
+                    .map_err(|retry_error| {
+                        format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
+                    })?;
+            retried_without_thinking = true;
+            retry_result
         }
         Err(error) => return Err(error),
     };
@@ -3411,6 +3814,7 @@ async fn generate_openai_compatible(
         input_chars: 0,
         output_chars: 0,
         elapsed_ms: 0,
+        retried_without_thinking,
     })
 }
 
@@ -3426,12 +3830,7 @@ async fn generate_gemini(
     } else {
         profile.base_url.trim().trim_end_matches('/').to_string()
     };
-    let endpoint = format!(
-        "{}/models/{}:generateContent?key={}",
-        base,
-        profile.model.trim(),
-        api_key.trim()
-    );
+    let endpoint = format!("{}/models/{}:generateContent", base, profile.model.trim());
     let mut payload = json!({
         "contents": [
             {
@@ -3448,10 +3847,12 @@ async fn generate_gemini(
     let added_thinking_control = apply_gemini_thinking_control(&mut payload, profile);
     let response = client
         .post(&endpoint)
+        .header("x-goog-api-key", api_key.trim())
         .json(&payload)
         .send()
         .await
         .map_err(to_string)?;
+    let mut retried_without_thinking = false;
     let (value, raw_response) = match response_json_or_error(response).await {
         Ok(result) => result,
         Err(error) if added_thinking_control => {
@@ -3464,15 +3865,19 @@ async fn generate_gemini(
             }
             let retry_response = client
                 .post(endpoint)
+                .header("x-goog-api-key", api_key.trim())
                 .json(&retry_payload)
                 .send()
                 .await
                 .map_err(to_string)?;
-            response_json_or_error(retry_response)
-                .await
-                .map_err(|retry_error| {
-                    format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
-                })?
+            let retry_result =
+                response_json_or_error(retry_response)
+                    .await
+                    .map_err(|retry_error| {
+                        format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
+                    })?;
+            retried_without_thinking = true;
+            retry_result
         }
         Err(error) => return Err(error),
     };
@@ -3501,6 +3906,7 @@ async fn generate_gemini(
         input_chars: 0,
         output_chars: 0,
         elapsed_ms: 0,
+        retried_without_thinking,
     })
 }
 
@@ -5358,14 +5764,17 @@ fn read_stored_api_key(state: &State<'_, AppState>, profile_id: &str) -> Result<
         }
     }
     let conn = state.conn.lock().map_err(to_string)?;
-    conn.query_row(
-        "SELECT api_key FROM model_profiles WHERE id = ?1",
-        params![profile_id],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .map_err(to_string)?
-    .filter(|value| !value.trim().is_empty())
-    .ok_or_else(|| "未保存 API Key，请填写 API Key 后点击保存。".to_string())
+    let db_api_key = conn
+        .query_row(
+            "SELECT api_key FROM model_profiles WHERE id = ?1",
+            params![profile_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(to_string)?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "未保存 API Key，请填写 API Key 后点击保存。".to_string())?;
+    let _ = write_api_key(profile_id, &db_api_key);
+    Ok(db_api_key)
 }
 
 fn stored_api_key_exists(conn: &Connection, profile_id: &str) -> bool {
@@ -5464,6 +5873,7 @@ fn row_to_ai_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiLog> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_ai_log(
     state: &State<'_, AppState>,
     novel_id: Option<&str>,
@@ -5493,6 +5903,69 @@ fn append_ai_log(
     )
     .map_err(to_string)?;
     Ok(())
+}
+
+fn diagnosis_check(name: &str, status: &str, message: &str) -> ModelDiagnosisCheck {
+    ModelDiagnosisCheck {
+        name: name.to_string(),
+        status: status.to_string(),
+        message: message.to_string(),
+    }
+}
+
+fn build_model_diagnosis(
+    checks: Vec<ModelDiagnosisCheck>,
+    recommended_thinking_mode: Option<&str>,
+) -> ModelDiagnosis {
+    let status = if checks.iter().any(|check| check.status == "failed") {
+        "failed"
+    } else if checks.iter().any(|check| check.status == "warning") {
+        "warning"
+    } else {
+        "ok"
+    };
+    ModelDiagnosis {
+        status: status.to_string(),
+        recommended_thinking_mode: recommended_thinking_mode.map(str::to_string),
+        checks,
+    }
+}
+
+fn append_diagnosis_log(
+    state: &State<'_, AppState>,
+    profile_id: &str,
+    diagnosis: &ModelDiagnosis,
+) -> Result<(), String> {
+    let content = diagnosis
+        .checks
+        .iter()
+        .map(|check| format!("- {} [{}] {}", check.name, check.status, check.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    append_ai_log(
+        state,
+        None,
+        profile_id,
+        "模型诊断",
+        None,
+        if diagnosis.status == "failed" {
+            "error"
+        } else {
+            "success"
+        },
+        &format!("诊断状态：{}\n{}", diagnosis.status, content),
+        None,
+        None,
+    )
+}
+
+fn compact_log_line(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        compact
+    } else {
+        format!("{}...", take_chars(&compact, max_chars))
+    }
 }
 
 fn format_model_log_content(
@@ -5586,7 +6059,7 @@ fn escape_unescaped_json_control_chars(input: &str) -> String {
 
 fn normalize_name_list(input: &str) -> String {
     input
-        .split(|ch| matches!(ch, '\n' | '\r' | ',' | '，' | '、' | ';' | '；'))
+        .split(['\n', '\r', ',', '，', '、', ';', '；'])
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>()
@@ -5609,7 +6082,18 @@ fn sanitize_file_name(input: &str) -> String {
 }
 
 fn to_string<E: std::fmt::Display>(error: E) -> String {
-    error.to_string()
+    redact_sensitive_text(&error.to_string())
+}
+
+fn redact_sensitive_text(text: &str) -> String {
+    let query_secret_re = Regex::new(r"(?i)([?&](?:key|api_key|access_token|token)=)[^&\s]+")
+        .expect("valid secret query regex");
+    let bearer_re =
+        Regex::new(r"(?i)(authorization:\s*bearer\s+)[^\s,;]+").expect("valid bearer regex");
+    let redacted = query_secret_re.replace_all(text, "${1}[REDACTED]");
+    bearer_re
+        .replace_all(&redacted, "${1}[REDACTED]")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -5780,7 +6264,7 @@ mod tests {
             sample_chapter(26, "第二十六章", "原文二十六"),
             sample_chapter(27, "第二十七章", "原文二十七"),
         ];
-        let extra = vec![
+        let extra = [
             sample_chapter(28, "第二十八章", "原文二十八"),
             sample_chapter(29, "第二十九章", "原文二十九"),
             sample_chapter(30, "第三十章", "原文三十"),
@@ -6044,6 +6528,98 @@ mod tests {
             load_rewrite_parallelism(&conn).expect("load normalized parallelism"),
             6
         );
+    }
+
+    #[test]
+    fn estimate_requests_include_analysis_rewrite_and_optional_review() {
+        let chapters = (1..=30)
+            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), "原文"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(estimate_requests_for_chapters(&chapters, 6, false), 12);
+        assert_eq!(estimate_requests_for_chapters(&chapters, 6, true), 18);
+        assert_eq!(estimate_requests_for_chapters(&chapters[..3], 10, true), 9);
+        assert_eq!(estimate_requests_for_chapters(&[], 6, true), 0);
+    }
+
+    #[test]
+    fn estimate_wait_stages_follow_pipeline_not_shard_count() {
+        let chapters = (1..=30)
+            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), "原文"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(split_chapters_for_parallelism(&chapters, 6).len(), 6);
+        assert_eq!(estimate_wait_stages_for_chapters(&chapters, false), 2);
+        assert_eq!(estimate_wait_stages_for_chapters(&chapters, true), 3);
+        assert_eq!(estimate_wait_stages_for_chapters(&[], true), 0);
+    }
+
+    #[test]
+    fn recent_model_stats_default_to_no_history() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+
+        let stats = load_recent_model_stats(&conn, "missing-profile").expect("load stats");
+
+        assert_eq!(stats.success_calls, 0);
+        assert_eq!(stats.failed_calls, 0);
+        assert_eq!(stats.average_call_seconds(), None);
+        assert_eq!(stats.average_input_chars(), None);
+        assert_eq!(stats.average_output_chars(), None);
+    }
+
+    #[test]
+    fn recent_model_stats_parse_log_content() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, created_at) VALUES (?1, NULL, ?2, '测试', NULL, 'success', ?3, ?4)",
+            params![
+                "log-1",
+                "profile-1",
+                "调用统计：\n- 输入字符数：120\n- 输出字符数：30\n- AI 调用耗时：2.50 秒\n\n正文",
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("insert success log");
+        conn.execute(
+            "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, created_at) VALUES (?1, NULL, ?2, '测试', NULL, 'error', 'HTTP 401', ?3)",
+            params!["log-2", "profile-1", Utc::now().to_rfc3339()],
+        )
+        .expect("insert error log");
+
+        let stats = load_recent_model_stats(&conn, "profile-1").expect("load stats");
+
+        assert_eq!(stats.success_calls, 1);
+        assert_eq!(stats.failed_calls, 1);
+        assert_eq!(stats.average_call_seconds(), Some(2.5));
+        assert_eq!(stats.average_input_chars(), Some(120));
+        assert_eq!(stats.average_output_chars(), Some(30));
+    }
+
+    #[test]
+    fn model_diagnosis_status_uses_worst_check() {
+        let ok = build_model_diagnosis(vec![diagnosis_check("连接", "ok", "ok")], None);
+        assert_eq!(ok.status, "ok");
+
+        let warning = build_model_diagnosis(
+            vec![
+                diagnosis_check("连接", "ok", "ok"),
+                diagnosis_check("JSON", "warning", "unstable"),
+            ],
+            Some("auto"),
+        );
+        assert_eq!(warning.status, "warning");
+        assert_eq!(warning.recommended_thinking_mode.as_deref(), Some("auto"));
+
+        let failed = build_model_diagnosis(
+            vec![
+                diagnosis_check("连接", "warning", "slow"),
+                diagnosis_check("API Key", "failed", "bad key"),
+            ],
+            None,
+        );
+        assert_eq!(failed.status, "failed");
     }
 
     #[test]
