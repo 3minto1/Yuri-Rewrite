@@ -74,7 +74,7 @@ Yuri Rewrite 支持 OpenAI 兼容接口和 Gemini。常见 Base URL 示例：
 2. 双击 `Yuri Rewrite.exe` 启动。
 3. 首次使用时在软件内配置模型和 API Key。
 
-当前版本：`v0.1.12`。便携版压缩包可在 GitHub Releases 中下载。
+当前版本：`v0.1.13`。便携版压缩包可在 GitHub Releases 中下载。
 
 当前应用未签名，Windows SmartScreen 可能提示未知发布者。
 
