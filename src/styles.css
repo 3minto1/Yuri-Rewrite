@@ -937,6 +937,10 @@ pre {
   font-size: 12px;
 }
 
+.diagnosis-close {
+  margin-left: auto;
+}
+
 .diagnosis-list {
   display: grid;
   gap: 8px;

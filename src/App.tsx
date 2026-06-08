@@ -22,7 +22,8 @@ import {
   Settings,
   Sparkles,
   Square,
-  Trash2
+  Trash2,
+  X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -1422,6 +1423,14 @@ export default function App() {
               {modelDiagnosis.recommended_thinking_mode && (
                 <span>建议思考模式：{modelDiagnosis.recommended_thinking_mode}</span>
               )}
+              <button
+                className="icon-button diagnosis-close"
+                type="button"
+                aria-label="关闭诊断结果"
+                onClick={() => setModelDiagnosis(null)}
+              >
+                <X size={16} />
+              </button>
             </div>
             <div className="diagnosis-list">
               {modelDiagnosis.checks.map((check) => (
