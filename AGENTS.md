@@ -18,11 +18,11 @@ The app is local-first. Novel text, chapter batches, internal batch TXT files, a
 ## Repository Layout
 
 - `src/`: React frontend.
-  - `App.tsx`: Main UI, navigation, model configuration, settings dialogs, logs page, compare page, workspace interactions, one-click controls.
+- `App.tsx`: Main UI, navigation, model configuration, model diagnosis, quick-start/help modal, settings dialogs, logs page, compare page, workspace interactions, one-click controls.
   - `styles.css`: Application styling.
   - `main.tsx`: React entrypoint.
 - `src-tauri/`: Rust / Tauri backend.
-  - `src/lib.rs`: Tauri commands, SQLite schema and migrations, import/export logic, chapter splitting, model calls, batch analysis/rewrite, AI logs.
+- `src/lib.rs`: Tauri commands, SQLite schema and migrations, import/export logic, chapter splitting, model calls, model diagnosis, task estimation, batch analysis/rewrite/review, AI logs.
   - `src/main.rs`: Tauri entrypoint. Release builds use `windows_subsystem = "windows"` to hide the console window.
   - `capabilities/default.json`: Tauri ACL permissions.
   - `tauri.conf.json`: Tauri app and bundle configuration.
@@ -71,14 +71,19 @@ portable/YuriRewrite-v{version}-windows-x64.zip
 ## Product Behavior
 
 - TXT import should happen through Tauri backend commands, not browser-only file APIs.
-- Chapter recognition should handle common Chinese web novel heading formats. When chapters cannot be detected, split the text by length.
+- Chapter recognition should handle common Chinese web novel heading formats, including common chapter units such as `章`, `节`, `回`, `卷`, `部`, `篇`, `集`, `幕`, `话`, `夜`, `案`, `场`, `弹`, `折`, and `更`.
+- Loose numbered headings are a fallback only: use them only when no standard `第 N 章`-style headings are detected, and require sequential candidate numbering so ordinary numbered lists are not misclassified as chapters.
+- When chapters cannot be detected, split the text by length.
 - Chapter-based batching is fixed at 30 chapters per batch.
 - Non-chapter batching is fixed at 100,000 characters per batch.
 - Analysis requires the novel settings record to exist, but the analysis prompt must still analyze the original novel only.
 - Analysis works at batch level and may split a batch into parallel shards. It should produce or merge compact consistency assets instead of chapter-by-chapter bulky JSON.
 - Rewrite operates only on the selected batch and only processes chapters in that batch that have completed analysis.
 - Rewrite works at batch or shard level with stable machine chapter markers, then parses model output back into per-chapter `rewrite_text` for the Compare page.
+- When app review is disabled, rewrite flow is analysis plus rewrite only. When app review is enabled, rewrite flow becomes dual-expert review: rewrite model generates the draft, review model returns JSON approval/issues, rejected drafts are rewritten once by the rewrite model, and the rewritten draft is reviewed again.
+- If dual-expert review passes, save the draft or rewritten draft. If the final review still fails, fail the batch and keep the review issues in AI logs instead of saving known-bad chapters.
 - Export supports TXT only and must include only chapters with `rewrite_status = 'completed'` and non-empty `rewrite_text`; never fall back to original text.
+- Task estimation should report novel/batch chapter counts, character counts, request counts, recent success/failure stats, average input/output chars, and wall-clock wait estimates by pipeline stage. With review enabled, estimate up to five requests/stages per shard.
 - Current-batch one-click runs analysis then rewrite for the selected batch.
 - Full one-click runs batches in order: analyze batch, rewrite batch, export `{novel_title}_第N批.txt`, then continue. At the end it exports the full rewritten TXT and keeps all per-batch files.
 - Full one-click supports pause, continue, and terminate. Pause/terminate requests abort in-flight AI work where possible. Continue restarts from the first unfinished batch; an unfinished batch is rerun from analysis.
@@ -86,6 +91,8 @@ portable/YuriRewrite-v{version}-windows-x64.zip
 - The selected batch should remain selected after analysis/rewrite refreshes; do not unexpectedly jump back to the first batch.
 - Esc and visible Back buttons should return non-workspace pages to the workspace without disrupting open settings dialogs.
 - Notifications should auto-dismiss after 5 seconds unless a specific dialog behavior is required.
+- First launch should show the quick-start modal once. The top Help button should reopen the same quick-start content at any time.
+- Model diagnosis results should appear near the top workspace notice area and have a close button that only hides the diagnosis panel.
 
 ## Novel Settings
 
@@ -112,7 +119,8 @@ Important behavior:
 ## App Settings
 
 - `export_dir`: output folder for exported TXT files and one-click batch files.
-- `review_enabled`: optional AI review pass after rewrite. Default is off because it increases rewrite time.
+- `review_enabled`: optional dual-expert review pass after rewrite. Default is off because it significantly increases request count and wait time.
+- `review_profile_id`: optional model profile ID for the review expert. If empty or missing, review uses the current rewrite model. If set, the selected review profile must have a saved API key.
 - `rewrite_parallelism`: shared concurrency setting for analysis and rewrite. Allowed values are `10`, `6`, `3`, and `1`; default is `6`.
 - Higher concurrency can reduce wall-clock time, but it increases request count, failure probability, and may slightly increase token usage. Keep prompts and parsing robust across shard boundaries.
 
@@ -121,6 +129,8 @@ Important behavior:
 - Model profiles support OpenAI-compatible chat completions and Gemini.
 - API keys must be stored locally and never logged.
 - Saving a new model profile must not discard existing profiles.
+- Diagnosis replaces the old simple model test. It should check connection/API key/basic response, JSON output capability, and thinking-mode compatibility, then return checklist-style results with `ok`, `warning`, or `failed` statuses.
+- Diagnosis should use only lightweight requests and should not save model output into novel content.
 - The UI can suggest model IDs when Base URL or model name indicates common providers, including DeepSeek, OpenAI, Kimi / Moonshot, MiniMax, Xiaomi MiMo, SiliconFlow, and Claude-compatible endpoints.
 - `thinking_mode` supports `auto`, `off`, and `on`. Provider compatibility varies; unsupported thinking parameters should be retried without those parameters when practical.
 - DeepSeek analysis should use official JSON output when applicable.
@@ -143,7 +153,9 @@ Important behavior:
 - The protagonist's male-coded descriptions must be rewritten into female-coded descriptions so that a new reader cannot tell the protagonist was originally male.
 - Appearance details must remain consistent across chapters. If the protagonist is established as black-haired, do not change her to blond or red-haired in later chapters unless the original plot explicitly changes it.
 - Rewrite must preserve chapter order, chapter count, stable start/end markers, and per-chapter boundaries. If AI output is missing markers, includes extra unrelated content after markers, or cannot be parsed reliably, retry or fail clearly instead of writing corrupted chapters.
-- Review prompts, when enabled, should check and repair protagonist name, optional name mappings, pronouns, titles, masculine residue, appearance consistency, logic breaks, and chapter boundaries.
+- Review decision prompts, when enabled, should output JSON only. They judge whether the rewrite is acceptable and list blocking issues; they do not directly rewrite text.
+- Review prompts must check original plot logic, protagonist and optional-name feminization, non-target character gender preservation, pronouns, titles, masculine residue, appearance consistency, relationship continuity, and chapter boundaries.
+- Revision prompts after review rejection must ask the rewrite model to output the full current shard again with the original stable markers preserved, not a partial patch.
 
 ## Backend Guidelines
 
@@ -164,13 +176,14 @@ Important behavior:
   - AI call duration.
   - whether review was enabled for that call.
   - thinking mode used for that call.
+- AI logs for dual-expert review should distinguish draft rewrite, review decision, review rejection, rejected-draft rewrite, and final review so users can understand where a batch failed.
 
 ## Frontend Guidelines
 
 - The UI is an operational desktop tool, not a landing page.
 - Keep navigation predictable:
   - The left brand button returns to the main workspace.
-  - The top menu contains cross-workspace views such as Compare and Settings.
+  - The top menu contains cross-workspace views such as Compare, Settings, and Help.
   - The left sidebar contains import, novel list, model selector, logs, and application settings.
 - Use modal dialogs for novel settings.
 - Keep long text in scrollable regions with stable dimensions.
@@ -178,6 +191,8 @@ Important behavior:
 - Do not put large original/rewrite panes inside small workspace cards.
 - Use icon buttons for compact actions where possible.
 - Make selected chapter titles visible; status text must not overlap the title.
+- Model configuration, chapter list, and consistency asset panels should each have their own scrollable region and remain usable when the window is small. Avoid relying on a single page-level scrollbar for these areas.
+- Task estimate details should be collapsible from the header while keeping the title visible.
 - One-click pause, continue, and terminate controls should be visible only while a full one-click run is active or paused.
 - Settings page should focus on actual controls; do not add decorative subtitles such as "配置导出目录".
 
@@ -196,7 +211,8 @@ Important behavior:
 Before handing off functional changes:
 
 1. Run `npm run build`.
-2. Run `cargo check` or relevant Rust tests when backend code changed.
-3. Run `npm run tauri:build` for release-impacting changes.
-4. Run `npm run package:portable` when producing a user-distributable build.
-5. Confirm `git status -sb` before committing or pushing.
+2. Run `cargo test` when backend code changed.
+3. Run `cargo clippy --all-targets --all-features -- -D warnings` before release or when Rust control flow changed.
+4. Run `npm run tauri:build` for release-impacting changes.
+5. Run `npm run package:portable` when producing a user-distributable build.
+6. Confirm `git status -sb` before committing or pushing.
