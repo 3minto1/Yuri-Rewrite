@@ -188,6 +188,8 @@ struct AppSettings {
     export_dir: Option<String>,
     #[serde(default)]
     review_enabled: bool,
+    #[serde(default)]
+    review_profile_id: Option<String>,
     #[serde(default = "default_rewrite_parallelism")]
     rewrite_parallelism: usize,
 }
@@ -281,6 +283,12 @@ struct ParsedChapterRewrite {
 struct ParsedChapterAnalysis {
     id: String,
     json: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewDecision {
+    approved: bool,
+    issues: Vec<String>,
 }
 
 pub fn run() {
@@ -811,10 +819,12 @@ fn get_app_settings(state: State<AppState>) -> Result<AppSettings, String> {
         .ok()
         .filter(|value| !value.trim().is_empty());
     let review_enabled = load_review_enabled(&conn)?;
+    let review_profile_id = load_review_profile_id(&conn)?;
     let rewrite_parallelism = load_rewrite_parallelism(&conn)?;
     Ok(AppSettings {
         export_dir,
         review_enabled,
+        review_profile_id,
         rewrite_parallelism,
     })
 }
@@ -837,9 +847,11 @@ fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<Ap
         .map_err(to_string)?;
         save_review_enabled(&conn, settings.review_enabled)?;
         save_rewrite_parallelism(&conn, rewrite_parallelism)?;
+        save_review_profile_id(&conn, settings.review_profile_id.as_deref())?;
         Ok(AppSettings {
             export_dir: Some(export_dir.to_string()),
             review_enabled: settings.review_enabled,
+            review_profile_id: normalize_review_profile_id(settings.review_profile_id.as_deref()),
             rewrite_parallelism,
         })
     } else {
@@ -847,9 +859,11 @@ fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<Ap
             .map_err(to_string)?;
         save_review_enabled(&conn, settings.review_enabled)?;
         save_rewrite_parallelism(&conn, rewrite_parallelism)?;
+        save_review_profile_id(&conn, settings.review_profile_id.as_deref())?;
         Ok(AppSettings {
             export_dir: None,
             review_enabled: settings.review_enabled,
+            review_profile_id: normalize_review_profile_id(settings.review_profile_id.as_deref()),
             rewrite_parallelism,
         })
     }
@@ -876,6 +890,39 @@ fn save_review_enabled(conn: &Connection, enabled: bool) -> Result<(), String> {
         params![if enabled { "true" } else { "false" }],
     )
     .map_err(to_string)?;
+    Ok(())
+}
+
+fn normalize_review_profile_id(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn load_review_profile_id(conn: &Connection) -> Result<Option<String>, String> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'review_profile_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(normalize_review_profile_id(value.as_deref()))
+}
+
+fn save_review_profile_id(conn: &Connection, profile_id: Option<&str>) -> Result<(), String> {
+    if let Some(profile_id) = normalize_review_profile_id(profile_id) {
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('review_profile_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![profile_id],
+        )
+        .map_err(to_string)?;
+    } else {
+        conn.execute("DELETE FROM app_settings WHERE key = 'review_profile_id'", [])
+            .map_err(to_string)?;
+    }
     Ok(())
 }
 
@@ -1373,7 +1420,7 @@ async fn start_rewrite(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (chapters, settings, review_enabled, rewrite_parallelism) = {
+    let (chapters, settings, review_enabled, review_profile_id, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, &novel_id)?;
         let chapters = load_chapters_for_batch(&conn, &novel_id, &batch_id)?
@@ -1384,6 +1431,7 @@ async fn start_rewrite(
             chapters,
             settings,
             load_review_enabled(&conn)?,
+            load_review_profile_id(&conn)?,
             load_rewrite_parallelism(&conn)?,
         )
     };
@@ -1393,6 +1441,8 @@ async fn start_rewrite(
 
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
+    let (review_profile, review_api_key) =
+        load_review_profile_for_run(&state, &profile, review_enabled, review_profile_id.as_deref())?;
     ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
     let canon_assets = {
         let conn = state.conn.lock().map_err(to_string)?;
@@ -1421,6 +1471,8 @@ async fn start_rewrite(
         &canon_text,
         &settings,
         review_enabled,
+        review_profile.as_ref(),
+        review_api_key.as_deref(),
         rewrite_parallelism,
     )
     .await
@@ -2243,7 +2295,7 @@ async fn rewrite_chapters_for_auto(
     api_key: &str,
     batch_id: &str,
 ) -> Result<(), String> {
-    let (chapters, settings, review_enabled, rewrite_parallelism) = {
+    let (chapters, settings, review_enabled, review_profile_id, rewrite_parallelism) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, novel_id)?;
         let chapters = load_chapters_for_batch(&conn, novel_id, batch_id)?
@@ -2254,6 +2306,7 @@ async fn rewrite_chapters_for_auto(
             chapters,
             settings,
             load_review_enabled(&conn)?,
+            load_review_profile_id(&conn)?,
             load_rewrite_parallelism(&conn)?,
         )
     };
@@ -2261,6 +2314,8 @@ async fn rewrite_chapters_for_auto(
         return Err("当前批次没有已完成分析的内容。".to_string());
     }
 
+    let (review_profile, review_api_key) =
+        load_review_profile_for_run(state, profile, review_enabled, review_profile_id.as_deref())?;
     ensure_name_mapping_asset(state, novel_id, profile, api_key, &settings).await?;
     let canon_assets = {
         let conn = state.conn.lock().map_err(to_string)?;
@@ -2280,6 +2335,8 @@ async fn rewrite_chapters_for_auto(
         &canon_text,
         &settings,
         review_enabled,
+        review_profile.as_ref(),
+        review_api_key.as_deref(),
         rewrite_parallelism,
     )
     .await
@@ -2303,6 +2360,8 @@ async fn rewrite_batch_with_parallelism(
     canon_text: &str,
     settings: &NovelSettings,
     review_enabled: bool,
+    review_profile: Option<&ModelProfile>,
+    review_api_key: Option<&str>,
     rewrite_parallelism: usize,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
     let parsed_rewrite = generate_rewrite_shards(
@@ -2327,8 +2386,11 @@ async fn rewrite_batch_with_parallelism(
         novel_id,
         profile,
         api_key,
+        review_profile.unwrap_or(profile),
+        review_api_key.unwrap_or(api_key),
         chapters,
         &parsed_rewrite,
+        canon_text,
         settings,
         rewrite_parallelism,
     )
@@ -2459,10 +2521,13 @@ async fn generate_rewrite_shards(
 async fn generate_review_shards(
     state: &State<'_, AppState>,
     novel_id: &str,
-    profile: &ModelProfile,
-    api_key: &str,
+    rewrite_profile: &ModelProfile,
+    rewrite_api_key: &str,
+    review_profile: &ModelProfile,
+    review_api_key: &str,
     chapters: &[Chapter],
     rewrites: &[ParsedChapterRewrite],
+    canon_text: &str,
     settings: &NovelSettings,
     rewrite_parallelism: usize,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
@@ -2483,21 +2548,29 @@ async fn generate_review_shards(
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
         let context =
             format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
-        let prompt =
-            build_batch_review_prompt_with_context(&shard, &rewrite_shard, settings, &context);
         let client = state.client.clone();
-        let profile_for_task = profile.clone();
-        let api_key = api_key.to_string();
+        let rewrite_profile_for_task = rewrite_profile.clone();
+        let review_profile_for_task = review_profile.clone();
+        let rewrite_api_key = rewrite_api_key.to_string();
+        let review_api_key = review_api_key.to_string();
         let shard_for_task = shard.clone();
         let rewrite_shard_for_task = rewrite_shard.clone();
+        let canon_text = canon_text.to_string();
+        let settings = settings.clone();
         tasks.spawn(async move {
+            let prompt = build_batch_review_decision_prompt_with_context(
+                &shard_for_task,
+                &rewrite_shard_for_task,
+                &settings,
+                &context,
+            );
             let output = generate_text(
                 &client,
-                &profile_for_task,
-                &api_key,
-                "你是中文小说改写质检与修正助手。检查并修正改写稿中的标题、姓名、代词、称谓、设定和逻辑问题，必须逐字保留章节边界标记，只输出当前输入章节的边界标记、标题和正文，不要输出输入外章节。",
+                &review_profile_for_task,
+                &review_api_key,
+                "你是中文小说改写审查专家。只负责判断改写稿是否合格，并列出必须打回的问题；不要直接改写正文。必须输出合法 JSON。",
                 &prompt,
-                false,
+                true,
             )
             .await;
             (
@@ -2506,6 +2579,12 @@ async fn generate_review_shards(
                 context,
                 shard_for_task,
                 rewrite_shard_for_task,
+                canon_text,
+                settings,
+                rewrite_profile_for_task,
+                rewrite_api_key,
+                review_profile_for_task,
+                review_api_key,
                 output,
             )
         });
@@ -2513,64 +2592,108 @@ async fn generate_review_shards(
 
     let mut parsed_by_shard = Vec::new();
     while let Some(result) = next_auto_join(&mut tasks, state, novel_id).await? {
-        let (idx, shard_label, context, shard, rewrite_shard, output) = result;
+        let (
+            idx,
+            shard_label,
+            context,
+            shard,
+            rewrite_shard,
+            canon_text,
+            settings,
+            rewrite_profile,
+            rewrite_api_key,
+            review_profile,
+            review_api_key,
+            output,
+        ) = result;
         match output {
             Ok(output) => {
                 append_ai_log(
                     state,
                     Some(novel_id),
-                    &profile.id,
-                    "批次复检修正",
+                    &review_profile.id,
+                    "批次审查决策",
                     Some(&shard_label),
                     "success",
-                    &format_model_log_content(&output, profile, Some(true)),
+                    &format_model_log_content(&output, &review_profile, Some(true)),
                     output.reasoning.as_deref(),
                     Some(&output.raw_response),
                 )?;
-                let parsed = match parse_batch_rewrite_output(&output.text, &shard) {
-                    Ok(parsed) => parsed,
+                let decision = match parse_review_decision_output(&output.text) {
+                    Ok(decision) => decision,
                     Err(error) => {
                         append_ai_log(
                             state,
                             Some(novel_id),
-                            &profile.id,
-                            "批次复检解析",
+                            &review_profile.id,
+                            "批次审查决策解析",
                             Some(&shard_label),
                             "error",
                             &error,
                             output.reasoning.as_deref(),
                             Some(&output.raw_response),
                         )?;
-                        match retry_review_shard_after_parse_error(
-                            state,
-                            novel_id,
-                            profile,
-                            api_key,
-                            &shard,
-                            &rewrite_shard,
-                            settings,
-                            &context,
-                            &shard_label,
-                            &error,
-                            &output.text,
-                        )
-                        .await
-                        {
-                            Ok(parsed) => parsed,
-                            Err(retry_error) => {
-                                return Err(format!("{}：{}", shard_label, retry_error));
-                            }
-                        }
+                        return Err(format!("{}：审查决策无法解析：{}", shard_label, error));
                     }
                 };
-                parsed_by_shard.push((idx, parsed));
+                if decision.approved {
+                    parsed_by_shard.push((idx, rewrite_shard));
+                    continue;
+                }
+
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &review_profile.id,
+                    "批次审查打回",
+                    Some(&shard_label),
+                    "warning",
+                    &decision.issues.join("\n"),
+                    None,
+                    None,
+                )?;
+                let revised = revise_rewrite_shard_after_review(
+                    state,
+                    novel_id,
+                    &rewrite_profile,
+                    &rewrite_api_key,
+                    &shard,
+                    &rewrite_shard,
+                    &canon_text,
+                    &settings,
+                    &context,
+                    &shard_label,
+                    &decision,
+                )
+                .await?;
+                let final_decision = review_revised_shard(
+                    state,
+                    novel_id,
+                    &review_profile,
+                    &review_api_key,
+                    &shard,
+                    &revised,
+                    &settings,
+                    &context,
+                    &shard_label,
+                )
+                .await?;
+                if final_decision.approved {
+                    parsed_by_shard.push((idx, revised));
+                } else {
+                    return Err(format!(
+                        "{}：审查专家复判仍未通过：{}",
+                        shard_label,
+                        final_decision.issues.join("；")
+                    ));
+                }
             }
             Err(error) => {
                 append_ai_log(
                     state,
                     Some(novel_id),
-                    &profile.id,
-                    "批次复检修正",
+                    &review_profile.id,
+                    "批次审查决策",
                     Some(&shard_label),
                     "error",
                     &error,
@@ -2587,6 +2710,313 @@ async fn generate_review_shards(
         .into_iter()
         .flat_map(|(_, parsed)| parsed)
         .collect())
+}
+
+fn build_batch_review_decision_prompt_with_context(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+    shard_context: &str,
+) -> String {
+    let shard_context = if shard_context.trim().is_empty() {
+        "无".to_string()
+    } else {
+        shard_context.trim().to_string()
+    };
+    format!(
+        r#"请以“审查专家”身份判断改写稿是否合格。你只做判定和列问题，不直接改写正文。
+
+审查目标：
+1. 改写稿是否保持原文事件顺序、因果、战力、伏笔、人物动机和章节内逻辑。
+2. 主角是否已按设置完成女性化，标题和正文都不能残留主角男性姓名、男性身份、男性代词、男性称谓、男性身体特征或男性社会角色。
+3. 用户指定要女性化的其他姓名是否在出现处完成女性化，并保持前后一致。
+4. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别、身份、称谓和人称代词，不能因为百合改写目标被误改。
+5. 身材、体型、外貌、发色、瞳色、年龄感、能力状态、标志性服饰和伤痕是否前后一致。
+6. 百合向关系推进是否承接前文，不能突然重置、跳跃或破坏原文人物性格。
+7. 改写是否自然合理，不能只机械替换姓名/代词，也不能为了强调女性化而破坏剧情逻辑。
+8. 章节边界、标题、正文是否完整，没有缺句、重复、串章、空正文或额外章节。
+
+判定规则：
+- 只有不存在必须修改的问题时，approved 才能为 true。
+- 如果存在任何主角男性残留、指定角色未女性化、未指定角色被误改性别、逻辑断裂、章节边界错误、正文缺失或明显不自然，approved 必须为 false。
+- 问题必须具体到章节、角色、原文逻辑或需要修改的称谓/特征，方便写作专家重写。
+
+输出要求：
+只输出合法 JSON，不要 Markdown，不要解释。格式：
+{{
+  "approved": false,
+  "summary": "一句话总体判断",
+  "issues": [
+    {{
+      "chapter_index": 1,
+      "severity": "blocking",
+      "problem": "具体问题",
+      "required_fix": "必须如何修改"
+    }}
+  ]
+}}
+
+如果完全合格：
+{{
+  "approved": true,
+  "summary": "合格",
+  "issues": []
+}}
+
+{}
+
+并发分片上下文：
+{}
+
+原文章节：
+{}
+
+待审查改写稿：
+{}"#,
+        build_rewrite_settings_prompt(settings),
+        shard_context,
+        build_batch_chapter_text(chapters, false),
+        build_batch_rewrite_text(chapters, rewrites)
+    )
+}
+
+fn build_batch_revision_prompt_with_context(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    canon_text: &str,
+    settings: &NovelSettings,
+    shard_context: &str,
+    decision: &ReviewDecision,
+) -> String {
+    let issue_text = if decision.issues.is_empty() {
+        "审查专家未给出具体问题，但判定不通过；请全面复查主角女性化、指定角色女性化、未指定角色性别保持、称谓、逻辑和章节边界。".to_string()
+    } else {
+        decision
+            .issues
+            .iter()
+            .enumerate()
+            .map(|(idx, issue)| format!("{}. {}", idx + 1, issue))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let base_prompt = build_batch_rewrite_prompt_with_context(chapters, canon_text, settings, shard_context);
+    format!(
+        r#"{}
+
+审查专家已打回上一版改写稿。请你作为原改写专家，根据下面的问题清单重新输出当前分片的完整改写结果。
+
+必须遵守：
+1. 不要只局部补丁，必须重新输出当前分片所有章节的完整标题和正文。
+2. 保留原章节顺序和所有 `<<<YURI_REWRITE_CHAPTER_START ...>>>` / `<<<YURI_REWRITE_CHAPTER_END ...>>>` marker，marker 的 index 和 id 必须逐字复制。
+3. 逐条修复审查问题，同时继续遵守姓名映射、女性化要求、未指定角色性别保持、外貌一致性和原文逻辑。
+4. 只输出当前分片章节，不要解释、不要 Markdown、不要输出审查意见。
+
+审查打回问题：
+{}
+
+上一版改写稿：
+{}"#,
+        base_prompt,
+        issue_text,
+        build_batch_rewrite_text(chapters, rewrites)
+    )
+}
+
+fn parse_review_decision_output(output: &str) -> Result<ReviewDecision, String> {
+    let value = parse_jsonish_value(output)?;
+    let approved = value
+        .get("approved")
+        .or_else(|| value.get("pass"))
+        .or_else(|| value.get("passed"))
+        .and_then(|value| {
+            value.as_bool().or_else(|| {
+                value.as_str().map(|text| {
+                    matches!(
+                        text.trim().to_ascii_lowercase().as_str(),
+                        "true" | "yes" | "pass" | "passed" | "approved" | "ok"
+                    )
+                })
+            })
+        });
+    let mut issues = Vec::new();
+    if let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) {
+        if !summary.trim().is_empty() && !matches!(summary.trim(), "合格" | "通过") {
+            issues.push(format!("总体判断：{}", summary.trim()));
+        }
+    }
+    if let Some(array) = value.get("issues").and_then(serde_json::Value::as_array) {
+        for item in array {
+            if let Some(text) = item.as_str() {
+                if !text.trim().is_empty() {
+                    issues.push(text.trim().to_string());
+                }
+            } else if item.is_object() {
+                let chapter = item
+                    .get("chapter_index")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|value| format!("第{}章", value))
+                    .unwrap_or_else(|| "未指定章节".to_string());
+                let problem = item
+                    .get("problem")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let required_fix = item
+                    .get("required_fix")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let severity = item
+                    .get("severity")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("blocking");
+                let text = format!(
+                    "{} [{}] {} {}",
+                    chapter,
+                    severity,
+                    problem.trim(),
+                    required_fix.trim()
+                )
+                .trim()
+                .to_string();
+                if !text.is_empty() {
+                    issues.push(text);
+                }
+            }
+        }
+    }
+    let approved = approved.unwrap_or_else(|| issues.is_empty());
+    Ok(ReviewDecision { approved, issues })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn revise_rewrite_shard_after_review(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    canon_text: &str,
+    settings: &NovelSettings,
+    shard_context: &str,
+    shard_label: &str,
+    decision: &ReviewDecision,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let prompt = build_batch_revision_prompt_with_context(
+        shard,
+        rewrites,
+        canon_text,
+        settings,
+        shard_context,
+        decision,
+    );
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说改写专家。审查专家已打回上一版改写稿，你必须按问题清单重新改写当前分片，并严格保留章节边界标记。",
+        &prompt,
+        false,
+    )
+    .await;
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次打回重写",
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, Some(true)),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            match parse_batch_rewrite_output(&output.text, shard) {
+                Ok(parsed) => Ok(parsed),
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        "批次打回重写解析",
+                        Some(shard_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    Err(format!("审查打回后重写结果无法解析：{}", error))
+                }
+            }
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次打回重写",
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(format!("审查打回后重写失败：{}", error))
+        }
+    }
+}
+
+async fn review_revised_shard(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+    shard_context: &str,
+    shard_label: &str,
+) -> Result<ReviewDecision, String> {
+    let prompt = build_batch_review_decision_prompt_with_context(shard, rewrites, settings, shard_context);
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说改写终审专家。请复判打回重写后的稿件是否已经合格，只输出合法 JSON。",
+        &prompt,
+        true,
+    )
+    .await;
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次审查复判",
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, Some(true)),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            parse_review_decision_output(&output.text)
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次审查复判",
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(format!("审查复判失败：{}", error))
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2795,14 +3225,14 @@ fn estimate_requests_for_chapters(
         return 0;
     }
     let shard_count = split_chapters_for_parallelism(chapters, rewrite_parallelism).len();
-    shard_count * if review_enabled { 3 } else { 2 }
+    shard_count * if review_enabled { 5 } else { 2 }
 }
 
 fn estimate_wait_stages_for_chapters(chapters: &[Chapter], review_enabled: bool) -> usize {
     if chapters.is_empty() {
         0
     } else if review_enabled {
-        3
+        5
     } else {
         2
     }
@@ -3787,6 +4217,23 @@ fn is_mimo_profile(profile: &ModelProfile) -> bool {
         || base.contains("mimo")
         || base.contains("xiaomi")
         || model.contains("mimo-")
+}
+
+fn load_review_profile_for_run(
+    state: &State<'_, AppState>,
+    rewrite_profile: &ModelProfile,
+    review_enabled: bool,
+    review_profile_id: Option<&str>,
+) -> Result<(Option<ModelProfile>, Option<String>), String> {
+    if !review_enabled {
+        return Ok((None, None));
+    }
+    let profile = match normalize_review_profile_id(review_profile_id) {
+        Some(profile_id) => load_model_profile(state, &profile_id)?,
+        None => rewrite_profile.clone(),
+    };
+    let api_key = read_stored_api_key(state, &profile.id)?;
+    Ok((Some(profile), Some(api_key)))
 }
 
 fn prepare_prompt_for_profile(
@@ -6658,8 +7105,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(estimate_requests_for_chapters(&chapters, 6, false), 12);
-        assert_eq!(estimate_requests_for_chapters(&chapters, 6, true), 18);
-        assert_eq!(estimate_requests_for_chapters(&chapters[..3], 10, true), 9);
+        assert_eq!(estimate_requests_for_chapters(&chapters, 6, true), 30);
+        assert_eq!(estimate_requests_for_chapters(&chapters[..3], 10, true), 15);
         assert_eq!(estimate_requests_for_chapters(&[], 6, true), 0);
     }
 

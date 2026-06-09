@@ -22,7 +22,8 @@ import {
   Settings,
   Sparkles,
   Square,
-  Trash2
+  Trash2,
+  X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -123,6 +124,7 @@ type AiLog = {
 type AppSettings = {
   export_dir?: string | null;
   review_enabled?: boolean;
+  review_profile_id?: string | null;
   rewrite_parallelism?: 1 | 3 | 6 | 10;
 };
 
@@ -975,6 +977,7 @@ export default function App() {
         settings: {
           export_dir: selected,
           review_enabled: settings.review_enabled ?? false,
+          review_profile_id: settings.review_profile_id ?? null,
           rewrite_parallelism: settings.rewrite_parallelism ?? 6
         }
       });
@@ -995,6 +998,7 @@ export default function App() {
         settings: {
           export_dir: null,
           review_enabled: settings.review_enabled ?? false,
+          review_profile_id: settings.review_profile_id ?? null,
           rewrite_parallelism: settings.rewrite_parallelism ?? 6
         }
       });
@@ -1016,6 +1020,7 @@ export default function App() {
         settings: {
           export_dir: settings.export_dir ?? null,
           review_enabled: nextEnabled,
+          review_profile_id: settings.review_profile_id ?? null,
           rewrite_parallelism: settings.rewrite_parallelism ?? 6
         }
       });
@@ -1036,11 +1041,33 @@ export default function App() {
         settings: {
           export_dir: settings.export_dir ?? null,
           review_enabled: settings.review_enabled ?? false,
+          review_profile_id: settings.review_profile_id ?? null,
           rewrite_parallelism: value
         }
       });
       setSettings(saved);
       showNotice(value === 1 ? "已切换为不并发处理。" : `已设置分析/改写并发请求数：${value}。`);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function setReviewProfileId(value: string) {
+    setBusy("review-profile-setting");
+    setNotice("");
+    try {
+      const saved = await invoke<AppSettings>("save_app_settings", {
+        settings: {
+          export_dir: settings.export_dir ?? null,
+          review_enabled: settings.review_enabled ?? false,
+          review_profile_id: value || null,
+          rewrite_parallelism: settings.rewrite_parallelism ?? 6
+        }
+      });
+      setSettings(saved);
+      showNotice(value ? "已设置审查专家模型。" : "已恢复使用当前改写模型审查。");
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -1422,6 +1449,14 @@ export default function App() {
               {modelDiagnosis.recommended_thinking_mode && (
                 <span>建议思考模式：{modelDiagnosis.recommended_thinking_mode}</span>
               )}
+              <button
+                className="icon-button diagnosis-close"
+                type="button"
+                aria-label="关闭诊断结果"
+                onClick={() => setModelDiagnosis(null)}
+              >
+                <X size={16} />
+              </button>
             </div>
             <div className="diagnosis-list">
               {modelDiagnosis.checks.map((check) => (
@@ -1628,7 +1663,23 @@ export default function App() {
                 >
                   {settings.review_enabled ? "开启" : "关闭"}
                 </button>
-                <span>默认关闭，开启后每批改写会额外进行一次 AI 复检修正。</span>
+                <span>默认关闭，开启后每批改写会由审查专家判定；不通过时打回改写模型重写并复判。</span>
+              </div>
+              <div className="setting-row">
+                <select
+                  value={settings.review_profile_id ?? ""}
+                  onChange={(event) => setReviewProfileId(event.target.value)}
+                  disabled={busy === "review-profile-setting"}
+                  title="选择第二个 AI 作为审查专家；留空则使用当前改写模型审查"
+                >
+                  <option value="">使用当前改写模型审查</option>
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.model}
+                    </option>
+                  ))}
+                </select>
+                <span>审查专家只判定并列出问题；不通过时会打回改写模型重写，再由审查专家复判。</span>
               </div>
             </section>
             <section className="settings-section">
