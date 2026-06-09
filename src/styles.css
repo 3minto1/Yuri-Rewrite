@@ -588,6 +588,70 @@ pre {
   max-width: 920px;
 }
 
+.settings-section-heading {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.setting-help {
+  align-items: center;
+  color: #776f65;
+  cursor: help;
+  display: inline-flex;
+  line-height: 1;
+  position: relative;
+}
+
+.setting-help:focus-visible {
+  border-radius: 999px;
+  outline: 2px solid #5d8bd6;
+  outline-offset: 2px;
+}
+
+.setting-help-tooltip {
+  background: #2f2d2a;
+  border: 1px solid #4c4741;
+  border-radius: 7px;
+  box-shadow: 0 12px 26px rgba(28, 25, 22, 0.24);
+  color: #fffaf1;
+  font-size: 13px;
+  font-weight: 500;
+  left: 0;
+  line-height: 1.55;
+  opacity: 0;
+  padding: 10px 12px;
+  pointer-events: none;
+  position: absolute;
+  top: calc(100% + 10px);
+  transform: translateY(-4px);
+  transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s ease;
+  visibility: hidden;
+  width: min(520px, calc(100vw - 48px));
+  z-index: 20;
+}
+
+.setting-help-tooltip::before {
+  background: #2f2d2a;
+  border-left: 1px solid #4c4741;
+  border-top: 1px solid #4c4741;
+  content: "";
+  height: 8px;
+  left: 10px;
+  position: absolute;
+  top: -5px;
+  transform: rotate(45deg);
+  width: 8px;
+}
+
+.setting-help:hover .setting-help-tooltip,
+.setting-help:focus .setting-help-tooltip,
+.setting-help:focus-within .setting-help-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
 .setting-row {
   display: grid;
   gap: 10px;

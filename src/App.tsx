@@ -1653,7 +1653,15 @@ export default function App() {
               </div>
             </section>
             <section className="settings-section">
-              <h3>改写复检</h3>
+              <div className="settings-section-heading">
+                <h3>改写复检</h3>
+                <span className="setting-help" tabIndex={0} aria-label="改写复检说明">
+                  <HelpCircle size={16} />
+                  <span className="setting-help-tooltip" role="tooltip">
+                    双专家审查会显著增加请求数和等待时间，但能让改写后的文本逻辑更顺、质量更稳。开启后，每个分片最多可能经历“分析、初稿改写、审查判定、打回重写、审查复判”五次模型请求。建议为审查专家选择逻辑能力强、JSON 输出稳定、长文本一致性检查更可靠的模型。
+                  </span>
+                </span>
+              </div>
               <div className="setting-toggle-row">
                 <button
                   className={settings.review_enabled ? "setting-switch active" : "setting-switch"}
@@ -2152,14 +2160,13 @@ export default function App() {
             <div className="quickstart-content">
               <h2 id="quickstart-title">快速上手</h2>
               <ol>
-                <li>点击导入 TXT，选择小说文件。</li>
-                <li>填写模型配置，保存后点击诊断模型。</li>
-                <li>进入设定，填写主角姓名和改写模式。</li>
-                <li>查看任务预估，确认批次数、请求数和预计等待。</li>
-                <li>回到工作台，点击一键分析改写当前批次或全文。</li>
-                <li>运行中可以暂停、继续或终止全文任务。</li>
-                <li>改写完成后到对比页面检查并导出 TXT。</li>
-                <li>需要调整质量时，可降低并发或开启改写复检。</li>
+                <li>点击导入 TXT，软件会自动识别章节并按批次整理。</li>
+                <li>填写模型配置，保存后点击诊断模型，确认 API Key、JSON 输出和思考模式可用。</li>
+                <li>进入设定，填写主角姓名、改写后姓名、身材体型、改写模式和额外要求。</li>
+                <li>如需更严格质量控制，可在设置里开启改写复检，并选择审查专家模型。</li>
+                <li>回到工作台，先看任务预估，确认请求数、历史耗时和预计等待时间。</li>
+                <li>点击一键分析改写当前批次或全文；全文任务运行中可暂停、继续或终止。</li>
+                <li>改写完成后进入对比页面，检查原文和改写稿，只导出已完成章节的 TXT。</li>
               </ol>
               <button className="dialog-primary quickstart-confirm" onClick={closeQuickStart}>
                 确定
