@@ -920,8 +920,11 @@ fn save_review_profile_id(conn: &Connection, profile_id: Option<&str>) -> Result
         )
         .map_err(to_string)?;
     } else {
-        conn.execute("DELETE FROM app_settings WHERE key = 'review_profile_id'", [])
-            .map_err(to_string)?;
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = 'review_profile_id'",
+            [],
+        )
+        .map_err(to_string)?;
     }
     Ok(())
 }
@@ -1441,8 +1444,12 @@ async fn start_rewrite(
 
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
-    let (review_profile, review_api_key) =
-        load_review_profile_for_run(&state, &profile, review_enabled, review_profile_id.as_deref())?;
+    let (review_profile, review_api_key) = load_review_profile_for_run(
+        &state,
+        &profile,
+        review_enabled,
+        review_profile_id.as_deref(),
+    )?;
     ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
     let canon_assets = {
         let conn = state.conn.lock().map_err(to_string)?;
@@ -2799,7 +2806,8 @@ fn build_batch_revision_prompt_with_context(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let base_prompt = build_batch_rewrite_prompt_with_context(chapters, canon_text, settings, shard_context);
+    let base_prompt =
+        build_batch_rewrite_prompt_with_context(chapters, canon_text, settings, shard_context);
     format!(
         r#"{}
 
@@ -2883,7 +2891,7 @@ fn parse_review_decision_output(output: &str) -> Result<ReviewDecision, String> 
             }
         }
     }
-    let approved = approved.unwrap_or_else(|| issues.is_empty());
+    let approved = approved.unwrap_or(issues.is_empty());
     Ok(ReviewDecision { approved, issues })
 }
 
@@ -2966,6 +2974,7 @@ async fn revise_rewrite_shard_after_review(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn review_revised_shard(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -2977,7 +2986,8 @@ async fn review_revised_shard(
     shard_context: &str,
     shard_label: &str,
 ) -> Result<ReviewDecision, String> {
-    let prompt = build_batch_review_decision_prompt_with_context(shard, rewrites, settings, shard_context);
+    let prompt =
+        build_batch_review_decision_prompt_with_context(shard, rewrites, settings, shard_context);
     let output = generate_text(
         &state.client,
         profile,
@@ -3103,97 +3113,6 @@ async fn retry_rewrite_shard_after_parse_error(
                 None,
             )?;
             Err(format!("解析失败后自动重试也失败：{}", error))
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn retry_review_shard_after_parse_error(
-    state: &State<'_, AppState>,
-    novel_id: &str,
-    profile: &ModelProfile,
-    api_key: &str,
-    shard: &[Chapter],
-    rewrite_shard: &[ParsedChapterRewrite],
-    settings: &NovelSettings,
-    shard_context: &str,
-    shard_label: &str,
-    parse_error: &str,
-    bad_output: &str,
-) -> Result<Vec<ParsedChapterRewrite>, String> {
-    let retry_context = format!(
-        "{}\n\n修复重试：上一次复检输出无法解析，错误：{}。请完全重新输出当前分片，只输出当前分片要求的章节。每章必须包含原样章节开始标记、修正后标题、非空正文和原样章节结束标记。正文不能留空，不能输出当前分片外章节。",
-        shard_context.trim(),
-        parse_error
-    );
-    let base_prompt = build_batch_review_prompt_with_context(
-        shard,
-        rewrite_shard,
-        settings,
-        retry_context.trim(),
-    );
-    let prompt = format!(
-        "{}\n\n上一次无法解析的复检输出如下，仅供你避开格式错误，不要照抄空正文或错误边界：\n{}",
-        base_prompt,
-        truncate_text(bad_output, 12_000)
-    );
-    let output = generate_text(
-        &state.client,
-        profile,
-        api_key,
-        "你是中文小说改写质检格式修复助手。必须重新输出当前分片的完整修正版。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和非空正文，不要输出输入外章节。",
-        &prompt,
-        false,
-    )
-    .await;
-
-    match output {
-        Ok(output) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次复检重试",
-                Some(shard_label),
-                "success",
-                &format_model_log_content(&output, profile, Some(true)),
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
-            match parse_batch_rewrite_output(&output.text, shard) {
-                Ok(parsed) => Ok(parsed),
-                Err(error) => {
-                    append_ai_log(
-                        state,
-                        Some(novel_id),
-                        &profile.id,
-                        "批次复检重试解析",
-                        Some(shard_label),
-                        "error",
-                        &error,
-                        output.reasoning.as_deref(),
-                        Some(&output.raw_response),
-                    )?;
-                    Err(format!(
-                        "复检解析失败后已自动重试，但重试输出仍无法解析：{}",
-                        error
-                    ))
-                }
-            }
-        }
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次复检重试",
-                Some(shard_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            Err(format!("复检解析失败后自动重试也失败：{}", error))
         }
     }
 }
@@ -7118,7 +7037,7 @@ mod tests {
 
         assert_eq!(split_chapters_for_parallelism(&chapters, 6).len(), 6);
         assert_eq!(estimate_wait_stages_for_chapters(&chapters, false), 2);
-        assert_eq!(estimate_wait_stages_for_chapters(&chapters, true), 3);
+        assert_eq!(estimate_wait_stages_for_chapters(&chapters, true), 5);
         assert_eq!(estimate_wait_stages_for_chapters(&[], true), 0);
     }
 
@@ -7687,7 +7606,8 @@ mod tests {
 
     #[test]
     fn loose_numbered_headings_reject_nonsequential_numbered_lists() {
-        let text = "1 普通列表项\n这里是内容甲\n3 跳号列表项\n这里是内容乙\n7 又一个列表项\n这里是内容丙";
+        let text =
+            "1 普通列表项\n这里是内容甲\n3 跳号列表项\n这里是内容乙\n7 又一个列表项\n这里是内容丙";
         let split = split_chapters("novel-1", text);
 
         assert!(!split.detected_chapters);
