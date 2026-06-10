@@ -3778,13 +3778,19 @@ fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
 
 fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
     let heading_re = chapter_heading_regex();
-    let matches = heading_re.find_iter(text).collect::<Vec<_>>();
+    let matches = heading_re
+        .find_iter(text)
+        .filter(|mat| is_plausible_strict_heading_line(mat.as_str()))
+        .collect::<Vec<_>>();
     if !matches.is_empty() {
         return matches;
     }
     let loose_heading_re = loose_numbered_chapter_heading_regex();
-    let loose_matches = loose_heading_re.find_iter(text).collect::<Vec<_>>();
-    if loose_numbered_headings_are_plausible(&loose_matches) {
+    let loose_matches = loose_heading_re
+        .find_iter(text)
+        .filter(|mat| is_plausible_loose_numbered_heading_line(mat.as_str()))
+        .collect::<Vec<_>>();
+    if loose_numbered_headings_are_plausible(text, &loose_matches) {
         loose_matches
     } else {
         Vec::new()
@@ -3793,19 +3799,178 @@ fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
 
 fn chapter_heading_regex() -> Regex {
     Regex::new(
-        r#"(?m)^[\s\u{feff}　]*(?:[【〔［「『《（(\[]?\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册夜案场弹折更]\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:卷|篇|部|章|回|幕|册|话|节|季|段|夜|案|场|弹|折|更)\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[\s:：、.．\-—_·|]*.{0,80}|[上中下前后终外]\s*(?:卷|篇|部|章|册)[\s:：、.．\-—_·|]*.{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)\s*[0-9０-９IVXLCDMivxlcdm]+[\s:：、.．\-—_·|]*.{0,80}|[【〔［「『《（(\[]?\s*(?:序章|楔子|引子|前言|正文|终章|尾声|后记|番外(?:篇|章)?|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:第?\s*)?[0-9０-９]{1,5}\s*[、.．:：\-—_·|]\s*.{1,80}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,8}\s*[、.．:：\-—_·|]\s*.{1,80}|[（(]?[0-9０-９]{1,5}[）)]\s*.{0,80}|[【〔［「『《（(\[].{1,40}[】〕］」』》）)\]]|={2,6}.{1,60}={2,6})[\s　]*$"#,
+        r#"(?m)^[\s\u{feff}　]*(?:={2,6}\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册夜案场弹折更][^=\r\n]{0,80}={2,6}|={2,6}\s*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)[^=\r\n]{0,80}={2,6}|[【〔［「『《（(\[]?\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册夜案场弹折更]\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:卷|篇|部|章|回|幕|册|话|节|季|段|夜|案|场|弹|折|更)\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[\s:：、.．\-—_·|]*.{0,80}|[上中下前后终外]\s*(?:卷|篇|部|章|册)[\s:：、.．\-—_·|]*.{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)\s*[0-9０-９IVXLCDMivxlcdm]+[\s:：、.．\-—_·|]*.{0,80}|[【〔［「『《（(\[]?\s*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80})[\s　]*$"#,
     )
     .expect("valid chapter regex")
 }
 
+fn is_plausible_strict_heading_line(line: &str) -> bool {
+    let core = line
+        .trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || ch == '\u{feff}'
+                || ch == '　'
+                || ch == '='
+                || matches!(
+                    ch,
+                    '【' | '】'
+                        | '〔'
+                        | '〕'
+                        | '［'
+                        | '］'
+                        | '「'
+                        | '」'
+                        | '『'
+                        | '』'
+                        | '《'
+                        | '》'
+                        | '（'
+                        | '）'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                )
+        })
+        .trim();
+    let compact = core
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if starts_with_inline_round_phrase(&compact) {
+        return false;
+    }
+    if [
+        "章正文",
+        "节正文",
+        "回正文",
+        "卷正文",
+        "部正文",
+        "集正文",
+        "篇正文",
+        "话正文",
+        "幕正文",
+        "页正文",
+        "季正文",
+        "段正文",
+        "册正文",
+        "夜正文",
+        "案正文",
+        "场正文",
+        "弹正文",
+        "折正文",
+        "更正文",
+    ]
+    .iter()
+    .any(|pattern| compact.contains(pattern))
+    {
+        return false;
+    }
+    [
+        "序章正文",
+        "楔子正文",
+        "引子正文",
+        "引言正文",
+        "序言正文",
+        "序幕正文",
+        "前言正文",
+        "终章正文",
+        "尾声正文",
+        "后记正文",
+        "番外正文",
+        "番外篇正文",
+        "番外章正文",
+        "特别篇正文",
+        "外传正文",
+        "插曲正文",
+        "间章正文",
+    ]
+    .iter()
+    .all(|pattern| !compact.starts_with(pattern))
+        && !special_heading_content_looks_like_body(&compact)
+}
+
+fn starts_with_inline_round_phrase(compact: &str) -> bool {
+    let round_re = Regex::new(
+        r#"^(?:第)?[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+回合"#,
+    )
+    .expect("valid round phrase regex");
+    if !round_re.is_match(compact) {
+        return false;
+    }
+    compact
+        .chars()
+        .any(|ch| matches!(ch, '，' | '。' | '！' | '？' | '；' | ';'))
+        || compact.contains("回合的")
+}
+
+fn special_heading_content_looks_like_body(compact: &str) -> bool {
+    for keyword in [
+        "作品相关",
+        "上架感言",
+        "完本感言",
+        "番外篇",
+        "番外章",
+        "特别篇",
+        "序章",
+        "楔子",
+        "引子",
+        "引言",
+        "序言",
+        "序幕",
+        "前言",
+        "终章",
+        "尾声",
+        "后记",
+        "番外",
+        "外传",
+        "插曲",
+        "间章",
+        "简介",
+        "文案",
+    ] {
+        if let Some(rest) = compact.strip_prefix(keyword) {
+            let rest = rest.trim_matches(|ch| {
+                matches!(
+                    ch,
+                    '：' | ':'
+                        | '、'
+                        | '-'
+                        | '—'
+                        | '_'
+                        | '·'
+                        | '|'
+                        | '。'
+                        | '.'
+                        | '．'
+                        | '！'
+                        | '!'
+                        | '？'
+                        | '?'
+                )
+            });
+            if rest.is_empty() {
+                return false;
+            }
+            return [
+                "写", "中", "里", "是", "的", "时", "我", "也", "就", "到", "说", "提", "已经",
+                "终于",
+            ]
+            .iter()
+            .any(|prefix| rest.starts_with(prefix));
+        }
+    }
+    false
+}
+
 fn loose_numbered_chapter_heading_regex() -> Regex {
     Regex::new(
-        r#"(?m)^[\s\u{feff}　]*(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})[ \t　]+[^ \t　\r\n，。！？；;,.、:：\-—_·|][^\r\n]{1,59}[\s　]*$"#,
+        r#"(?m)^[\s\u{feff}　]*(?:[（(]?\s*)?(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})\s*(?:[）)]\s*)?(?:[ \t　]+|[、.．:：\-—_·|]\s*)[^\r\n]{1,60}[\s　]*$"#,
     )
     .expect("valid loose numbered chapter regex")
 }
 
-fn loose_numbered_headings_are_plausible(matches: &[regex::Match<'_>]) -> bool {
+fn loose_numbered_headings_are_plausible(text: &str, matches: &[regex::Match<'_>]) -> bool {
     if matches.len() < 2 {
         return false;
     }
@@ -3816,15 +3981,101 @@ fn loose_numbered_headings_are_plausible(matches: &[regex::Match<'_>]) -> bool {
     if ordinals.len() != matches.len() || ordinals.first().is_none_or(|value| *value > 3) {
         return false;
     }
-    ordinals.windows(2).all(|pair| pair[1] == pair[0] + 1)
+    if !ordinals.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+        return false;
+    }
+    loose_numbered_heading_bodies_are_plausible(text, matches)
+}
+
+fn is_plausible_loose_numbered_heading_line(line: &str) -> bool {
+    let Some(title) = loose_numbered_heading_title(line) else {
+        return false;
+    };
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 40 {
+        return false;
+    }
+    if title
+        .chars()
+        .any(|ch| matches!(ch, '，' | '。' | '！' | '？' | '；' | ';'))
+    {
+        return false;
+    }
+    if ["列表", "列表项", "选项", "步骤", "序号"]
+        .iter()
+        .any(|word| title.contains(word))
+    {
+        return false;
+    }
+    let meaningful = title
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || is_cjk_char(*ch))
+        .count();
+    if meaningful < 2 {
+        return false;
+    }
+    let symbol_count = title
+        .chars()
+        .filter(|ch| {
+            !ch.is_alphanumeric()
+                && !is_cjk_char(*ch)
+                && !ch.is_whitespace()
+                && *ch != '\u{feff}'
+                && *ch != '　'
+        })
+        .count();
+    symbol_count * 2 <= title.chars().count()
+}
+
+fn loose_numbered_heading_bodies_are_plausible(text: &str, matches: &[regex::Match<'_>]) -> bool {
+    let body_lengths = matches
+        .iter()
+        .enumerate()
+        .map(|(idx, mat)| {
+            let start = mat.end();
+            let end = matches.get(idx + 1).map_or(text.len(), |next| next.start());
+            text[start..end]
+                .trim()
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .count()
+        })
+        .collect::<Vec<_>>();
+    if body_lengths.iter().any(|len| *len < 20) {
+        return false;
+    }
+    let total = body_lengths.iter().sum::<usize>();
+    total / body_lengths.len() >= 20
+}
+
+fn loose_numbered_heading_title(line: &str) -> Option<&str> {
+    let trimmed =
+        line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　');
+    let ordinal_re = loose_numbered_heading_ordinal_prefix_regex();
+    let mat = ordinal_re.find(trimmed)?;
+    Some(trimmed[mat.end()..].trim())
+}
+
+fn loose_numbered_heading_ordinal_prefix_regex() -> Regex {
+    Regex::new(
+        r#"^[（(]?\s*(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})\s*[）)]?\s*(?:[、.．:：\-—_·|]|\s+)"#,
+    )
+    .expect("valid loose numbered heading ordinal prefix regex")
 }
 
 fn parse_loose_numbered_heading_ordinal(line: &str) -> Option<u64> {
-    let token = line
-        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　')
-        .split_whitespace()
-        .next()?;
+    let trimmed =
+        line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　');
+    let ordinal_re = Regex::new(
+        r#"^[（(]?\s*([0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})"#,
+    )
+    .expect("valid loose numbered heading ordinal parser regex");
+    let token = ordinal_re.captures(trimmed)?.get(1)?.as_str();
     parse_fullwidth_digits(token).or_else(|| parse_chinese_ordinal(token))
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch as u32, 0x3400..=0x9fff | 0xf900..=0xfaff)
 }
 
 fn parse_fullwidth_digits(token: &str) -> Option<u64> {
@@ -5276,7 +5527,9 @@ fn parse_markerless_by_heading_regex(
         .enumerate()
         .filter_map(|(idx, line)| {
             let trimmed = line.trim();
-            if !matches!(trimmed, "正文" | "正文：" | "正文:") && heading_re.is_match(trimmed)
+            if !matches!(trimmed, "正文" | "正文：" | "正文:")
+                && heading_re.is_match(trimmed)
+                && is_plausible_strict_heading_line(trimmed)
             {
                 Some(idx)
             } else {
@@ -7555,16 +7808,35 @@ mod tests {
             "第4弹 她的反击",
             "第5折 灯下回身",
             "第6更 月色正好",
-            "1、这就是标题",
-            "二十四、我瞎编的标题",
-            "（11）我奶常山赵子龙",
             "【特别篇】",
-            "=== 起 ===",
+            "=== 第五章 娜儿 ===",
+            "===楔子===",
+            "===引言===",
+            "序言",
+            "序幕 神树之下",
             "番外篇 她们后来",
+            "===番外 她们后来===",
         ] {
             assert!(
                 heading_re.is_match(title),
                 "expected heading match: {title}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_chapter_headings_reject_loose_numbers_and_pure_symbols() {
+        let heading_re = chapter_heading_regex();
+        for title in [
+            "1、这就是标题",
+            "二十四、我瞎编的标题",
+            "（11）我奶常山赵子龙",
+            "====================================",
+            "=== 起 ===",
+        ] {
+            assert!(
+                !heading_re.is_match(title),
+                "expected non-strict heading rejection: {title}"
             );
         }
     }
@@ -7582,7 +7854,7 @@ mod tests {
 
     #[test]
     fn loose_numbered_headings_detect_sequential_numbered_titles() {
-        let text = "001 初遇\n这里是内容甲\n002 再会\n这里是内容乙\n003 终局\n这里是内容丙";
+        let text = "001 初遇\n这里是内容甲，主角第一次遇见重要人物，冲突与伏笔同时出现，场景完整展开。\n002 再会\n这里是内容乙，两人重新见面并推动关系变化，正文长度足够说明这不是列表项。\n003 终局\n这里是内容丙，前文线索被回收，章节正文继续推进到完整段落。";
         let split = split_chapters("novel-1", text);
 
         assert!(split.detected_chapters);
@@ -7594,7 +7866,7 @@ mod tests {
 
     #[test]
     fn loose_numbered_headings_detect_sequential_chinese_numbered_titles() {
-        let text = "一 初遇\n这里是内容甲\n二 再会\n这里是内容乙\n三 终局\n这里是内容丙";
+        let text = "一 初遇\n这里是内容甲，主角第一次遇见重要人物，冲突与伏笔同时出现，场景完整展开。\n二 再会\n这里是内容乙，两人重新见面并推动关系变化，正文长度足够说明这不是列表项。\n三 终局\n这里是内容丙，前文线索被回收，章节正文继续推进到完整段落。";
         let split = split_chapters("novel-1", text);
 
         assert!(split.detected_chapters);
@@ -7613,5 +7885,70 @@ mod tests {
         assert!(!split.detected_chapters);
         assert_eq!(split.chapters.len(), 1);
         assert_eq!(split.chapters[0].title, "自动分段 1");
+    }
+
+    #[test]
+    fn loose_numbered_headings_reject_sentence_like_numbered_lines() {
+        let text = "一 初遇\n这里是内容甲，主角第一次遇见重要人物，冲突与伏笔同时出现，场景完整展开。\n二 再会\n这里是内容乙，两人重新见面并推动关系变化，正文长度足够说明这不是列表项。\n三 终局\n这里是内容丙，前文线索被回收，章节正文继续推进到完整段落。\n五、六岁的孩子，自然没有什么男女之别，琅玡仍旧只顾着玩闹。\n后面还有普通正文，不能因为句首中文数字和顿号就切出新章节。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 3);
+        assert!(split.chapters[2]
+            .original_text
+            .contains("五、六岁的孩子，自然没有什么男女之别"));
+    }
+
+    #[test]
+    fn loose_numbered_headings_reject_symbol_separator_lines() {
+        let text = "====================================\n正文开头有装饰分隔符。\n1 普通列表项\n这里是内容甲\n2 又一个列表项\n这里是内容乙";
+        let split = split_chapters("novel-1", text);
+
+        assert!(!split.detected_chapters);
+        assert_eq!(split.chapters.len(), 1);
+        assert_eq!(split.chapters[0].title, "自动分段 1");
+    }
+
+    #[test]
+    fn special_headings_keep_preface_and_interleaved_extra_chapters() {
+        let text = "===楔子===\n高大的树木茂密得连阳光也无法透入，这里是开篇内容。\n===第一章 觉醒日===\n第一章正文继续展开，主角正式登场。\n===番外 她们后来===\n番外正文穿插在正常章节之间，也应该作为独立章节保留。\n===第二章 武魂觉醒===\n第二章正文继续推进。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 4);
+        assert_eq!(split.chapters[0].title, "===楔子===");
+        assert!(split.chapters[0].original_text.contains("开篇内容"));
+        assert_eq!(split.chapters[1].title, "===第一章 觉醒日===");
+        assert_eq!(split.chapters[2].title, "===番外 她们后来===");
+        assert!(split.chapters[2].original_text.contains("番外正文"));
+        assert_eq!(split.chapters[3].title, "===第二章 武魂觉醒===");
+    }
+
+    #[test]
+    fn strict_headings_reject_round_phrase_inside_body() {
+        let text = "第415章 挑战\n第一回合的接触，武器便是被击落，这一幕即使看台上的人也怔住了。\n第416章 家传玉片\n真正的下一章正文。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 2);
+        assert_eq!(split.chapters[0].title, "第415章 挑战");
+        assert!(split.chapters[0]
+            .original_text
+            .contains("第一回合的接触，武器便是被击落"));
+        assert_eq!(split.chapters[1].title, "第416章 家传玉片");
+    }
+
+    #[test]
+    fn postscript_heading_is_kept_but_postscript_body_sentence_is_not_split() {
+        let text = "第417章 最后的选拔赛\n最后一章正文。\n后记。\n后记写到这里，也该是结束的时候了，可我还是有些舍不得。\n谢谢看到这里的读者。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 2);
+        assert_eq!(split.chapters[0].title, "第417章 最后的选拔赛");
+        assert_eq!(split.chapters[1].title, "后记。");
+        assert!(split.chapters[1]
+            .original_text
+            .contains("后记写到这里，也该是结束的时候了"));
     }
 }
