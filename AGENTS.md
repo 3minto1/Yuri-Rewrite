@@ -80,10 +80,10 @@ portable/YuriRewrite-v{version}-windows-x64.zip
 - Analysis works at batch level and may split a batch into parallel shards. It should produce or merge compact consistency assets instead of chapter-by-chapter bulky JSON.
 - Rewrite operates only on the selected batch and only processes chapters in that batch that have completed analysis.
 - Rewrite works at batch or shard level with stable machine chapter markers, then parses model output back into per-chapter `rewrite_text` for the Compare page.
-- When app review is disabled, rewrite flow is analysis plus rewrite only. When app review is enabled, rewrite flow becomes dual-expert review: rewrite model generates the draft, review model returns JSON approval/issues, rejected drafts are rewritten once by the rewrite model, and the rewritten draft is reviewed again.
-- If dual-expert review passes, save the draft or rewritten draft. If the final review still fails, fail the batch and keep the review issues in AI logs instead of saving known-bad chapters.
+- When app review is disabled, rewrite flow is analysis plus rewrite only. When app review is enabled, rewrite flow becomes dual-expert review: rewrite model generates the draft, review model returns JSON approval/issues, rejected drafts can be rewritten up to two times by the rewrite model, and each rewritten draft is reviewed again.
+- If dual-expert review passes, save the draft or rewritten draft. If the third review still fails, append a per-novel warning log in the app root, save the second rewritten draft, and continue processing later shards instead of failing the whole batch.
 - Export supports TXT only and must include only chapters with `rewrite_status = 'completed'` and non-empty `rewrite_text`; never fall back to original text.
-- Task estimation should report novel/batch chapter counts, character counts, request counts, recent success/failure stats, average input/output chars, and wall-clock wait estimates by pipeline stage. With review enabled, estimate up to five requests/stages per shard.
+- Task estimation should report novel/batch chapter counts, character counts, request counts, recent success/failure stats, average input/output chars, and wall-clock wait estimates by pipeline stage. With review enabled, estimate up to seven requests/stages per shard.
 - Current-batch one-click runs analysis then rewrite for the selected batch.
 - Full one-click runs batches in order: analyze batch, rewrite batch, export `{novel_title}_第N批.txt`, then continue. At the end it exports the full rewritten TXT and keeps all per-batch files.
 - Full one-click supports pause, continue, and terminate. Pause/terminate requests abort in-flight AI work where possible. Continue restarts from the first unfinished batch; an unfinished batch is rerun from analysis.
@@ -119,6 +119,7 @@ Important behavior:
 ## App Settings
 
 - `export_dir`: output folder for exported TXT files and one-click batch files.
+- `core_prompt`: global rewrite guidance for style, prose rhythm, description preferences, and other cross-novel instructions. It is sent with every rewrite and should avoid specific plot or character facts from a particular novel.
 - `review_enabled`: optional dual-expert review pass after rewrite. Default is off because it significantly increases request count and wait time.
 - `review_profile_id`: optional model profile ID for the review expert. If empty or missing, review uses the current rewrite model. If set, the selected review profile must have a saved API key.
 - `rewrite_parallelism`: shared concurrency setting for analysis and rewrite. Allowed values are `10`, `6`, `3`, and `1`; default is `6`.
@@ -142,6 +143,7 @@ Important behavior:
 - Analysis prompts should analyze the original novel only. Do not inject yuri rewrite instructions, feminization instructions, basic rewrite settings, or advanced rewrite settings into analysis prompts.
 - Analysis should extract compact original-canon assets: outline, characters, original genders, pronouns, names and aliases, relationships, titles, locations, foreshadowing, terms, and name mapping candidates when available.
 - Rewrite prompts must include basic settings, advanced settings, compact consistency assets, and name mapping rules.
+- Core settings must be included before normal rewrite rules so global user style requirements keep the highest prompt priority during rewrite.
 - Name mapping has highest priority:
   - If `rewritten_protagonist_name` is filled, force the protagonist to that name everywhere, including titles and body text.
   - Otherwise, feminize the protagonist's name consistently, preferably with homophones or near-homophones while preserving the surname.
@@ -176,7 +178,7 @@ Important behavior:
   - AI call duration.
   - whether review was enabled for that call.
   - thinking mode used for that call.
-- AI logs for dual-expert review should distinguish draft rewrite, review decision, review rejection, rejected-draft rewrite, and final review so users can understand where a batch failed.
+- AI logs for dual-expert review should distinguish draft rewrite, review decision, review rejection, rejected-draft rewrite, final review, third review warnings, and fallback warning-log paths so users can understand where a shard degraded instead of failing.
 
 ## Frontend Guidelines
 

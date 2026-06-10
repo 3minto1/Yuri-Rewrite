@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
@@ -123,6 +124,7 @@ type AiLog = {
 
 type AppSettings = {
   export_dir?: string | null;
+  core_prompt?: string;
   review_enabled?: boolean;
   review_profile_id?: string | null;
   rewrite_parallelism?: 1 | 3 | 6 | 10;
@@ -360,12 +362,13 @@ export default function App() {
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
+  const [corePromptDraft, setCorePromptDraft] = useState("");
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
   const [estimateCollapsed, setEstimateCollapsed] = useState(false);
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [novelSettingsDraft, setNovelSettingsDraft] = useState<NovelSettingsDraft>(emptyNovelSettings);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "logs" | "settings">("workspace");
+  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "settings">("workspace");
   const [busy, setBusy] = useState("");
   const [autoRunState, setAutoRunState] = useState<"idle" | "running" | "paused" | "stopping">("idle");
   const [autoControlBusy, setAutoControlBusy] = useState(false);
@@ -375,8 +378,11 @@ export default function App() {
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLPreElement | null>(null);
   const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
+  const busyRef = useRef("");
+  const importInProgressRef = useRef(false);
 
   const selectedChapter = useMemo(
     () => detail?.chapters.find((chapter) => chapter.id === selectedChapterId) ?? detail?.chapters[0],
@@ -414,6 +420,54 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    function handleDragDrop(event: { payload: DragDropEvent }) {
+      const payload = event.payload;
+      if (payload.type === "enter") {
+        setDragActive(payload.paths.some(isTxtFilePath));
+        return;
+      }
+      if (payload.type === "leave") {
+        setDragActive(false);
+        return;
+      }
+      if (payload.type !== "drop") return;
+
+      setDragActive(false);
+      const txtPath = payload.paths.find(isTxtFilePath);
+      if (!txtPath) {
+        showNotice("请拖入 TXT 小说文件。");
+        return;
+      }
+      if (busyRef.current) {
+        showNotice("当前有任务正在进行，请稍后再导入。");
+        return;
+      }
+      void importTxtFile(txtPath);
+    }
+
+    void getCurrentWebview().onDragDropEvent(handleDragDrop).then((handler) => {
+      if (cancelled) {
+        handler();
+      } else {
+        unlisten = handler;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      setDragActive(false);
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void listen<Job>("job-progress", (event) => {
@@ -444,6 +498,10 @@ export default function App() {
   useEffect(() => {
     if (detectedModelSuggestions.length === 0) setOpenModelSuggestions(false);
   }, [detectedModelSuggestions.length]);
+
+  useEffect(() => {
+    setCorePromptDraft(settings.core_prompt ?? "");
+  }, [settings.core_prompt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -598,6 +656,10 @@ export default function App() {
     setNotice(message);
   }
 
+  function isTxtFilePath(filePath: string) {
+    return filePath.trim().toLowerCase().endsWith(".txt");
+  }
+
   function openNovelSettings() {
     if (!detail) {
       showNotice("请先上传小说文件");
@@ -645,7 +707,32 @@ export default function App() {
     }
   }
 
+  async function importTxtFile(filePath: string) {
+    if (!isTxtFilePath(filePath)) {
+      showNotice("当前仅支持导入 TXT 小说文件。");
+      return;
+    }
+    if (importInProgressRef.current) return;
+    importInProgressRef.current = true;
+    busyRef.current = "import";
+    setBusy("import");
+    setNotice("");
+    try {
+      const novel = await invoke<Novel>("import_txt", { filePath });
+      await refreshAll();
+      await loadNovel(novel.id);
+      showNotice(`已导入《${novel.title}》。`);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      importInProgressRef.current = false;
+      busyRef.current = "";
+      setBusy("");
+    }
+  }
+
   async function importTxt() {
+    busyRef.current = "import";
     setBusy("import");
     setNotice("");
     try {
@@ -654,14 +741,14 @@ export default function App() {
         filters: [{ name: "TXT 小说", extensions: ["txt"] }]
       });
       if (typeof selected !== "string") return;
-      const novel = await invoke<Novel>("import_txt", { filePath: selected });
-      await refreshAll();
-      await loadNovel(novel.id);
-      showNotice(`已导入《${novel.title}》。`);
+      await importTxtFile(selected);
     } catch (error) {
       showNotice(String(error));
     } finally {
-      setBusy("");
+      if (!importInProgressRef.current) {
+        busyRef.current = "";
+        setBusy("");
+      }
     }
   }
 
@@ -967,6 +1054,17 @@ export default function App() {
     }
   }
 
+  function appSettingsPayload(overrides: Partial<AppSettings> = {}): AppSettings {
+    return {
+      export_dir: settings.export_dir ?? null,
+      core_prompt: settings.core_prompt ?? "",
+      review_enabled: settings.review_enabled ?? false,
+      review_profile_id: settings.review_profile_id ?? null,
+      rewrite_parallelism: settings.rewrite_parallelism ?? 6,
+      ...overrides
+    };
+  }
+
   async function chooseExportDir() {
     setBusy("choose-export-dir");
     setNotice("");
@@ -974,12 +1072,7 @@ export default function App() {
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
       const saved = await invoke<AppSettings>("save_app_settings", {
-        settings: {
-          export_dir: selected,
-          review_enabled: settings.review_enabled ?? false,
-          review_profile_id: settings.review_profile_id ?? null,
-          rewrite_parallelism: settings.rewrite_parallelism ?? 6
-        }
+        settings: appSettingsPayload({ export_dir: selected })
       });
       setSettings(saved);
       showNotice(`已设置导出目录：${saved.export_dir}`);
@@ -995,12 +1088,7 @@ export default function App() {
     setNotice("");
     try {
       const saved = await invoke<AppSettings>("save_app_settings", {
-        settings: {
-          export_dir: null,
-          review_enabled: settings.review_enabled ?? false,
-          review_profile_id: settings.review_profile_id ?? null,
-          rewrite_parallelism: settings.rewrite_parallelism ?? 6
-        }
+        settings: appSettingsPayload({ export_dir: null })
       });
       setSettings(saved);
       showNotice("已恢复默认导出目录。");
@@ -1017,12 +1105,7 @@ export default function App() {
     try {
       const nextEnabled = !(settings.review_enabled ?? false);
       const saved = await invoke<AppSettings>("save_app_settings", {
-        settings: {
-          export_dir: settings.export_dir ?? null,
-          review_enabled: nextEnabled,
-          review_profile_id: settings.review_profile_id ?? null,
-          rewrite_parallelism: settings.rewrite_parallelism ?? 6
-        }
+        settings: appSettingsPayload({ review_enabled: nextEnabled })
       });
       setSettings(saved);
       showNotice(nextEnabled ? "已开启改写复检。" : "已关闭改写复检。");
@@ -1038,12 +1121,7 @@ export default function App() {
     setNotice("");
     try {
       const saved = await invoke<AppSettings>("save_app_settings", {
-        settings: {
-          export_dir: settings.export_dir ?? null,
-          review_enabled: settings.review_enabled ?? false,
-          review_profile_id: settings.review_profile_id ?? null,
-          rewrite_parallelism: value
-        }
+        settings: appSettingsPayload({ rewrite_parallelism: value })
       });
       setSettings(saved);
       showNotice(value === 1 ? "已切换为不并发处理。" : `已设置分析/改写并发请求数：${value}。`);
@@ -1059,15 +1137,26 @@ export default function App() {
     setNotice("");
     try {
       const saved = await invoke<AppSettings>("save_app_settings", {
-        settings: {
-          export_dir: settings.export_dir ?? null,
-          review_enabled: settings.review_enabled ?? false,
-          review_profile_id: value || null,
-          rewrite_parallelism: settings.rewrite_parallelism ?? 6
-        }
+        settings: appSettingsPayload({ review_profile_id: value || null })
       });
       setSettings(saved);
       showNotice(value ? "已设置审查专家模型。" : "已恢复使用当前改写模型审查。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveCoreSettings() {
+    setBusy("core-settings");
+    setNotice("");
+    try {
+      const saved = await invoke<AppSettings>("save_app_settings", {
+        settings: appSettingsPayload({ core_prompt: corePromptDraft })
+      });
+      setSettings(saved);
+      showNotice(corePromptDraft.trim() ? "核心设定已保存。" : "核心设定已清空。");
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -1204,7 +1293,16 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={dragActive ? "app-shell drag-active" : "app-shell"}>
+      {dragActive && (
+        <div className="drop-import-overlay" aria-live="polite">
+          <div className="drop-import-card">
+            <FilePlus2 size={30} />
+            <strong>松开导入 TXT 小说</strong>
+            <span>软件会自动识别章节并载入工作台</span>
+          </div>
+        </div>
+      )}
       <nav className="app-menu">
         <button
           className={activeView === "compare" ? "app-menu-item active" : "app-menu-item"}
@@ -1219,6 +1317,12 @@ export default function App() {
           disabled={!detail}
         >
           设定
+        </button>
+        <button
+          className={activeView === "core-settings" ? "app-menu-item active" : "app-menu-item"}
+          onClick={() => setActiveView("core-settings")}
+        >
+          核心设定
         </button>
         <button className="app-menu-item" onClick={() => setShowQuickStart(true)}>
           <HelpCircle size={16} />
@@ -1628,6 +1732,41 @@ export default function App() {
           </div>
         )}
 
+        {activeView === "core-settings" && (
+          <div className="page-panel">
+            <div className="page-heading">
+              <h2>核心设定</h2>
+              <div className="panel-actions">
+                <button onClick={() => setActiveView("workspace")}>
+                  <ArrowLeft size={16} />
+                  返回
+                </button>
+                <button onClick={saveCoreSettings} disabled={busy === "core-settings"}>
+                  {busy === "core-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                  保存
+                </button>
+              </div>
+            </div>
+            <section className="settings-section core-settings-section">
+              <h3>全局改写风格</h3>
+              <p className="settings-note">
+                核心设定不随小说变化，会在每一次改写和打回重写时发送给 AI，并作为最高优先级的写作要求。建议主要填写文风、叙述节奏、描写密度、语气、对白风格、情绪氛围等全局写法；不要写某一本小说的主角姓名、剧情设定、章节内容或临时任务，避免影响其他小说。
+              </p>
+              <textarea
+                className="core-settings-input"
+                value={corePromptDraft}
+                onChange={(event) => setCorePromptDraft(event.target.value)}
+                placeholder="例如：保持原文轻小说风格，句子自然流畅；减少机械替换感；动作描写细腻但不过度堆砌；对白保留角色原本语气；百合互动要循序渐进，不要突然强行亲密。"
+              />
+              {!corePromptDraft.trim() && (
+                <p className="settings-empty-hint">
+                  当前未填写核心设定。留空也可以正常改写；如果填写，建议只写长期通用的文风和描写偏好。
+                </p>
+              )}
+            </section>
+          </div>
+        )}
+
         {activeView === "settings" && (
           <div className="page-panel">
             <div className="page-heading">
@@ -1658,7 +1797,7 @@ export default function App() {
                 <span className="setting-help" tabIndex={0} aria-label="改写复检说明">
                   <HelpCircle size={16} />
                   <span className="setting-help-tooltip" role="tooltip">
-                    双专家审查会显著增加请求数和等待时间，但能让改写后的文本逻辑更顺、质量更稳。开启后，每个分片最多可能经历“分析、初稿改写、审查判定、打回重写、审查复判”五次模型请求。建议为审查专家选择逻辑能力强、JSON 输出稳定、长文本一致性检查更可靠的模型。
+                    双专家审查会显著增加请求数和等待时间，但能让改写后的文本逻辑更顺、质量更稳。开启后，每个分片最多可能经历“分析、初稿改写、审查判定、打回重写、审查复判、再次打回重写、第三次审查”七次模型请求。建议为审查专家选择逻辑能力强、JSON 输出稳定、长文本一致性检查更可靠的模型。
                   </span>
                 </span>
               </div>
@@ -2052,6 +2191,15 @@ export default function App() {
               <>
                 <header className="dialog-titlebar">
                   <h2 id="settings-dialog-title">基本设定</h2>
+                  <button
+                    className="dialog-close"
+                    type="button"
+                    aria-label="关闭基本设定"
+                    title="关闭"
+                    onClick={() => setSettingsDialog(null)}
+                  >
+                    <X size={16} />
+                  </button>
                 </header>
                 <div className="dialog-body">
                   <div className="form-grid">
@@ -2130,6 +2278,15 @@ export default function App() {
               <>
                 <header className="dialog-titlebar">
                   <h2 id="settings-dialog-title">高级设定</h2>
+                  <button
+                    className="dialog-close"
+                    type="button"
+                    aria-label="关闭高级设定"
+                    title="关闭"
+                    onClick={() => setSettingsDialog(null)}
+                  >
+                    <X size={16} />
+                  </button>
                 </header>
                 <div className="dialog-body">
                   <label>

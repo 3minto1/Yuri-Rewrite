@@ -81,6 +81,43 @@ pre {
   height: 100vh;
 }
 
+.drop-import-overlay {
+  align-items: center;
+  background: rgba(28, 27, 25, 0.38);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+  z-index: 80;
+}
+
+.drop-import-card {
+  align-items: center;
+  background: rgba(255, 252, 246, 0.94);
+  border: 2px dashed #c95f58;
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(28, 27, 25, 0.24);
+  color: #242422;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 320px;
+  padding: 32px 44px;
+}
+
+.drop-import-card svg {
+  color: #c95f58;
+}
+
+.drop-import-card strong {
+  font-size: 20px;
+}
+
+.drop-import-card span {
+  color: #746c61;
+  font-size: 14px;
+}
+
 .app-menu {
   align-items: center;
   background:
@@ -692,6 +729,10 @@ pre {
   max-width: 980px;
 }
 
+.core-settings-section {
+  max-width: 980px;
+}
+
 .settings-note {
   background: #f7f4ed;
   border: 1px solid #e2ded5;
@@ -700,6 +741,20 @@ pre {
   line-height: 1.65;
   margin: 14px 0 0;
   padding: 10px 12px;
+}
+
+.core-settings-input {
+  line-height: 1.7;
+  margin-top: 14px;
+  min-height: 320px;
+  resize: vertical;
+}
+
+.settings-empty-hint {
+  color: #8a5149;
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 10px 0 0;
 }
 
 .mode-field {
@@ -1221,6 +1276,8 @@ label {
   background: #ffffff;
   border-bottom: 1px solid #d0d0d0;
   display: flex;
+  justify-content: space-between;
+  gap: 12px;
   min-height: 44px;
   padding: 0 16px;
 }
@@ -1228,6 +1285,21 @@ label {
 .dialog-titlebar h2 {
   font-size: 15px;
   margin: 0;
+}
+
+.dialog-close {
+  background: transparent;
+  border-color: transparent;
+  color: #5f5a52;
+  min-height: 30px;
+  padding: 0;
+  width: 30px;
+}
+
+.dialog-close:hover:not(:disabled) {
+  background: #f1efeb;
+  border-color: #d8d5cd;
+  color: #222;
 }
 
 .dialog-body {
