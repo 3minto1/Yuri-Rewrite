@@ -800,6 +800,7 @@ fn list_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<Vec<
     }
 }
 
+
 #[tauri::command]
 fn clear_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<(), String> {
     let conn = state.conn.lock().map_err(to_string)?;
@@ -5109,6 +5110,18 @@ async fn generate_text(
         generate_openai_compatible(client, profile, api_key, &system, &user, prefer_json_output)
             .await
     }?;
+    // When the model returns empty content but has reasoning (thinking / reasoning_content),
+    // try to extract the trailing JSON from the reasoning as the actual output text.
+    // This handles DeepSeek-family models that sometimes spend all tokens on reasoning tokens,
+    // leaving the content field empty while the real structured output sits at the end of reasoning.
+    if output.text.trim().is_empty() {
+        if let Some(ref reasoning) = output.reasoning {
+            if let Some(extracted) = extract_tailing_json_from_text(reasoning) {
+                output.text = extracted.to_string();
+            }
+        }
+    }
+
     output.input_chars = input_chars;
     output.output_chars = output.text.chars().count();
     output.elapsed_ms = started.elapsed().as_millis();
@@ -7410,6 +7423,26 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     }
     value
 }
+/// Extract the trailing JSON object or array from a text such as reasoning / thinking content.
+/// When a model puts all output into reasoning_content and leaves content empty, the actual
+/// structured output (review decision, analysis result, etc.) often appears as the last JSON block
+/// inside the reasoning text.
+fn extract_tailing_json_from_text(text: &str) -> Option<&str> {
+    // Find the last candidate '{' and '[' positions.
+    let last_brace = text.rfind('{');
+    let last_bracket = text.rfind('[');
+    // Try brace first (most review/analysis outputs are objects), then bracket.
+    let mut candidates = Vec::new();
+    if let Some(pos) = last_brace { candidates.push(pos); }
+    if let Some(pos) = last_bracket { candidates.push(pos); }
+    for start in candidates {
+        let candidate = &text[start..];
+        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
 
 fn normalize_jsonish(text: &str) -> String {
     text.trim()
@@ -7421,6 +7454,10 @@ fn normalize_jsonish(text: &str) -> String {
 }
 
 fn parse_jsonish_value(text: &str) -> Result<serde_json::Value, String> {
+if text.trim().is_empty() {
+    return Err("AI 返回了空响应正文（模型可能将所有 token 消耗在思维链 reasoning 中，content 字段为空白，且无法从 reasoning 中提取到有效的 JSON）".to_string());
+}
+
     let normalized = normalize_jsonish(text);
     match serde_json::from_str::<serde_json::Value>(&normalized) {
         Ok(value) => Ok(value),
@@ -8894,5 +8931,33 @@ mod tests {
         assert!(split.chapters[1]
             .original_text
             .contains("后记写到这里，也该是结束的时候了"));
+    }
+
+    #[test]
+    fn extract_tailing_json_from_reasoning_content() {
+        // Reasoning text with JSON object at the end
+        let reasoning = "审查分析：改写稿基本合格。输出JSON。{\n  \"approved\": true,\n  \"summary\": \"通过\"\n}";
+        let extracted = extract_tailing_json_from_text(reasoning)
+            .expect("should extract trailing JSON object");
+        let value: serde_json::Value =
+            serde_json::from_str(extracted).expect("extracted text must be valid JSON");
+        assert_eq!(value["approved"], true);
+        assert_eq!(value["summary"], "通过");
+
+        // No valid JSON anywhere should return None.
+        let plain = "这是一段普通的思考文字，不包含任何 JSON 结构。";
+        assert!(extract_tailing_json_from_text(plain).is_none());
+
+        // JSON array at the end.
+        let reasoning_array = "思考中...最终输出：[\n  {\"name\": \"萧炎\", \"gender\": \"male\"},\n  {\"name\": \"萧妍\", \"gender\": \"female\"}\n]";
+        let extracted_array = extract_tailing_json_from_text(reasoning_array)
+            .expect("should extract trailing JSON array");
+        let value_array: serde_json::Value =
+            serde_json::from_str(extracted_array).expect("extracted text must be valid JSON");
+        assert_eq!(value_array.as_array().unwrap().len(), 2);
+
+        // Empty text.
+        assert!(extract_tailing_json_from_text("").is_none());
+        assert!(extract_tailing_json_from_text("   ").is_none());
     }
 }
