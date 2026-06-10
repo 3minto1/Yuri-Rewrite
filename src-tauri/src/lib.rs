@@ -2493,7 +2493,25 @@ async fn generate_rewrite_shards(
                         {
                             Ok(parsed) => parsed,
                             Err(retry_error) => {
-                                return Err(format!("{}：{}", shard_label, retry_error));
+                                match recover_rewrite_shard_by_subdivision(
+                                    state,
+                                    novel_id,
+                                    profile,
+                                    api_key,
+                                    &shard,
+                                    canon_text,
+                                    settings,
+                                    &shard_label,
+                                    review_enabled,
+                                    &retry_error,
+                                )
+                                .await
+                                {
+                                    Ok(parsed) => parsed,
+                                    Err(recovery_error) => {
+                                        return Err(format!("{}：{}", shard_label, recovery_error));
+                                    }
+                                }
                             }
                         }
                     }
@@ -2522,6 +2540,168 @@ async fn generate_rewrite_shards(
         .into_iter()
         .flat_map(|(_, parsed)| parsed)
         .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_rewrite_shard_by_subdivision(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+    shard_label: &str,
+    review_enabled: bool,
+    original_error: &str,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let Some((left, right)) = split_chapters_for_rewrite_recovery(shard) else {
+        return Err(original_error.to_string());
+    };
+
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &profile.id,
+        "批次改写自动细分",
+        Some(shard_label),
+        "running",
+        &format!(
+            "原分片解析重试后仍失败，开始自动细分为更小分片重写。原错误：{}",
+            original_error
+        ),
+        None,
+        None,
+    )?;
+
+    let mut pending = std::collections::VecDeque::from([
+        (format!("{} · 自动细分 1", shard_label), left),
+        (format!("{} · 自动细分 2", shard_label), right),
+    ]);
+    let mut parsed = Vec::new();
+
+    while let Some((label, subshard)) = pending.pop_front() {
+        if let Some(status) = requested_auto_run_stop(state, novel_id)? {
+            return Err(status);
+        }
+
+        let batch_label = format_batch_label(&subshard);
+        let context = format!(
+            "{}\n\n自动细分重试：较大的改写分片无法稳定解析，当前只处理这个更小分片。必须完整输出当前分片内的全部章节，不要输出原大分片中的其他章节。",
+            format_shard_context(0, 1, 1, &batch_label, &subshard)
+        );
+        let prompt =
+            build_batch_rewrite_prompt_with_context(&subshard, canon_text, settings, &context);
+        let output = generate_text(
+            &state.client,
+            profile,
+            api_key,
+            "你是中文小说改写助手。当前是失败分片的自动细分重写，只输出当前输入章节的边界标记、标题和正文；每章必须保留原样章节开始和结束标记。",
+            &prompt,
+            false,
+        )
+        .await;
+
+        match output {
+            Ok(output) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次改写自动细分",
+                    Some(&label),
+                    "success",
+                    &format_model_log_content(&output, profile, Some(review_enabled)),
+                    output.reasoning.as_deref(),
+                    Some(&output.raw_response),
+                )?;
+
+                match parse_batch_rewrite_output(&output.text, &subshard) {
+                    Ok(mut subparsed) => parsed.append(&mut subparsed),
+                    Err(parse_error) => {
+                        append_ai_log(
+                            state,
+                            Some(novel_id),
+                            &profile.id,
+                            "批次改写自动细分解析",
+                            Some(&label),
+                            "error",
+                            &parse_error,
+                            output.reasoning.as_deref(),
+                            Some(&output.raw_response),
+                        )?;
+
+                        match retry_rewrite_shard_after_parse_error(
+                            state,
+                            novel_id,
+                            profile,
+                            api_key,
+                            &subshard,
+                            canon_text,
+                            settings,
+                            &context,
+                            &label,
+                            review_enabled,
+                            &parse_error,
+                            &output.text,
+                        )
+                        .await
+                        {
+                            Ok(mut retried) => parsed.append(&mut retried),
+                            Err(retry_error) => {
+                                if let Some((left, right)) =
+                                    split_chapters_for_rewrite_recovery(&subshard)
+                                {
+                                    pending.push_front((format!("{} · 继续细分 2", label), right));
+                                    pending.push_front((format!("{} · 继续细分 1", label), left));
+                                } else {
+                                    return Err(format!(
+                                        "自动细分到单章后仍无法解析：{}",
+                                        retry_error
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次改写自动细分",
+                    Some(&label),
+                    "error",
+                    &error,
+                    None,
+                    None,
+                )?;
+                return Err(format!("自动细分改写调用失败：{}", error));
+            }
+        }
+    }
+
+    parsed.sort_by_key(|rewrite| rewrite.index);
+    if parsed.len() == shard.len() {
+        Ok(parsed)
+    } else {
+        Err(format!(
+            "自动细分后章节数量不匹配：期望 {} 章，得到 {} 章。",
+            shard.len(),
+            parsed.len()
+        ))
+    }
+}
+
+fn split_chapters_for_rewrite_recovery(
+    chapters: &[Chapter],
+) -> Option<(Vec<Chapter>, Vec<Chapter>)> {
+    if chapters.len() <= 1 {
+        return None;
+    }
+    let mid = chapters.len().div_ceil(2);
+    Some((chapters[..mid].to_vec(), chapters[mid..].to_vec()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3782,7 +3962,10 @@ fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
         .find_iter(text)
         .filter(|mat| is_plausible_strict_heading_line(mat.as_str()))
         .collect::<Vec<_>>();
-    if !matches.is_empty() {
+    if matches
+        .iter()
+        .any(|mat| is_numbered_strict_chapter_heading(mat.as_str()))
+    {
         return matches;
     }
     let loose_heading_re = loose_numbered_chapter_heading_regex();
@@ -3791,7 +3974,28 @@ fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
         .filter(|mat| is_plausible_loose_numbered_heading_line(mat.as_str()))
         .collect::<Vec<_>>();
     if loose_numbered_headings_are_plausible(text, &loose_matches) {
-        loose_matches
+        let mut merged_matches = matches
+            .into_iter()
+            .filter(|mat| {
+                !is_loose_container_heading(mat.as_str())
+                    && !is_loose_metadata_heading(mat.as_str())
+            })
+            .chain(loose_matches)
+            .collect::<Vec<_>>();
+        merged_matches.sort_by_key(|mat| mat.start());
+        merged_matches
+            .into_iter()
+            .fold(Vec::new(), |mut deduped, mat| {
+                if deduped
+                    .last()
+                    .is_none_or(|last: &regex::Match<'_>| last.start() != mat.start())
+                {
+                    deduped.push(mat);
+                }
+                deduped
+            })
+    } else if !matches.is_empty() {
+        matches
     } else {
         Vec::new()
     }
@@ -3799,7 +4003,7 @@ fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
 
 fn chapter_heading_regex() -> Regex {
     Regex::new(
-        r#"(?m)^[\s\u{feff}　]*(?:={2,6}\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册夜案场弹折更][^=\r\n]{0,80}={2,6}|={2,6}\s*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)[^=\r\n]{0,80}={2,6}|[【〔［「『《（(\[]?\s*(?:正文\s*)?第\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+\s*[章节回卷部集篇话幕节页季段册夜案场弹折更]\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80}|(?:卷|篇|部|章|回|幕|册|话|节|季|段|夜|案|场|弹|折|更)\s*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[\s:：、.．\-—_·|]*.{0,80}|[上中下前后终外]\s*(?:卷|篇|部|章|册)[\s:：、.．\-—_·|]*.{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)\s*[0-9０-９IVXLCDMivxlcdm]+[\s:：、.．\-—_·|]*.{0,80}|[【〔［「『《（(\[]?\s*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)\s*[】〕］」』》）)\]]?[\s:：、.．\-—_·|]*.{0,80})[\s　]*$"#,
+        r#"(?m)^[\s\u{feff}　]*(?:={2,6}[ \t　]*(?:正文[ \t　]*)?第[ \t　]*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[ \t　]*[章节回卷部集篇话幕节页季段册夜案场弹折更][^=\r\n]{0,80}={2,6}|={2,6}[ \t　]*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)[^=\r\n]{0,80}={2,6}|[【〔［「『《（(\[]?[ \t　]*(?:正文[ \t　]*)?第[ \t　]*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[ \t　]*[章节回卷部集篇话幕节页季段册夜案场弹折更][ \t　]*[】〕］」』》）)\]]?[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|(?:卷|篇|部|章|回|幕|册|节)[ \t　]*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|[上中下前后终外][ \t　]*(?:卷|篇|部|章|册)[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)[ \t　]*[0-9０-９IVXLCDMivxlcdm]+[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|[【〔［「『《（(\[]?[ \t　]*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)[ \t　]*[】〕］」』》）)\]]?[ \t　:：、.．\-—_·|]*[^\r\n]{0,80})[\t 　]*\r?$"#,
     )
     .expect("valid chapter regex")
 }
@@ -3963,9 +4167,84 @@ fn special_heading_content_looks_like_body(compact: &str) -> bool {
     false
 }
 
+fn is_numbered_strict_chapter_heading(line: &str) -> bool {
+    let compact = compact_heading_line(line);
+    let numbered_re = Regex::new(
+        r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[章节回集话幕节页季段夜案场弹折更]"#,
+    )
+    .expect("valid numbered strict chapter regex");
+    numbered_re.is_match(&compact)
+        || compact.starts_with("Chapter")
+        || compact.starts_with("CHAPTER")
+        || compact.starts_with("chapter")
+        || compact.starts_with("Chap")
+        || compact.starts_with("CH.")
+        || compact.starts_with("ch.")
+        || compact.starts_with("Section")
+        || compact.starts_with("SECTION")
+        || compact.starts_with("section")
+        || compact.starts_with("Part")
+        || compact.starts_with("PART")
+        || compact.starts_with("part")
+        || compact.starts_with("Episode")
+        || compact.starts_with("EPISODE")
+        || compact.starts_with("episode")
+        || compact.starts_with("No.")
+        || compact.starts_with("NO.")
+        || compact.starts_with("no.")
+}
+
+fn is_loose_container_heading(line: &str) -> bool {
+    let compact = compact_heading_line(line);
+    let container_re = Regex::new(
+        r#"^(?:第?[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[卷部]|[卷部][0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+|[上中下前后终外][卷部])"#,
+    )
+    .expect("valid loose container heading regex");
+    container_re.is_match(&compact)
+}
+
+fn is_loose_metadata_heading(line: &str) -> bool {
+    matches!(
+        compact_heading_line(line).as_str(),
+        "文案" | "作品相关" | "上架感言" | "完本感言"
+    )
+}
+
+fn compact_heading_line(line: &str) -> String {
+    line.trim_matches(|ch: char| {
+        ch.is_whitespace()
+            || ch == '\u{feff}'
+            || ch == '　'
+            || ch == '='
+            || matches!(
+                ch,
+                '【' | '】'
+                    | '〔'
+                    | '〕'
+                    | '［'
+                    | '］'
+                    | '「'
+                    | '」'
+                    | '『'
+                    | '』'
+                    | '《'
+                    | '》'
+                    | '（'
+                    | '）'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+            )
+    })
+    .chars()
+    .filter(|ch| !ch.is_whitespace())
+    .collect()
+}
+
 fn loose_numbered_chapter_heading_regex() -> Regex {
     Regex::new(
-        r#"(?m)^[\s\u{feff}　]*(?:[（(]?\s*)?(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})\s*(?:[）)]\s*)?(?:[ \t　]+|[、.．:：\-—_·|]\s*)[^\r\n]{1,60}[\s　]*$"#,
+        r#"(?m)^[ \t\u{feff}　]*(?:[（(]?[ \t　]*)?(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})[ \t　]*(?:[）)][ \t　]*)?(?:[ \t　]+|[、.．:：\-—_·|][ \t　]*)[^\r\n]{1,60}[ \t　]*\r?$"#,
     )
     .expect("valid loose numbered chapter regex")
 }
@@ -3981,10 +4260,42 @@ fn loose_numbered_headings_are_plausible(text: &str, matches: &[regex::Match<'_>
     if ordinals.len() != matches.len() || ordinals.first().is_none_or(|value| *value > 3) {
         return false;
     }
-    if !ordinals.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+    if !loose_numbered_ordinals_are_plausible(&ordinals) {
         return false;
     }
     loose_numbered_heading_bodies_are_plausible(text, matches)
+}
+
+fn loose_numbered_ordinals_are_plausible(ordinals: &[u64]) -> bool {
+    let Some(first) = ordinals.first().copied() else {
+        return false;
+    };
+    if first > 3 {
+        return false;
+    }
+
+    let allowed_glitches = (ordinals.len() / 20).max(2);
+    let mut glitches = 0usize;
+    let mut expected = first;
+    for ordinal in ordinals {
+        if *ordinal == expected {
+            expected += 1;
+        } else if *ordinal < expected {
+            glitches += 1;
+            if glitches > allowed_glitches {
+                return false;
+            }
+        } else if *ordinal == expected + 1 {
+            glitches += 1;
+            if glitches > allowed_glitches {
+                return false;
+            }
+            expected = *ordinal + 1;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_plausible_loose_numbered_heading_line(line: &str) -> bool {
@@ -3995,10 +4306,7 @@ fn is_plausible_loose_numbered_heading_line(line: &str) -> bool {
     if title.is_empty() || title.chars().count() > 40 {
         return false;
     }
-    if title
-        .chars()
-        .any(|ch| matches!(ch, '，' | '。' | '！' | '？' | '；' | ';'))
-    {
+    if loose_numbered_title_looks_like_body_sentence(line, title) {
         return false;
     }
     if ["列表", "列表项", "选项", "步骤", "序号"]
@@ -4025,6 +4333,29 @@ fn is_plausible_loose_numbered_heading_line(line: &str) -> bool {
         })
         .count();
     symbol_count * 2 <= title.chars().count()
+}
+
+fn loose_numbered_title_looks_like_body_sentence(line: &str, title: &str) -> bool {
+    let trimmed =
+        line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　');
+    let starts_with_chinese_ordinal = trimmed.chars().next().is_some_and(|ch| {
+        "零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O".contains(ch)
+    });
+    if starts_with_chinese_ordinal
+        && title
+            .chars()
+            .next()
+            .is_some_and(|ch| "零〇一二两三四五六七八九十百千万".contains(ch))
+        && title.contains('岁')
+    {
+        return true;
+    }
+
+    let punctuation_count = title
+        .chars()
+        .filter(|ch| matches!(ch, '，' | '。' | '！' | '？' | '；' | ';'))
+        .count();
+    punctuation_count >= 2 && title.chars().count() > 24
 }
 
 fn loose_numbered_heading_bodies_are_plausible(text: &str, matches: &[regex::Match<'_>]) -> bool {
@@ -4058,7 +4389,7 @@ fn loose_numbered_heading_title(line: &str) -> Option<&str> {
 
 fn loose_numbered_heading_ordinal_prefix_regex() -> Regex {
     Regex::new(
-        r#"^[（(]?\s*(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})\s*[）)]?\s*(?:[、.．:：\-—_·|]|\s+)"#,
+        r#"^[（(]?[ \t　]*(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})[ \t　]*[）)]?[ \t　]*(?:[、.．:：\-—_·|]|[ \t　]+)"#,
     )
     .expect("valid loose numbered heading ordinal prefix regex")
 }
@@ -4067,7 +4398,7 @@ fn parse_loose_numbered_heading_ordinal(line: &str) -> Option<u64> {
     let trimmed =
         line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　');
     let ordinal_re = Regex::new(
-        r#"^[（(]?\s*([0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})"#,
+        r#"^[（(]?[ \t　]*([0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})"#,
     )
     .expect("valid loose numbered heading ordinal parser regex");
     let token = ordinal_re.captures(trimmed)?.get(1)?.as_str();
@@ -7388,6 +7719,25 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_recovery_split_halves_large_failed_shards() {
+        let chapters = (1..=10)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
+            .collect::<Vec<_>>();
+
+        let (left, right) = split_chapters_for_rewrite_recovery(&chapters).expect("split ten");
+        assert_eq!(left.len(), 5);
+        assert_eq!(right.len(), 5);
+        assert_eq!(left[0].index, 1);
+        assert_eq!(right[0].index, 6);
+
+        let (left, right) =
+            split_chapters_for_rewrite_recovery(&chapters[..3]).expect("split three");
+        assert_eq!(left.len(), 2);
+        assert_eq!(right.len(), 1);
+        assert!(split_chapters_for_rewrite_recovery(&chapters[..1]).is_none());
+    }
+
+    #[test]
     fn shard_context_limits_model_to_current_shard_chapters() {
         let chapters = (25..=27)
             .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
@@ -7825,6 +8175,17 @@ mod tests {
     }
 
     #[test]
+    fn chapter_heading_regex_handles_windows_crlf_lines() {
+        let text = "第1章 陨落的天才\r\n这里是第一章正文。\r\n第2章 斗气大陆\r\n这里是第二章正文。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 2);
+        assert_eq!(split.chapters[0].title, "第1章 陨落的天才");
+        assert_eq!(split.chapters[1].title, "第2章 斗气大陆");
+    }
+
+    #[test]
     fn strict_chapter_headings_reject_loose_numbers_and_pure_symbols() {
         let heading_re = chapter_heading_regex();
         for title in [
@@ -7862,6 +8223,121 @@ mod tests {
         assert_eq!(split.chapters[0].title, "001 初遇");
         assert_eq!(split.chapters[1].title, "002 再会");
         assert_eq!(split.chapters[2].title, "003 终局");
+    }
+
+    #[test]
+    fn loose_numbered_headings_allow_punctuation_inside_titles() {
+        let text = "1、遇事不决，量子力学\n这里是第一章正文，章节内容足够完整，不是普通列表项。\n2、巨型boss？更兴奋了\n这里是第二章正文，剧情继续推进并保持较长正文。\n3、不要完美，要夸张。\n这里是第三章正文，继续展开人物行动和场景变化。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 3);
+        assert_eq!(split.chapters[0].title, "1、遇事不决，量子力学");
+        assert_eq!(split.chapters[1].title, "2、巨型boss？更兴奋了");
+        assert_eq!(split.chapters[2].title, "3、不要完美，要夸张。");
+    }
+
+    #[test]
+    fn loose_numbered_headings_handle_windows_crlf_lines() {
+        let text = "简介：\r\n这里是简介，可能包含主角名字。\r\n1、丧尸娘与不死美人的娇躯\r\n这里是第一章正文，章节内容足够完整，不是普通列表项。\r\n2、身为丧尸怎么能不吃人呢\r\n这里是第二章正文，剧情继续推进并保持较长正文。\r\n3、身材真是极品\r\n这里是第三章正文，继续展开人物行动和场景变化。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 4);
+        assert_eq!(split.chapters[0].title, "简介：");
+        assert_eq!(split.chapters[1].title, "1、丧尸娘与不死美人的娇躯");
+        assert_eq!(split.chapters[2].title, "2、身为丧尸怎么能不吃人呢");
+    }
+
+    #[test]
+    fn loose_numbered_headings_are_used_when_only_volume_headings_are_strict() {
+        let text = "第一卷\n1、丧尸娘与不死美人的娇躯\n这里是第一章正文，主角醒来后确认环境和身份，章节内容足够完整。\n2、身为丧尸怎么能不吃人呢\n这里是第二章正文，剧情继续推进，标题使用纯数字顿号格式。\n3、身材真是极品\n这里是第三章正文，继续展开人物行动和场景变化。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 3);
+        assert_eq!(split.chapters[0].title, "1、丧尸娘与不死美人的娇躯");
+        assert_eq!(split.chapters[1].title, "2、身为丧尸怎么能不吃人呢");
+        assert_eq!(split.chapters[2].title, "3、身材真是极品");
+    }
+
+    #[test]
+    fn loose_numbered_headings_override_intro_volume_and_prose_like_special_matches() {
+        let text = "简介：\n【变身+丧尸娘+系统+末世+自恋向】\n第一卷\n1、丧尸娘与不死美人的娇躯\n这里是第一章正文，主角醒来后确认环境和身份，章节内容足够完整。\n2、身为丧尸怎么能不吃人呢\n这里是第二章正文，剧情继续推进，标题使用纯数字顿号格式。\n上架感言\n看到评论区有读者在关心作者的精神状态，作者表示自己状态很好。\n3、身材真是极品\n这里是第三章正文，继续展开人物行动和场景变化。\n　　话一落音，只见手机屏幕上的内容就投影在了空气中，分辨率精细无比。\n4、比人类更加高等的生物\n这里是第四章正文，继续展开人物行动和场景变化。\n5、一分饱也算饱\n这里是第五章正文，继续展开人物行动和场景变化。\n6、真长舌妇\n这里是第六章正文，继续展开人物行动和场景变化。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        let titles = split
+            .chapters
+            .iter()
+            .map(|chapter| chapter.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(split.chapters.len(), 7, "{titles:?}");
+        assert_eq!(split.chapters[0].title, "简介：");
+        assert!(split.chapters[0].original_text.contains("丧尸娘"));
+        assert_eq!(split.chapters[1].title, "1、丧尸娘与不死美人的娇躯");
+        assert_eq!(split.chapters[2].title, "2、身为丧尸怎么能不吃人呢");
+        assert!(split.chapters[2].original_text.contains("上架感言"));
+        assert!(split.chapters[3].original_text.contains("话一落音"));
+        assert_eq!(split.chapters[4].title, "4、比人类更加高等的生物");
+    }
+
+    #[test]
+    fn loose_numbered_headings_allow_small_numbering_typos() {
+        let text = "1、开局\n这里是第一章正文，章节内容足够完整，不是普通编号列表。\n2、推进\n这里是第二章正文，剧情继续推进并保持较长正文。\n3、转折\n这里是第三章正文，继续展开人物行动和场景变化。\n3、编号笔误\n这里是第四章正文，但是标题编号误写成了三，仍然应作为章节。\n5、收束\n这里是第五章正文，前文线索继续回收并形成完整段落。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 5);
+        assert_eq!(split.chapters[3].title, "3、编号笔误");
+        assert_eq!(split.chapters[4].title, "5、收束");
+    }
+
+    #[test]
+    fn loose_numbered_headings_allow_single_digit_typo_inside_long_run() {
+        let mut text = String::new();
+        for idx in 1..=112 {
+            let shown = if idx == 109 { 9 } else { idx };
+            text.push_str(&format!("{shown}、第{idx}章标题\n"));
+            text.push_str("这里是章节正文，内容长度足够说明它不是普通列表项，剧情持续推进。\n");
+        }
+        let split = split_chapters("novel-1", &text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 112);
+        assert_eq!(split.chapters[108].title, "9、第109章标题");
+        assert_eq!(split.chapters[109].title, "110、第110章标题");
+    }
+
+    #[test]
+    fn loose_numbered_headings_handle_long_run_with_real_world_numbering_glitches() {
+        let mut text =
+            String::from("简介：\n这里是简介，可能包含主角名字，也应该进入改写流程。\n第一卷\n");
+        for idx in 1..=441 {
+            let shown = match idx {
+                65 => 64,
+                109 => 9,
+                126 | 135 => continue,
+                435 => 434,
+                _ => idx,
+            };
+            text.push_str(&format!("{shown}、第{idx}章标题\n"));
+            text.push_str("这里是章节正文，内容长度足够说明它不是普通列表项，剧情持续推进。\n");
+        }
+        let split = split_chapters("novel-1", &text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters[0].title, "简介：");
+        assert_eq!(split.chapters[1].title, "1、第1章标题");
+        assert_eq!(split.chapters[65].title, "64、第65章标题");
+        assert!(split
+            .chapters
+            .iter()
+            .any(|chapter| chapter.title == "9、第109章标题"));
+        assert_eq!(
+            split.chapters.last().map(|chapter| chapter.title.as_str()),
+            Some("441、第441章标题")
+        );
     }
 
     #[test]
