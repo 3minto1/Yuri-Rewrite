@@ -944,6 +944,10 @@ pre {
 
 .model-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .form-full {
@@ -1562,4 +1566,17 @@ label {
   to {
     transform: rotate(360deg);
   }
+}
+fieldset.form-grid {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.credential-warning {
+  display: block;
+  margin-top: 6px;
+  color: #a85f00;
+  line-height: 1.45;
 }

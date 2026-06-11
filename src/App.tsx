@@ -1,5 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -27,6 +25,8 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invokeCommand as invoke } from "./tauriApi";
+import { type AutoRunProgress, useAutoRunProgress } from "./useAutoRunProgress";
 
 type Novel = {
   id: string;
@@ -96,6 +96,7 @@ type ModelProfile = {
   temperature: number;
   thinking_mode: "auto" | "off" | "on";
   has_api_key: boolean;
+  api_key_storage: "system" | "database_fallback" | "none";
   updated_at: string;
 };
 
@@ -383,6 +384,9 @@ export default function App() {
   const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
   const busyRef = useRef("");
   const importInProgressRef = useRef(false);
+  const processingTaskActive =
+    ["analysis", "rewrite", "auto-batch", "auto"].includes(busy) || autoRunState !== "idle";
+  const processingTaskActiveRef = useRef(processingTaskActive);
 
   const selectedChapter = useMemo(
     () => detail?.chapters.find((chapter) => chapter.id === selectedChapterId) ?? detail?.chapters[0],
@@ -392,6 +396,10 @@ export default function App() {
   const selectedBatch = useMemo(
     () => detail?.batches.find((batch) => batch.id === selectedBatchId) ?? detail?.batches[0],
     [detail, selectedBatchId]
+  );
+  const selectedProfile = useMemo(
+    () => profiles.find((profile) => profile.id === selectedProfileId),
+    [profiles, selectedProfileId]
   );
 
   const autoProgressPercent = useMemo(() => {
@@ -424,6 +432,10 @@ export default function App() {
   }, [busy]);
 
   useEffect(() => {
+    processingTaskActiveRef.current = processingTaskActive;
+  }, [processingTaskActive]);
+
+  useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
 
@@ -445,7 +457,7 @@ export default function App() {
         showNotice("请拖入 TXT 小说文件。");
         return;
       }
-      if (busyRef.current) {
+      if (busyRef.current || processingTaskActiveRef.current) {
         showNotice("当前有任务正在进行，请稍后再导入。");
         return;
       }
@@ -467,33 +479,18 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    void listen<Job>("job-progress", (event) => {
-      if (event.payload.job_type !== "auto") return;
-      setJob(event.payload);
-      if (event.payload.status === "running") {
+  useAutoRunProgress(detail?.novel.id ?? null, (progress: AutoRunProgress) => {
+      setJob(progress);
+      if (progress.status === "running") {
         setAutoRunState("running");
-      } else if (event.payload.status === "paused") {
+      } else if (progress.status === "paused") {
         setAutoRunState("paused");
-      } else if (event.payload.status === "pausing" || event.payload.status === "terminating") {
+      } else if (progress.status === "pausing" || progress.status === "terminating") {
         setAutoRunState("stopping");
-      } else if (["completed", "failed", "terminated"].includes(event.payload.status)) {
+      } else if (["completed", "failed", "terminated"].includes(progress.status)) {
         setAutoRunState("idle");
       }
-    }).then((handler) => {
-      if (cancelled) {
-        handler();
-      } else {
-        unlisten = handler;
-      }
-    });
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-  }, []);
+  });
 
   useEffect(() => {
     if (detectedModelSuggestions.length === 0) setOpenModelSuggestions(false);
@@ -540,7 +537,7 @@ export default function App() {
   }, [activeView, settingsDialog]);
 
   useEffect(() => {
-    const profile = profiles.find((item) => item.id === selectedProfileId);
+    const profile = selectedProfile;
     setModelDiagnosis(null);
     if (!profile) return;
     setProfileDraft({
@@ -553,7 +550,7 @@ export default function App() {
       thinking_mode: profile.thinking_mode === "off" || profile.thinking_mode === "on" ? profile.thinking_mode : "auto",
       api_key: profile.has_api_key ? savedApiKeyMask : ""
     });
-  }, [profiles, selectedProfileId]);
+  }, [selectedProfile]);
 
   useEffect(() => {
     if (originalCompareRef.current) originalCompareRef.current.scrollTop = 0;
@@ -599,6 +596,10 @@ export default function App() {
   }
 
   async function loadNovel(novelId: string, options: { preserveBatchId?: string; preserveChapterId?: string } = {}) {
+    if (processingTaskActive && detail?.novel.id !== novelId) {
+      showNotice("当前任务运行或暂停中，不能切换小说。请先完成或终止任务。");
+      return;
+    }
     const next = await invoke<NovelDetail>("get_novel_detail", { novelId });
     setDetail(next);
     const nextChapterId =
@@ -753,6 +754,10 @@ export default function App() {
   }
 
   async function deleteNovel(novel: Novel) {
+    if (processingTaskActive) {
+      showNotice("当前任务运行或暂停中，不能删除小说。");
+      return;
+    }
     if (!window.confirm(`删除《${novel.title}》及其本地分析、改写和日志数据？`)) return;
     setBusy("delete-novel");
     setNotice("");
@@ -814,6 +819,10 @@ export default function App() {
   }
 
   async function deleteSelectedModelProfile() {
+    if (processingTaskActive) {
+      showNotice("当前任务运行或暂停中，不能删除模型配置。");
+      return;
+    }
     const profile = profiles.find((item) => item.id === selectedProfileId);
     if (!profile) {
       showNotice("请先选择一个模型配置。");
@@ -1353,7 +1362,7 @@ export default function App() {
           </div>
         </button>
 
-        <button className="primary-action" onClick={importTxt} disabled={busy === "import"}>
+        <button className="primary-action" onClick={importTxt} disabled={busy === "import" || processingTaskActive}>
           {busy === "import" ? <Loader2 className="spin" size={18} /> : <FilePlus2 size={18} />}
           导入 TXT
         </button>
@@ -1366,6 +1375,7 @@ export default function App() {
                 <button
                   className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"}
                   onClick={() => loadNovel(novel.id)}
+                  disabled={processingTaskActive && detail?.novel.id !== novel.id}
                 >
                   <BookOpen size={16} />
                   <span>{novel.title}</span>
@@ -1374,12 +1384,13 @@ export default function App() {
                   className="icon-button menu-trigger"
                   aria-label={`打开《${novel.title}》菜单`}
                   onClick={() => setOpenNovelMenuId(openNovelMenuId === novel.id ? "" : novel.id)}
+                  disabled={processingTaskActive}
                 >
                   <MoreHorizontal size={17} />
                 </button>
                 {openNovelMenuId === novel.id && (
                   <div className="context-menu">
-                    <button onClick={() => deleteNovel(novel)} disabled={busy === "delete-novel"}>
+                    <button onClick={() => deleteNovel(novel)} disabled={busy === "delete-novel" || processingTaskActive}>
                       <Trash2 size={15} />
                       删除当前小说
                     </button>
@@ -1394,7 +1405,11 @@ export default function App() {
         <div className="side-section">
           <div className="section-label">模型</div>
           <div className="model-row">
-            <select value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}>
+            <select
+              value={selectedProfileId}
+              onChange={(event) => setSelectedProfileId(event.target.value)}
+              disabled={processingTaskActive}
+            >
               <option value="">未选择</option>
               {profiles.map((profile) => (
                 <option key={profile.id} value={profile.id}>
@@ -1406,13 +1421,13 @@ export default function App() {
               className="icon-button menu-trigger"
               aria-label="打开模型菜单"
               onClick={() => setOpenModelMenu(!openModelMenu)}
-              disabled={!selectedProfileId}
+              disabled={!selectedProfileId || processingTaskActive}
             >
               <MoreHorizontal size={17} />
             </button>
             {openModelMenu && selectedProfileId && (
               <div className="context-menu">
-                <button onClick={deleteSelectedModelProfile} disabled={busy === "delete-model"}>
+                <button onClick={deleteSelectedModelProfile} disabled={busy === "delete-model" || processingTaskActive}>
                   <Trash2 size={15} />
                   删除当前模型
                 </button>
@@ -1656,7 +1671,7 @@ export default function App() {
                   <ArrowLeft size={16} />
                   返回
                 </button>
-                <button onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings"}>
+                <button onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings" || processingTaskActive}>
                   {busy === "novel-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                   保存
                 </button>
@@ -1665,7 +1680,7 @@ export default function App() {
             {detail ? (
               <section className="settings-section novel-settings-section">
                 <h3>改写基础规则</h3>
-                <div className="form-grid">
+                <fieldset className="form-grid" disabled={processingTaskActive}>
                   <label>
                     主角姓名（必填）
                     <input
@@ -1721,7 +1736,7 @@ export default function App() {
                     </select>
                   </label>
                   {renderRewriteModeControl()}
-                </div>
+                </fieldset>
                 <p className="settings-note">
                   分析和改写会自动附带这些设定。主角姓名会按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉。
                 </p>
@@ -1741,7 +1756,7 @@ export default function App() {
                   <ArrowLeft size={16} />
                   返回
                 </button>
-                <button onClick={saveCoreSettings} disabled={busy === "core-settings"}>
+                <button onClick={saveCoreSettings} disabled={busy === "core-settings" || processingTaskActive}>
                   {busy === "core-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                   保存
                 </button>
@@ -1754,6 +1769,7 @@ export default function App() {
               </p>
               <textarea
                 className="core-settings-input"
+                disabled={processingTaskActive}
                 value={corePromptDraft}
                 onChange={(event) => setCorePromptDraft(event.target.value)}
                 placeholder="例如：保持原文轻小说风格，句子自然流畅；减少机械替换感；动作描写细腻但不过度堆砌；对白保留角色原本语气；百合互动要循序渐进，不要突然强行亲密。"
@@ -1782,11 +1798,11 @@ export default function App() {
               <h3>导出目录</h3>
               <div className="setting-row">
                 <input readOnly value={settings.export_dir || "默认应用数据目录"} />
-                <button onClick={chooseExportDir} disabled={busy === "choose-export-dir"}>
+                <button onClick={chooseExportDir} disabled={busy === "choose-export-dir" || processingTaskActive}>
                   <FolderOpen size={16} />
                   选择目录
                 </button>
-                <button onClick={clearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir"}>
+                <button onClick={clearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir" || processingTaskActive}>
                   恢复默认
                 </button>
               </div>
@@ -1805,7 +1821,7 @@ export default function App() {
                 <button
                   className={settings.review_enabled ? "setting-switch active" : "setting-switch"}
                   onClick={toggleReviewEnabled}
-                  disabled={busy === "review-setting"}
+                  disabled={busy === "review-setting" || processingTaskActive}
                   title="开启复检时AI改写完成后会检查一遍是否有疏漏，会增加改写时间"
                 >
                   {settings.review_enabled ? "开启" : "关闭"}
@@ -1816,7 +1832,7 @@ export default function App() {
                 <select
                   value={settings.review_profile_id ?? ""}
                   onChange={(event) => setReviewProfileId(event.target.value)}
-                  disabled={busy === "review-profile-setting"}
+                  disabled={busy === "review-profile-setting" || processingTaskActive}
                   title="选择第二个 AI 作为审查专家；留空则使用当前改写模型审查"
                 >
                   <option value="">使用当前改写模型审查</option>
@@ -1843,7 +1859,7 @@ export default function App() {
                       className={(settings.rewrite_parallelism ?? 6) === value ? "active" : ""}
                       aria-checked={(settings.rewrite_parallelism ?? 6) === value}
                       role="radio"
-                      disabled={busy === "parallelism-setting"}
+                      disabled={busy === "parallelism-setting" || processingTaskActive}
                       onClick={() => setRewriteParallelism(value)}
                     >
                       {value === 1 ? "不并发" : value}
@@ -1993,22 +2009,22 @@ export default function App() {
               <div className="panel-heading">
                 <h2>模型配置</h2>
                 <div className="panel-actions">
-                  <button onClick={createNewModelProfile} disabled={busy !== ""}>
+                  <button onClick={createNewModelProfile} disabled={busy !== "" || processingTaskActive}>
                     <FilePlus2 size={16} />
                     新建
                   </button>
-                  <button onClick={diagnoseProfile} disabled={!selectedProfileId || busy === "diagnose"}>
+                  <button onClick={diagnoseProfile} disabled={!selectedProfileId || busy === "diagnose" || processingTaskActive}>
                     {busy === "diagnose" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
                     诊断模型
                   </button>
-                  <button onClick={saveProfile} disabled={busy === "profile"}>
+                  <button onClick={saveProfile} disabled={busy === "profile" || processingTaskActive}>
                     {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                     保存
                   </button>
                 </div>
               </div>
               <div className="model-scroll">
-                <div className="form-grid model-form-grid">
+                <fieldset className="form-grid model-form-grid" disabled={processingTaskActive}>
                   <label>
                     名称
                     <input value={profileDraft.name} onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })} />
@@ -2133,15 +2149,20 @@ export default function App() {
                       }}
                       onChange={(event) => setProfileDraft({ ...profileDraft, api_key: event.target.value })}
                     />
+                    {selectedProfile?.api_key_storage === "database_fallback" && (
+                      <small className="credential-warning">
+                        系统凭据库不可用，API Key 当前以本地数据库兼容模式保存。
+                      </small>
+                    )}
                   </label>
-                </div>
+                </fieldset>
               </div>
             </section>
 
             <section className="panel canon-panel">
               <div className="panel-heading">
                 <h2>一致性资产</h2>
-                <button onClick={saveCanonAssets} disabled={!detail || busy === "canon"}>
+                <button onClick={saveCanonAssets} disabled={!detail || busy === "canon" || processingTaskActive}>
                   {busy === "canon" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                   保存
                 </button>
@@ -2150,7 +2171,12 @@ export default function App() {
                 {detail?.canon_assets.map((asset) => (
                   <label key={asset.kind}>
                     {asset.kind}
-                    <textarea value={asset.content} onChange={(event) => updateCanon(asset.kind, event.target.value)} placeholder="分析后会自动生成，也可以手动补充。" />
+                    <textarea
+                      value={asset.content}
+                      onChange={(event) => updateCanon(asset.kind, event.target.value)}
+                      placeholder="分析后会自动生成，也可以手动补充。"
+                      disabled={processingTaskActive}
+                    />
                   </label>
                 ))}
                 {!detail && <p className="muted">导入小说后显示人物卡、关系、地点、伏笔和术语表。</p>}
@@ -2202,7 +2228,7 @@ export default function App() {
                   </button>
                 </header>
                 <div className="dialog-body">
-                  <div className="form-grid">
+                  <fieldset className="form-grid" disabled={processingTaskActive}>
                     <label>
                       主角姓名（必填）
                       <input
@@ -2263,13 +2289,13 @@ export default function App() {
                       </select>
                     </label>
                     {renderRewriteModeControl()}
-                  </div>
+                  </fieldset>
                 </div>
                 <footer className="dialog-actions">
-                  <button onClick={() => setSettingsDialog("advanced")} disabled={busy === "novel-settings"}>
+                  <button onClick={() => setSettingsDialog("advanced")} disabled={busy === "novel-settings" || processingTaskActive}>
                     高级设定
                   </button>
-                  <button className="dialog-primary" onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings"}>
+                  <button className="dialog-primary" onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings" || processingTaskActive}>
                     确定
                   </button>
                 </footer>

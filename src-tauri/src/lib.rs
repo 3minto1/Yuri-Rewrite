@@ -1,5 +1,13 @@
+mod credentials;
+mod model_support;
+mod task_control;
+
 use chrono::Utc;
+use credentials::{
+    classify_api_key_storage, delete_api_key_if_present, read_api_key, write_api_key, ApiKeyStorage,
+};
 use encoding_rs::{GBK, UTF_8};
+use model_support::{parse_gemini_parts, ModelResponseError};
 use regex::Regex;
 use reqwest::Client;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -13,10 +21,12 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
+use task_control::{
+    should_terminate_paused_run, ActiveTaskRegistry, AutoRunCleanup, AutoRunControl,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-const KEYRING_SERVICE: &str = "YuriRewrite";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/3minto1/Yuri-Rewrite";
 const GITHUB_LATEST_RELEASE_URL: &str = "https://github.com/3minto1/Yuri-Rewrite/releases/latest";
 const AUTO_RUN_PAUSED: &str = "__YURI_AUTO_RUN_PAUSED__";
@@ -28,13 +38,7 @@ struct AppState {
     data_dir: PathBuf,
     app_dir: PathBuf,
     auto_runs: Mutex<HashMap<String, AutoRunControl>>,
-}
-
-#[derive(Debug, Clone)]
-struct AutoRunControl {
-    status: String,
-    completed_batches: i64,
-    job_id: Option<String>,
+    active_tasks: ActiveTaskRegistry,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -125,6 +129,7 @@ struct ModelProfile {
     temperature: f64,
     thinking_mode: String,
     has_api_key: bool,
+    api_key_storage: String,
     updated_at: String,
 }
 
@@ -305,14 +310,20 @@ pub fn run() {
                 .unwrap_or_else(|| data_dir.clone());
             fs::create_dir_all(&data_dir)?;
             fs::create_dir_all(data_dir.join("exports"))?;
+            cleanup_deletion_trash(&data_dir);
             let conn = Connection::open(data_dir.join("yuri-rewrite.sqlite3"))?;
             init_db(&conn)?;
+            let client = Client::builder()
+                .connect_timeout(Duration::from_secs(20))
+                .timeout(Duration::from_secs(15 * 60))
+                .build()?;
             app.manage(AppState {
                 conn: Mutex::new(conn),
-                client: Client::new(),
+                client,
                 data_dir,
                 app_dir,
                 auto_runs: Mutex::new(HashMap::new()),
+                active_tasks: ActiveTaskRegistry::default(),
             });
             Ok(())
         })
@@ -522,9 +533,21 @@ fn migrate_api_keys_to_keyring(conn: &Connection) -> rusqlite::Result<()> {
     drop(stmt);
 
     for (profile_id, api_key) in rows {
-        let _ = write_api_key(&profile_id, &api_key);
+        if write_api_key(&profile_id, &api_key).is_ok() {
+            conn.execute(
+                "UPDATE model_profiles SET api_key = NULL WHERE id = ?1",
+                params![profile_id],
+            )?;
+        }
     }
     Ok(())
+}
+
+fn cleanup_deletion_trash(data_dir: &Path) {
+    let trash_dir = data_dir.join("deletion-trash");
+    if trash_dir.exists() {
+        let _ = fs::remove_dir_all(&trash_dir);
+    }
 }
 
 #[tauri::command]
@@ -618,38 +641,78 @@ fn get_novel_detail(novel_id: String, state: State<AppState>) -> Result<NovelDet
 
 #[tauri::command]
 fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(), String> {
+    if state.active_tasks.novel_is_active(&novel_id)?
+        || state
+            .auto_runs
+            .lock()
+            .map_err(to_string)?
+            .contains_key(&novel_id)
+    {
+        return Err("当前小说有任务正在运行，请先暂停或终止任务后再删除。".to_string());
+    }
     let mut conn = state.conn.lock().map_err(to_string)?;
     let batch_dir = state.data_dir.join("chapter_batches").join(&novel_id);
-    let tx = conn.transaction().map_err(to_string)?;
-    tx.execute(
-        "DELETE FROM novel_settings WHERE novel_id = ?1",
-        params![novel_id],
-    )
-    .map_err(to_string)?;
-    tx.execute(
-        "DELETE FROM chapter_batches WHERE novel_id = ?1",
-        params![novel_id],
-    )
-    .map_err(to_string)?;
-    tx.execute(
-        "DELETE FROM chapters WHERE novel_id = ?1",
-        params![novel_id],
-    )
-    .map_err(to_string)?;
-    tx.execute(
-        "DELETE FROM canon_assets WHERE novel_id = ?1",
-        params![novel_id],
-    )
-    .map_err(to_string)?;
-    tx.execute("DELETE FROM jobs WHERE novel_id = ?1", params![novel_id])
+    let trash_root = state.data_dir.join("deletion-trash");
+    let trash_dir = trash_root.join(format!("{}-{}", novel_id, Uuid::new_v4()));
+    let moved_batch_dir = if batch_dir.exists() {
+        fs::create_dir_all(&trash_root).map_err(to_string)?;
+        fs::rename(&batch_dir, &trash_dir).map_err(|error| {
+            format!(
+                "无法准备删除小说内部批次文件，数据库未修改：{}",
+                to_string(error)
+            )
+        })?;
+        true
+    } else {
+        false
+    };
+    let tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(error) => {
+            if moved_batch_dir {
+                let _ = fs::rename(&trash_dir, &batch_dir);
+            }
+            return Err(to_string(error));
+        }
+    };
+    let delete_result = (|| -> Result<(), String> {
+        tx.execute(
+            "DELETE FROM novel_settings WHERE novel_id = ?1",
+            params![novel_id],
+        )
         .map_err(to_string)?;
-    tx.execute("DELETE FROM ai_logs WHERE novel_id = ?1", params![novel_id])
+        tx.execute(
+            "DELETE FROM chapter_batches WHERE novel_id = ?1",
+            params![novel_id],
+        )
         .map_err(to_string)?;
-    tx.execute("DELETE FROM novels WHERE id = ?1", params![novel_id])
+        tx.execute(
+            "DELETE FROM chapters WHERE novel_id = ?1",
+            params![novel_id],
+        )
         .map_err(to_string)?;
-    tx.commit().map_err(to_string)?;
-    if batch_dir.exists() {
-        fs::remove_dir_all(&batch_dir).map_err(to_string)?;
+        tx.execute(
+            "DELETE FROM canon_assets WHERE novel_id = ?1",
+            params![novel_id],
+        )
+        .map_err(to_string)?;
+        tx.execute("DELETE FROM jobs WHERE novel_id = ?1", params![novel_id])
+            .map_err(to_string)?;
+        tx.execute("DELETE FROM ai_logs WHERE novel_id = ?1", params![novel_id])
+            .map_err(to_string)?;
+        tx.execute("DELETE FROM novels WHERE id = ?1", params![novel_id])
+            .map_err(to_string)?;
+        tx.commit().map_err(to_string)?;
+        Ok(())
+    })();
+    if let Err(error) = delete_result {
+        if moved_batch_dir {
+            let _ = fs::rename(&trash_dir, &batch_dir);
+        }
+        return Err(error);
+    }
+    if moved_batch_dir {
+        let _ = fs::remove_dir_all(&trash_dir);
     }
     Ok(())
 }
@@ -659,6 +722,17 @@ fn save_model_profile(
     input: ModelProfileInput,
     state: State<AppState>,
 ) -> Result<ModelProfile, String> {
+    if let Some(profile_id) = input.id.as_deref() {
+        let paused_auto_run_uses_profile = state
+            .auto_runs
+            .lock()
+            .map_err(to_string)?
+            .values()
+            .any(|control| control.profile_ids.contains(profile_id));
+        if state.active_tasks.profile_is_active(profile_id)? || paused_auto_run_uses_profile {
+            return Err("当前模型正在被任务使用，任务结束前不能修改配置。".to_string());
+        }
+    }
     let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let updated_at = Utc::now().to_rfc3339();
     let api_key = input
@@ -669,8 +743,9 @@ fn save_model_profile(
         .map(str::to_string);
     let mut db_api_key_fallback = None;
     if let Some(value) = &api_key {
-        let _ = write_api_key(&id, value);
-        db_api_key_fallback = Some(value.clone());
+        if write_api_key(&id, value).is_err() {
+            db_api_key_fallback = Some(value.clone());
+        }
     }
     let conn = state.conn.lock().map_err(to_string)?;
     let thinking_mode = normalize_thinking_mode(input.thinking_mode.as_deref())?;
@@ -682,7 +757,8 @@ fn save_model_profile(
         model: input.model,
         temperature: input.temperature,
         thinking_mode,
-        has_api_key: api_key.is_some() || stored_api_key_exists(&conn, &id),
+        has_api_key: false,
+        api_key_storage: ApiKeyStorage::None.as_str().to_string(),
         updated_at,
     };
 
@@ -718,24 +794,57 @@ fn save_model_profile(
         ],
     )
     .map_err(to_string)?;
-
+    let storage = api_key_storage(&conn, &id);
+    let mut profile = profile;
+    profile.has_api_key = storage != ApiKeyStorage::None;
+    profile.api_key_storage = storage.as_str().to_string();
     Ok(profile)
 }
 
 #[tauri::command]
 fn delete_model_profile(profile_id: String, state: State<AppState>) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(to_string)?;
-    conn.execute(
-        "DELETE FROM model_profiles WHERE id = ?1",
-        params![profile_id],
-    )
-    .map_err(to_string)?;
-    conn.execute(
-        "DELETE FROM ai_logs WHERE profile_id = ?1",
-        params![profile_id],
-    )
-    .map_err(to_string)?;
-    let _ = delete_api_key(&profile_id);
+    let paused_auto_run_uses_profile = state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .values()
+        .any(|control| control.profile_ids.contains(&profile_id));
+    if state.active_tasks.profile_is_active(&profile_id)? || paused_auto_run_uses_profile {
+        return Err("当前模型正在被任务使用，请等待任务结束或先终止任务。".to_string());
+    }
+    let existing_key = read_api_key(&profile_id).ok();
+    delete_api_key_if_present(&profile_id)
+        .map_err(|error| format!("删除系统凭据失败，模型配置未删除：{}", to_string(error)))?;
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(error) => {
+            if let Some(api_key) = existing_key {
+                let _ = write_api_key(&profile_id, &api_key);
+            }
+            return Err(to_string(error));
+        }
+    };
+    let delete_result = (|| -> Result<(), String> {
+        tx.execute(
+            "DELETE FROM model_profiles WHERE id = ?1",
+            params![profile_id],
+        )
+        .map_err(to_string)?;
+        tx.execute(
+            "DELETE FROM ai_logs WHERE profile_id = ?1",
+            params![profile_id],
+        )
+        .map_err(to_string)?;
+        tx.commit().map_err(to_string)?;
+        Ok(())
+    })();
+    if let Err(error) = delete_result {
+        if let Some(api_key) = existing_key {
+            let _ = write_api_key(&profile_id, &api_key);
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -751,9 +860,10 @@ fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelProfile>, Stri
         .query_map([], |row| {
             let id: String = row.get(0)?;
             let db_api_key: Option<String> = row.get(8)?;
+            let storage = api_key_storage_from_values(&id, db_api_key.as_deref());
             Ok(ModelProfile {
-                has_api_key: read_api_key(&id).is_ok()
-                    || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
+                has_api_key: storage != ApiKeyStorage::None,
+                api_key_storage: storage.as_str().to_string(),
                 id,
                 name: row.get(1)?,
                 provider: row.get(2)?,
@@ -800,7 +910,6 @@ fn list_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<Vec<
     }
 }
 
-
 #[tauri::command]
 fn clear_ai_logs(novel_id: Option<String>, state: State<AppState>) -> Result<(), String> {
     let conn = state.conn.lock().map_err(to_string)?;
@@ -842,6 +951,9 @@ fn get_app_settings(state: State<AppState>) -> Result<AppSettings, String> {
 
 #[tauri::command]
 fn save_app_settings(settings: AppSettings, state: State<AppState>) -> Result<AppSettings, String> {
+    if state.active_tasks.any_active()? || !state.auto_runs.lock().map_err(to_string)?.is_empty() {
+        return Err("任务运行中不能修改应用设置。".to_string());
+    }
     let conn = state.conn.lock().map_err(to_string)?;
     let rewrite_parallelism = normalize_rewrite_parallelism(settings.rewrite_parallelism);
     if let Some(export_dir) = settings
@@ -1030,6 +1142,15 @@ fn save_novel_settings(
     advanced_settings: String,
     state: State<AppState>,
 ) -> Result<NovelSettings, String> {
+    if state.active_tasks.novel_is_active(&novel_id)?
+        || state
+            .auto_runs
+            .lock()
+            .map_err(to_string)?
+            .contains_key(&novel_id)
+    {
+        return Err("当前小说任务运行中，不能修改小说设定。".to_string());
+    }
     let protagonist_name = protagonist_name.trim();
     let rewritten_protagonist_name = rewritten_protagonist_name.trim();
     let additional_feminize_names = normalize_name_list(&additional_feminize_names);
@@ -1370,6 +1491,15 @@ fn update_canon_assets(
     assets: Vec<CanonAssetInput>,
     state: State<AppState>,
 ) -> Result<Vec<CanonAsset>, String> {
+    if state.active_tasks.novel_is_active(&novel_id)?
+        || state
+            .auto_runs
+            .lock()
+            .map_err(to_string)?
+            .contains_key(&novel_id)
+    {
+        return Err("当前小说任务运行中，不能修改一致性资产。".to_string());
+    }
     let conn = state.conn.lock().map_err(to_string)?;
     let updated_at = Utc::now().to_rfc3339();
     for asset in assets {
@@ -1409,6 +1539,9 @@ async fn start_analysis(
     if chapters.is_empty() {
         return Err("当前批次没有可分析的内容。".to_string());
     }
+    let _active_task = state
+        .active_tasks
+        .acquire(&novel_id, [&profile.id], "分析")?;
     let total = chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "analysis", total)?;
     let batch_label = format_batch_label(&chapters);
@@ -1438,7 +1571,7 @@ async fn start_analysis(
         Err(error) => {
             mark_chapters_analysis_failed(&state, &chapters)?;
             update_job(&state, &job.id, "failed", 0, &error)?;
-            job = get_job(job.id.clone(), state)?;
+            job = load_job(&state, &job.id)?;
             return Ok(job);
         }
     };
@@ -1453,7 +1586,7 @@ async fn start_analysis(
         total,
         "分析完成，姓名映射表已更新",
     )?;
-    get_job(job.id, state)
+    load_job(&state, &job.id)
 }
 
 #[tauri::command]
@@ -1485,14 +1618,23 @@ async fn start_rewrite(
         return Err("当前批次没有已完成分析的内容，请先分析该批次。".to_string());
     }
 
-    let total = chapters.len() as i64;
-    let mut job = create_job(&state, &novel_id, "rewrite", total)?;
     let (review_profile, review_api_key) = load_review_profile_for_run(
         &state,
         &profile,
         review_enabled,
         review_profile_id.as_deref(),
     )?;
+    let mut active_profile_ids = vec![profile.id.as_str()];
+    if let Some(review_profile) = review_profile.as_ref() {
+        if review_profile.id != profile.id {
+            active_profile_ids.push(review_profile.id.as_str());
+        }
+    }
+    let _active_task = state
+        .active_tasks
+        .acquire(&novel_id, active_profile_ids, "改写")?;
+    let total = chapters.len() as i64;
+    let mut job = create_job(&state, &novel_id, "rewrite", total)?;
     ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
     let canon_assets = {
         let conn = state.conn.lock().map_err(to_string)?;
@@ -1532,7 +1674,7 @@ async fn start_rewrite(
         Err(error) => {
             mark_chapters_rewrite_failed(&state, &chapters)?;
             update_job(&state, &job.id, "failed", 0, &error)?;
-            job = get_job(job.id.clone(), state)?;
+            job = load_job(&state, &job.id)?;
             return Ok(job);
         }
     };
@@ -1550,7 +1692,7 @@ async fn start_rewrite(
             "改写完成"
         },
     )?;
-    get_job(job.id, state)
+    load_job(&state, &job.id)
 }
 
 #[tauri::command]
@@ -1560,10 +1702,9 @@ async fn start_analyze_rewrite_all(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
-    let resume_from = prepare_auto_run(&state, &novel_id)?;
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (novel, batches) = {
+    let (novel, batches, review_enabled, review_profile_id) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let novel = conn
             .query_row(
@@ -1573,12 +1714,45 @@ async fn start_analyze_rewrite_all(
             )
             .map_err(to_string)?;
         require_novel_settings(&conn, &novel.id)?;
-        (novel, load_chapter_batches(&conn, &novel_id)?)
+        (
+            novel,
+            load_chapter_batches(&conn, &novel_id)?,
+            load_review_enabled(&conn)?,
+            load_review_profile_id(&conn)?,
+        )
     };
     if batches.is_empty() {
         return Err("当前小说没有可处理的批次。".to_string());
     }
 
+    let (review_profile, _review_api_key) = load_review_profile_for_run(
+        &state,
+        &profile,
+        review_enabled,
+        review_profile_id.as_deref(),
+    )?;
+    let output_dir = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        resolve_rewrite_export_dir(&conn, &state.data_dir)?
+    };
+    fs::create_dir_all(&output_dir).map_err(to_string)?;
+    let mut active_profile_ids = vec![profile.id.as_str()];
+    if let Some(review_profile) = review_profile.as_ref() {
+        if review_profile.id != profile.id {
+            active_profile_ids.push(review_profile.id.as_str());
+        }
+    }
+    let auto_profile_ids = active_profile_ids
+        .iter()
+        .map(|profile_id| (*profile_id).to_string())
+        .collect::<HashSet<_>>();
+    let _active_task = state.active_tasks.acquire(
+        &novel_id,
+        active_profile_ids.iter().copied(),
+        "一键分析改写",
+    )?;
+    let resume_from = prepare_auto_run(&state, &novel_id, auto_profile_ids)?;
+    let _auto_run_cleanup = AutoRunCleanup::new(&state.auto_runs, &novel_id);
     let mut job = create_job(&state, &novel_id, "auto", batches.len() as i64)?;
     register_auto_run_job(&state, &novel_id, &job.id, resume_from)?;
     let start_message = if resume_from > 0 {
@@ -1588,12 +1762,6 @@ async fn start_analyze_rewrite_all(
     };
     update_job(&state, &job.id, "running", resume_from, &start_message)?;
     emit_job_progress(&app, &job, "running", resume_from, &start_message);
-    let output_dir = {
-        let conn = state.conn.lock().map_err(to_string)?;
-        resolve_rewrite_export_dir(&conn, &state.data_dir)?
-    };
-    fs::create_dir_all(&output_dir).map_err(to_string)?;
-
     for (idx, batch) in batches.iter().enumerate() {
         let current = (idx + 1) as i64;
         if current <= resume_from {
@@ -1622,7 +1790,7 @@ async fn start_analyze_rewrite_all(
             update_job(&state, &job.id, "failed", completed, &error)?;
             emit_job_progress(&app, &job, "failed", completed, &error);
             clear_auto_run(&state, &novel_id)?;
-            job = get_job(job.id.clone(), state)?;
+            job = load_job(&state, &job.id)?;
             return Ok(job);
         }
 
@@ -1641,7 +1809,7 @@ async fn start_analyze_rewrite_all(
             update_job(&state, &job.id, "failed", completed, &error)?;
             emit_job_progress(&app, &job, "failed", completed, &error);
             clear_auto_run(&state, &novel_id)?;
-            job = get_job(job.id.clone(), state)?;
+            job = load_job(&state, &job.id)?;
             return Ok(job);
         }
 
@@ -1685,7 +1853,7 @@ async fn start_analyze_rewrite_all(
         &format!("一键分析改写完成，已输出：{}", full_path.to_string_lossy()),
     );
     clear_auto_run(&state, &novel_id)?;
-    get_job(job.id, state)
+    load_job(&state, &job.id)
 }
 
 #[tauri::command]
@@ -1814,6 +1982,7 @@ async fn analyze_batch_with_parallelism(
                         {
                             Ok(parsed) => parsed,
                             Err(retry_error) => {
+                                abort_and_drain_tasks(&mut tasks).await;
                                 return Err(format!("{}：{}", shard_label, retry_error));
                             }
                         }
@@ -1833,6 +2002,7 @@ async fn analyze_batch_with_parallelism(
                     None,
                     None,
                 )?;
+                abort_and_drain_tasks(&mut tasks).await;
                 return Err(format!("{}：{}", shard_label, error));
             }
         }
@@ -2566,6 +2736,7 @@ async fn generate_rewrite_shards(
                                 {
                                     Ok(parsed) => parsed,
                                     Err(recovery_error) => {
+                                        abort_and_drain_tasks(&mut tasks).await;
                                         return Err(format!("{}：{}", shard_label, recovery_error));
                                     }
                                 }
@@ -2587,6 +2758,7 @@ async fn generate_rewrite_shards(
                     None,
                     None,
                 )?;
+                abort_and_drain_tasks(&mut tasks).await;
                 return Err(format!("{}：{}", shard_label, error));
             }
         }
@@ -2889,6 +3061,7 @@ async fn generate_review_shards(
                             output.reasoning.as_deref(),
                             Some(&output.raw_response),
                         )?;
+                        abort_and_drain_tasks(&mut tasks).await;
                         return Err(format!("{}：审查决策无法解析：{}", shard_label, error));
                     }
                 };
@@ -3020,6 +3193,7 @@ async fn generate_review_shards(
                     None,
                     None,
                 )?;
+                abort_and_drain_tasks(&mut tasks).await;
                 return Err(format!("{}：{}", shard_label, error));
             }
         }
@@ -5017,9 +5191,10 @@ fn load_model_profile(
         |row| {
             let id: String = row.get(0)?;
             let db_api_key: Option<String> = row.get(8)?;
+            let storage = api_key_storage_from_values(&id, db_api_key.as_deref());
             Ok(ModelProfile {
-                has_api_key: read_api_key(&id).is_ok()
-                    || db_api_key.as_deref().is_some_and(|value| !value.is_empty()),
+                has_api_key: storage != ApiKeyStorage::None,
+                api_key_storage: storage.as_str().to_string(),
                 id,
                 name: row.get(1)?,
                 provider: row.get(2)?,
@@ -5162,11 +5337,11 @@ async fn generate_openai_compatible(
         .json(&payload)
         .send()
         .await
-        .map_err(to_string)?;
+        .map_err(format_request_error)?;
     let mut retried_without_thinking = false;
     let (value, raw_response) = match response_json_or_error(response).await {
         Ok(result) => result,
-        Err(error) if added_thinking_control => {
+        Err(error) if added_thinking_control && error.permits_thinking_retry() => {
             let mut retry_payload = payload;
             retry_payload
                 .as_object_mut()
@@ -5190,7 +5365,7 @@ async fn generate_openai_compatible(
                 .json(&retry_payload)
                 .send()
                 .await
-                .map_err(to_string)?;
+                .map_err(format_request_error)?;
             let retry_result =
                 response_json_or_error(retry_response)
                     .await
@@ -5200,7 +5375,7 @@ async fn generate_openai_compatible(
             retried_without_thinking = true;
             retry_result
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.to_string()),
     };
     if let Some(error) = openai_content_filter_error(&value, &model) {
         return Err(error);
@@ -5257,11 +5432,11 @@ async fn generate_gemini(
         .json(&payload)
         .send()
         .await
-        .map_err(to_string)?;
+        .map_err(format_request_error)?;
     let mut retried_without_thinking = false;
     let (value, raw_response) = match response_json_or_error(response).await {
         Ok(result) => result,
-        Err(error) if added_thinking_control => {
+        Err(error) if added_thinking_control && error.permits_thinking_retry() => {
             let mut retry_payload = payload;
             if let Some(generation_config) = retry_payload
                 .get_mut("generationConfig")
@@ -5275,7 +5450,7 @@ async fn generate_gemini(
                 .json(&retry_payload)
                 .send()
                 .await
-                .map_err(to_string)?;
+                .map_err(format_request_error)?;
             let retry_result =
                 response_json_or_error(retry_response)
                     .await
@@ -5285,26 +5460,9 @@ async fn generate_gemini(
             retried_without_thinking = true;
             retry_result
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.to_string()),
     };
-    let text = value["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .map(|text| text.to_string())
-        .ok_or_else(|| format!("Gemini 响应缺少正文: {}", value))?;
-    let reasoning = value["candidates"][0]["content"]["parts"]
-        .as_array()
-        .and_then(|parts| {
-            let thoughts = parts
-                .iter()
-                .filter(|part| part["thought"].as_bool().unwrap_or(false))
-                .filter_map(|part| part["text"].as_str())
-                .collect::<Vec<_>>();
-            if thoughts.is_empty() {
-                None
-            } else {
-                Some(thoughts.join("\n\n"))
-            }
-        });
+    let (text, reasoning) = parse_gemini_parts(&value)?;
     Ok(ModelOutput {
         text,
         reasoning,
@@ -5318,15 +5476,35 @@ async fn generate_gemini(
 
 async fn response_json_or_error(
     response: reqwest::Response,
-) -> Result<(serde_json::Value, String), String> {
+) -> Result<(serde_json::Value, String), ModelResponseError> {
     let status = response.status();
-    let body = response.text().await.map_err(to_string)?;
+    let body = response
+        .text()
+        .await
+        .map_err(|error| ModelResponseError::other(format_request_error(error)))?;
     if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status, compact_error_body(&body)));
+        return Err(ModelResponseError::provider(
+            status.as_u16(),
+            compact_error_body(&body),
+        ));
     }
-    let value = serde_json::from_str(&body)
-        .map_err(|error| format!("模型响应不是合法 JSON: {}；原始响应：{}", error, body))?;
+    let value = serde_json::from_str(&body).map_err(|error| {
+        ModelResponseError::other(format!(
+            "模型响应不是合法 JSON: {}；原始响应：{}",
+            error, body
+        ))
+    })?;
     Ok((value, body))
+}
+
+fn format_request_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "模型请求超时（最长等待 15 分钟），请检查网络或降低单次处理量。".to_string()
+    } else if error.is_connect() {
+        format!("无法连接模型服务：{}", to_string(error))
+    } else {
+        to_string(error)
+    }
 }
 
 fn openai_content_filter_error(value: &serde_json::Value, model: &str) -> Option<String> {
@@ -6965,7 +7143,11 @@ fn update_job(
     Ok(())
 }
 
-fn prepare_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<i64, String> {
+fn prepare_auto_run(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile_ids: HashSet<String>,
+) -> Result<i64, String> {
     let mut runs = state.auto_runs.lock().map_err(to_string)?;
     let resume_from = runs
         .get(novel_id)
@@ -6983,6 +7165,7 @@ fn prepare_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<i64, 
             status: "running".to_string(),
             completed_batches: resume_from,
             job_id: None,
+            profile_ids,
         },
     );
     Ok(resume_from)
@@ -7001,6 +7184,7 @@ fn register_auto_run_job(
             status: "running".to_string(),
             completed_batches,
             job_id: None,
+            profile_ids: HashSet::new(),
         });
     control.status = "running".to_string();
     control.completed_batches = completed_batches;
@@ -7041,11 +7225,12 @@ fn request_auto_run_stop(
     novel_id: &str,
     status: &str,
 ) -> Result<Job, String> {
-    let (job_id, completed_batches, message, job_status) = {
+    let (job_id, completed_batches, message, job_status, terminate_paused_run) = {
         let mut runs = state.auto_runs.lock().map_err(to_string)?;
         let control = runs
             .get_mut(novel_id)
             .ok_or_else(|| "当前没有正在运行的一键分析改写任务。".to_string())?;
+        let terminate_paused_run = should_terminate_paused_run(&control.status, status);
         control.status = status.to_string();
         let job_id = control
             .job_id
@@ -7066,8 +7251,21 @@ fn request_auto_run_stop(
             control.completed_batches,
             message.to_string(),
             job_status.to_string(),
+            terminate_paused_run,
         )
     };
+    if terminate_paused_run {
+        let message = "一键分析改写已终止。下次点击将从头开始新的执行。";
+        update_job(
+            state,
+            &job_id,
+            "terminated",
+            completed_batches,
+            message,
+        )?;
+        clear_auto_run(state, novel_id)?;
+        return load_job(state, &job_id);
+    }
     update_job(state, &job_id, &job_status, completed_batches, &message)?;
     load_job(state, &job_id)
 }
@@ -7092,14 +7290,11 @@ fn finish_stopped_auto_run(
         update_job(state, &job.id, "paused", completed_batches, &message)?;
         emit_job_progress(app, &job, "paused", completed_batches, &message);
         let mut runs = state.auto_runs.lock().map_err(to_string)?;
-        runs.insert(
-            job.novel_id.clone(),
-            AutoRunControl {
-                status: "paused".to_string(),
-                completed_batches,
-                job_id: Some(job.id.clone()),
-            },
-        );
+        if let Some(control) = runs.get_mut(&job.novel_id) {
+            control.status = "paused".to_string();
+            control.completed_batches = completed_batches;
+            control.job_id = Some(job.id.clone());
+        }
     }
     load_job(state, &job.id)
 }
@@ -7125,7 +7320,7 @@ async fn next_auto_join<T: Send + 'static>(
             }
             _ = tokio::time::sleep(Duration::from_millis(300)) => {
                 if let Some(status) = requested_auto_run_stop(state, novel_id)? {
-                    tasks.abort_all();
+                    abort_and_drain_tasks(tasks).await;
                     return Err(status);
                 }
             }
@@ -7169,24 +7364,15 @@ fn set_chapter_status(
     Ok(())
 }
 
-fn read_api_key(profile_id: &str) -> Result<String, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, profile_id).map_err(to_string)?;
-    entry.get_password().map_err(to_string)
-}
-
-fn write_api_key(profile_id: &str, api_key: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, profile_id).map_err(to_string)?;
-    entry.set_password(api_key).map_err(to_string)
-}
-
-fn delete_api_key(profile_id: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, profile_id).map_err(to_string)?;
-    entry.delete_credential().map_err(to_string)
-}
-
 fn read_stored_api_key(state: &State<'_, AppState>, profile_id: &str) -> Result<String, String> {
     if let Ok(api_key) = read_api_key(profile_id) {
         if !api_key.trim().is_empty() {
+            let conn = state.conn.lock().map_err(to_string)?;
+            conn.execute(
+                "UPDATE model_profiles SET api_key = NULL WHERE id = ?1",
+                params![profile_id],
+            )
+            .map_err(to_string)?;
             return Ok(api_key);
         }
     }
@@ -7200,23 +7386,37 @@ fn read_stored_api_key(state: &State<'_, AppState>, profile_id: &str) -> Result<
         .map_err(to_string)?
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "未保存 API Key，请填写 API Key 后点击保存。".to_string())?;
-    let _ = write_api_key(profile_id, &db_api_key);
+    if write_api_key(profile_id, &db_api_key).is_ok() {
+        conn.execute(
+            "UPDATE model_profiles SET api_key = NULL WHERE id = ?1",
+            params![profile_id],
+        )
+        .map_err(to_string)?;
+    }
     Ok(db_api_key)
 }
 
-fn stored_api_key_exists(conn: &Connection, profile_id: &str) -> bool {
-    if read_api_key(profile_id).is_ok() {
-        return true;
-    }
-    conn.query_row(
-        "SELECT api_key FROM model_profiles WHERE id = ?1",
-        params![profile_id],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .ok()
-    .flatten()
-    .as_deref()
-    .is_some_and(|value| !value.trim().is_empty())
+async fn abort_and_drain_tasks<T: 'static>(tasks: &mut tokio::task::JoinSet<T>) {
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+
+fn api_key_storage(conn: &Connection, profile_id: &str) -> ApiKeyStorage {
+    let db_api_key = conn
+        .query_row(
+            "SELECT api_key FROM model_profiles WHERE id = ?1",
+            params![profile_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+    api_key_storage_from_values(profile_id, db_api_key.as_deref())
+}
+
+fn api_key_storage_from_values(profile_id: &str, db_api_key: Option<&str>) -> ApiKeyStorage {
+    let system_has_key = read_api_key(profile_id).is_ok_and(|value| !value.trim().is_empty());
+    let database_has_key = db_api_key.is_some_and(|value| !value.trim().is_empty());
+    classify_api_key_storage(system_has_key, database_has_key)
 }
 
 fn row_to_novel(row: &rusqlite::Row<'_>) -> rusqlite::Result<Novel> {
@@ -7550,6 +7750,10 @@ fn redact_sensitive_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     fn sample_chapter(index: i64, title: &str, original_text: &str) -> Chapter {
         Chapter {
@@ -7563,6 +7767,30 @@ mod tests {
             analysis_status: "completed".to_string(),
             rewrite_status: "pending".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn aborting_parallel_tasks_waits_until_tasks_are_drained() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut tasks = tokio::task::JoinSet::new();
+        let task_flag = dropped.clone();
+        tasks.spawn(async move {
+            let _flag = DropFlag(task_flag);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        tokio::task::yield_now().await;
+
+        abort_and_drain_tasks(&mut tasks).await;
+
+        assert!(tasks.is_empty());
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -8442,6 +8670,7 @@ mod tests {
             temperature: 0.7,
             thinking_mode: "auto".to_string(),
             has_api_key: true,
+            api_key_storage: "system".to_string(),
             updated_at: "now".to_string(),
         };
         assert!(is_deepseek_profile(
@@ -8477,6 +8706,7 @@ mod tests {
             temperature: 0.7,
             thinking_mode: "off".to_string(),
             has_api_key: true,
+            api_key_storage: "system".to_string(),
             updated_at: "now".to_string(),
         };
 
@@ -8559,6 +8789,7 @@ mod tests {
             temperature: 0.7,
             thinking_mode: "auto".to_string(),
             has_api_key: true,
+            api_key_storage: "system".to_string(),
             updated_at: "now".to_string(),
         };
 
