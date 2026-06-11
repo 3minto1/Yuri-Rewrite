@@ -1,6 +1,6 @@
 [package]
 name = "yuri-rewrite"
-version = "0.1.19"
+version = "0.1.20"
 description = "Local Windows desktop tool for novel analysis and yuri rewriting"
 authors = ["Yuri Rewrite"]
 edition = "2021"
@@ -15,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 encoding_rs = "0.8"
-keyring = "3"
+keyring = { version = "3", features = ["windows-native"] }
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

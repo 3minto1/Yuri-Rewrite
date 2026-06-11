@@ -1772,7 +1772,9 @@ version = "3.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
 dependencies = [
+ "byteorder",
  "log",
+ "windows-sys 0.60.2",
  "zeroize",
 ]
 
@@ -5288,7 +5290,7 @@ dependencies = [
 
 [[package]]
 name = "yuri-rewrite"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "chrono",
  "encoding_rs",

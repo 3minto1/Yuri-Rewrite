@@ -7256,13 +7256,7 @@ fn request_auto_run_stop(
     };
     if terminate_paused_run {
         let message = "一键分析改写已终止。下次点击将从头开始新的执行。";
-        update_job(
-            state,
-            &job_id,
-            "terminated",
-            completed_batches,
-            message,
-        )?;
+        update_job(state, &job_id, "terminated", completed_batches, message)?;
         clear_auto_run(state, novel_id)?;
         return load_job(state, &job_id);
     }
@@ -7633,8 +7627,12 @@ fn extract_tailing_json_from_text(text: &str) -> Option<&str> {
     let last_bracket = text.rfind('[');
     // Try brace first (most review/analysis outputs are objects), then bracket.
     let mut candidates = Vec::new();
-    if let Some(pos) = last_brace { candidates.push(pos); }
-    if let Some(pos) = last_bracket { candidates.push(pos); }
+    if let Some(pos) = last_brace {
+        candidates.push(pos);
+    }
+    if let Some(pos) = last_bracket {
+        candidates.push(pos);
+    }
     for start in candidates {
         let candidate = &text[start..];
         if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
@@ -7654,9 +7652,9 @@ fn normalize_jsonish(text: &str) -> String {
 }
 
 fn parse_jsonish_value(text: &str) -> Result<serde_json::Value, String> {
-if text.trim().is_empty() {
-    return Err("AI 返回了空响应正文（模型可能将所有 token 消耗在思维链 reasoning 中，content 字段为空白，且无法从 reasoning 中提取到有效的 JSON）".to_string());
-}
+    if text.trim().is_empty() {
+        return Err("AI 返回了空响应正文（模型可能将所有 token 消耗在思维链 reasoning 中，content 字段为空白，且无法从 reasoning 中提取到有效的 JSON）".to_string());
+    }
 
     let normalized = normalize_jsonish(text);
     match serde_json::from_str::<serde_json::Value>(&normalized) {
@@ -9168,8 +9166,8 @@ mod tests {
     fn extract_tailing_json_from_reasoning_content() {
         // Reasoning text with JSON object at the end
         let reasoning = "审查分析：改写稿基本合格。输出JSON。{\n  \"approved\": true,\n  \"summary\": \"通过\"\n}";
-        let extracted = extract_tailing_json_from_text(reasoning)
-            .expect("should extract trailing JSON object");
+        let extracted =
+            extract_tailing_json_from_text(reasoning).expect("should extract trailing JSON object");
         let value: serde_json::Value =
             serde_json::from_str(extracted).expect("extracted text must be valid JSON");
         assert_eq!(value["approved"], true);

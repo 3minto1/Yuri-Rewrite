@@ -167,7 +167,10 @@ mod tests {
     #[test]
     fn terminating_a_paused_run_must_finish_immediately() {
         assert!(should_terminate_paused_run("paused", "terminate_requested"));
-        assert!(!should_terminate_paused_run("running", "terminate_requested"));
+        assert!(!should_terminate_paused_run(
+            "running",
+            "terminate_requested"
+        ));
         assert!(!should_terminate_paused_run("paused", "pause_requested"));
     }
 }
