@@ -26,167 +26,24 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invokeCommand as invoke } from "./tauriApi";
+import type {
+  AiLog,
+  AppSettings,
+  CanonAsset,
+  Chapter,
+  DiagnosisStatus,
+  Job,
+  JobEstimate,
+  ModelDiagnosis,
+  ModelProfile,
+  Novel,
+  NovelDetail,
+  NovelSettings,
+  NovelSettingsDraft,
+  ProfileDraft,
+  UpdateCheckResult
+} from "./types";
 import { type AutoRunProgress, useAutoRunProgress } from "./useAutoRunProgress";
-
-type Novel = {
-  id: string;
-  title: string;
-  source_path: string;
-  encoding: string;
-  status: string;
-  created_at: string;
-};
-
-type Chapter = {
-  id: string;
-  novel_id: string;
-  index: number;
-  title: string;
-  original_text: string;
-  analysis_json?: string | null;
-  rewrite_text?: string | null;
-  analysis_status: string;
-  rewrite_status: string;
-};
-
-type CanonAsset = {
-  novel_id: string;
-  kind: string;
-  content: string;
-  updated_at: string;
-};
-
-type ChapterBatch = {
-  id: string;
-  novel_id: string;
-  batch_index: number;
-  label: string;
-  start_chapter: number;
-  end_chapter: number;
-  file_path: string;
-  created_at: string;
-};
-
-type NovelSettings = {
-  novel_id: string;
-  protagonist_name: string;
-  rewritten_protagonist_name: string;
-  additional_feminize_names: string;
-  bust: string;
-  body_type: string;
-  rewrite_mode: "strict" | "creative";
-  advanced_settings: string;
-  updated_at: string;
-};
-
-type NovelDetail = {
-  novel: Novel;
-  chapters: Chapter[];
-  canon_assets: CanonAsset[];
-  batches: ChapterBatch[];
-  settings?: NovelSettings | null;
-};
-
-type ModelProfile = {
-  id: string;
-  name: string;
-  provider: string;
-  base_url: string;
-  model: string;
-  temperature: number;
-  thinking_mode: "auto" | "off" | "on";
-  has_api_key: boolean;
-  api_key_storage: "system" | "database_fallback" | "none";
-  updated_at: string;
-};
-
-type Job = {
-  id: string;
-  novel_id: string;
-  job_type: string;
-  status: string;
-  current_chapter: number;
-  total_chapters: number;
-  message: string;
-};
-
-type AiLog = {
-  id: string;
-  novel_id?: string | null;
-  profile_id: string;
-  action: string;
-  chapter_title?: string | null;
-  status: string;
-  content: string;
-  reasoning?: string | null;
-  raw_response?: string | null;
-  created_at: string;
-};
-
-type AppSettings = {
-  export_dir?: string | null;
-  core_prompt?: string;
-  review_enabled?: boolean;
-  review_profile_id?: string | null;
-  rewrite_parallelism?: 1 | 3 | 6 | 10;
-};
-
-type UpdateCheckResult = {
-  current_version: string;
-  latest_version: string;
-  latest_tag: string;
-  is_latest: boolean;
-  release_url: string;
-  asset_name: string;
-  asset_download_url: string;
-};
-
-type UpdateDownloadResult = {
-  path: string;
-  version: string;
-};
-
-type JobEstimate = {
-  novel_chapters: number;
-  novel_chars: number;
-  novel_batches: number;
-  selected_batch_chapters: number;
-  selected_batch_chars: number;
-  parallelism: number;
-  review_enabled: boolean;
-  current_batch_requests: number;
-  full_run_requests: number;
-  average_call_seconds?: number | null;
-  estimated_current_batch_seconds?: number | null;
-  estimated_full_run_seconds?: number | null;
-  recent_success_calls: number;
-  recent_failed_calls: number;
-  average_input_chars?: number | null;
-  average_output_chars?: number | null;
-};
-
-type DiagnosisStatus = "ok" | "warning" | "failed";
-
-type ModelDiagnosis = {
-  status: DiagnosisStatus;
-  recommended_thinking_mode?: "auto" | "off" | "on" | null;
-  checks: Array<{
-    name: string;
-    status: DiagnosisStatus;
-    message: string;
-  }>;
-};
-
-type ProfileDraft = {
-  id?: string;
-  name: string;
-  provider: string;
-  base_url: string;
-  model: string;
-  temperature: number;
-  thinking_mode: "auto" | "off" | "on";
-  api_key: string;
-};
 
 type ModelSuggestion = {
   label: string;
@@ -200,15 +57,6 @@ type ModelSuggestionGroup = {
   models: ModelSuggestion[];
 };
 
-type NovelSettingsDraft = {
-  protagonist_name: string;
-  rewritten_protagonist_name: string;
-  additional_feminize_names: string;
-  bust: string;
-  body_type: string;
-  rewrite_mode: "strict" | "creative";
-  advanced_settings: string;
-};
 
 const emptyProfile: ProfileDraft = {
   name: "OpenAI 兼容接口",
@@ -504,7 +352,7 @@ export default function App() {
     let cancelled = false;
     async function checkStartupUpdate() {
       try {
-        const update = await invoke<UpdateCheckResult>("check_for_updates");
+        const update = await invoke("check_for_updates");
         if (!cancelled) {
           setHasAvailableUpdate(!update.is_latest);
         }
@@ -565,7 +413,7 @@ export default function App() {
         return;
       }
       try {
-        const estimate = await invoke<JobEstimate>("estimate_job_cost", {
+        const estimate = await invoke("estimate_job_cost", {
           novelId: detail.novel.id,
           batchId: selectedBatchId || null,
           profileId: selectedProfileId || null
@@ -583,9 +431,9 @@ export default function App() {
 
   async function refreshAll() {
     const [novelRows, profileRows, appSettings] = await Promise.all([
-      invoke<Novel[]>("list_novels"),
-      invoke<ModelProfile[]>("list_model_profiles"),
-      invoke<AppSettings>("get_app_settings")
+      invoke("list_novels"),
+      invoke("list_model_profiles"),
+      invoke("get_app_settings")
     ]);
     setNovels(novelRows);
     setProfiles(profileRows);
@@ -600,7 +448,7 @@ export default function App() {
       showNotice("当前任务运行或暂停中，不能切换小说。请先完成或终止任务。");
       return;
     }
-    const next = await invoke<NovelDetail>("get_novel_detail", { novelId });
+    const next = await invoke("get_novel_detail", { novelId });
     setDetail(next);
     const nextChapterId =
       options.preserveChapterId && next.chapters.some((chapter) => chapter.id === options.preserveChapterId)
@@ -631,7 +479,7 @@ export default function App() {
   }
 
   async function refreshLogs(novelId = detail?.novel.id) {
-    const rows = await invoke<AiLog[]>("list_ai_logs", { novelId: novelId ?? null });
+    const rows = await invoke("list_ai_logs", { novelId: novelId ?? null });
     setLogs(rows);
   }
 
@@ -641,7 +489,7 @@ export default function App() {
     setBusy("clear-logs");
     setNotice("");
     try {
-      await invoke<void>("clear_ai_logs", { novelId: detail?.novel.id ?? null });
+      await invoke("clear_ai_logs", { novelId: detail?.novel.id ?? null });
       await refreshLogs();
       showNotice("日志已清空。");
     } catch (error) {
@@ -678,7 +526,7 @@ export default function App() {
     setBusy("novel-settings");
     setNotice("");
     try {
-      const saved = await invoke<NovelSettings>("save_novel_settings", {
+      const saved = await invoke("save_novel_settings", {
         novelId: detail.novel.id,
         protagonistName: novelSettingsDraft.protagonist_name,
         rewrittenProtagonistName: novelSettingsDraft.rewritten_protagonist_name,
@@ -719,7 +567,7 @@ export default function App() {
     setBusy("import");
     setNotice("");
     try {
-      const novel = await invoke<Novel>("import_txt", { filePath });
+      const novel = await invoke("import_txt", { filePath });
       await refreshAll();
       await loadNovel(novel.id);
       showNotice(`已导入《${novel.title}》。`);
@@ -762,8 +610,8 @@ export default function App() {
     setBusy("delete-novel");
     setNotice("");
     try {
-      await invoke<void>("delete_novel", { novelId: novel.id });
-      const remaining = await invoke<Novel[]>("list_novels");
+      await invoke("delete_novel", { novelId: novel.id });
+      const remaining = await invoke("list_novels");
       setNovels(remaining);
       setOpenNovelMenuId("");
       if (detail?.novel.id === novel.id) {
@@ -799,7 +647,7 @@ export default function App() {
         model: profileDraft.model.trim(),
         api_key: profileDraft.api_key === savedApiKeyMask ? undefined : profileDraft.api_key
       };
-      const saved = await invoke<ModelProfile>("save_model_profile", { input });
+      const saved = await invoke("save_model_profile", { input });
       setSelectedProfileId(saved.id);
       setProfileDraft({ ...profileDraft, id: saved.id, api_key: saved.has_api_key ? savedApiKeyMask : "" });
       await refreshAll();
@@ -832,8 +680,8 @@ export default function App() {
     setBusy("delete-model");
     setNotice("");
     try {
-      await invoke<void>("delete_model_profile", { profileId: profile.id });
-      const nextProfiles = await invoke<ModelProfile[]>("list_model_profiles");
+      await invoke("delete_model_profile", { profileId: profile.id });
+      const nextProfiles = await invoke("list_model_profiles");
       setProfiles(nextProfiles);
       const nextSelected = nextProfiles[0]?.id ?? "";
       setSelectedProfileId(nextSelected);
@@ -857,7 +705,7 @@ export default function App() {
     setNotice("");
     setModelDiagnosis(null);
     try {
-      const result = await invoke<ModelDiagnosis>("diagnose_model_profile", {
+      const result = await invoke("diagnose_model_profile", {
         profileId: selectedProfileId
       });
       setModelDiagnosis(result);
@@ -877,7 +725,7 @@ export default function App() {
     setNotice("");
     try {
       const assets = detail.canon_assets.map(({ kind, content }) => ({ kind, content }));
-      const updated = await invoke<CanonAsset[]>("update_canon_assets", {
+      const updated = await invoke("update_canon_assets", {
         novelId: detail.novel.id,
         assets
       });
@@ -907,7 +755,7 @@ export default function App() {
     setBusy(kind);
     setNotice("");
     try {
-      const result = await invoke<Job>(kind === "analysis" ? "start_analysis" : "start_rewrite", {
+      const result = await invoke(kind === "analysis" ? "start_analysis" : "start_rewrite", {
         novelId: detail.novel.id,
         profileId: selectedProfileId,
         batchId: selectedBatch.id
@@ -945,7 +793,7 @@ export default function App() {
     setBusy("auto-batch");
     setNotice("");
     try {
-      const analysisResult = await invoke<Job>("start_analysis", {
+      const analysisResult = await invoke("start_analysis", {
         novelId,
         profileId: selectedProfileId,
         batchId
@@ -958,7 +806,7 @@ export default function App() {
         return;
       }
 
-      const rewriteResult = await invoke<Job>("start_rewrite", {
+      const rewriteResult = await invoke("start_rewrite", {
         novelId,
         profileId: selectedProfileId,
         batchId
@@ -991,7 +839,7 @@ export default function App() {
     setAutoRunState("running");
     setNotice("");
     try {
-      const result = await invoke<Job>("start_analyze_rewrite_all", {
+      const result = await invoke("start_analyze_rewrite_all", {
         novelId: detail.novel.id,
         profileId: selectedProfileId
       });
@@ -1019,7 +867,7 @@ export default function App() {
     if (!detail || autoRunState !== "running") return;
     setAutoControlBusy(true);
     try {
-      const result = await invoke<Job>("pause_analyze_rewrite_all", { novelId: detail.novel.id });
+      const result = await invoke("pause_analyze_rewrite_all", { novelId: detail.novel.id });
       setJob(result);
       setAutoRunState("stopping");
       showNotice(result.message);
@@ -1034,7 +882,7 @@ export default function App() {
     if (!detail || autoRunState === "idle") return;
     setAutoControlBusy(true);
     try {
-      const result = await invoke<Job>("terminate_analyze_rewrite_all", { novelId: detail.novel.id });
+      const result = await invoke("terminate_analyze_rewrite_all", { novelId: detail.novel.id });
       setJob(result);
       setAutoRunState("idle");
       showNotice(result.message);
@@ -1051,7 +899,7 @@ export default function App() {
     setBusy(`export-${format}`);
     setNotice("");
     try {
-      const result = await invoke<{ path: string }>("export_novel", {
+      const result = await invoke("export_novel", {
         novelId: detail.novel.id,
         format
       });
@@ -1080,7 +928,7 @@ export default function App() {
     try {
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
-      const saved = await invoke<AppSettings>("save_app_settings", {
+      const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ export_dir: selected })
       });
       setSettings(saved);
@@ -1096,7 +944,7 @@ export default function App() {
     setBusy("clear-export-dir");
     setNotice("");
     try {
-      const saved = await invoke<AppSettings>("save_app_settings", {
+      const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ export_dir: null })
       });
       setSettings(saved);
@@ -1113,7 +961,7 @@ export default function App() {
     setNotice("");
     try {
       const nextEnabled = !(settings.review_enabled ?? false);
-      const saved = await invoke<AppSettings>("save_app_settings", {
+      const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ review_enabled: nextEnabled })
       });
       setSettings(saved);
@@ -1129,7 +977,7 @@ export default function App() {
     setBusy("parallelism-setting");
     setNotice("");
     try {
-      const saved = await invoke<AppSettings>("save_app_settings", {
+      const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ rewrite_parallelism: value })
       });
       setSettings(saved);
@@ -1145,7 +993,7 @@ export default function App() {
     setBusy("review-profile-setting");
     setNotice("");
     try {
-      const saved = await invoke<AppSettings>("save_app_settings", {
+      const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ review_profile_id: value || null })
       });
       setSettings(saved);
@@ -1161,7 +1009,7 @@ export default function App() {
     setBusy("core-settings");
     setNotice("");
     try {
-      const saved = await invoke<AppSettings>("save_app_settings", {
+      const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ core_prompt: corePromptDraft })
       });
       setSettings(saved);
@@ -1177,7 +1025,7 @@ export default function App() {
     setBusy("open-github");
     setNotice("");
     try {
-      await invoke<void>("open_github_url");
+      await invoke("open_github_url");
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -1190,7 +1038,7 @@ export default function App() {
     setNotice("");
     setPendingUpdate(null);
     try {
-      const update = await invoke<UpdateCheckResult>("check_for_updates");
+      const update = await invoke("check_for_updates");
       if (update.is_latest) {
         setHasAvailableUpdate(false);
         showNotice(`当前已是最新版：${update.current_version}`, 3000);
@@ -1210,7 +1058,7 @@ export default function App() {
   async function downloadPendingUpdate() {
     setBusy("download-update");
     try {
-      const result = await invoke<UpdateDownloadResult>("download_latest_update");
+      const result = await invoke("download_latest_update");
       setPendingUpdate(null);
       setHasAvailableUpdate(false);
       showNotice(`已下载 ${result.version}：${result.path}`);
