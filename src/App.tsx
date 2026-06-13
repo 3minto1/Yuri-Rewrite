@@ -4,14 +4,11 @@ import {
   ArrowLeft,
   BookOpen,
   CheckCircle2,
-  ChevronDown,
   ClipboardList,
   Download,
   FilePlus2,
-  FolderOpen,
   Github,
   HelpCircle,
-  KeyRound,
   Loader2,
   MoreHorizontal,
   Pause,
@@ -25,6 +22,18 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CompareView } from "./components/Compare/CompareView";
+import { Modal } from "./components/common/Modal";
+import { AppSettingsView } from "./components/Settings/AppSettings";
+import { ModelProfiles } from "./components/Settings/ModelProfiles";
+import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/NovelSettings";
+import { BatchPanel } from "./components/Workspace/BatchPanel";
+import { ChapterList } from "./components/Workspace/ChapterList";
+import { ModelConfig } from "./components/Workspace/ModelConfig";
+import { TaskEstimate } from "./components/Workspace/TaskEstimate";
+import { useModelProfiles } from "./hooks/useModelProfiles";
+import { useNovels } from "./hooks/useNovels";
+import { useTaskState } from "./hooks/useTaskState";
 import { invokeCommand as invoke } from "./tauriApi";
 import type {
   AiLog,
@@ -199,13 +208,19 @@ const statusText: Record<string, string> = {
 };
 
 export default function App() {
-  const [novels, setNovels] = useState<Novel[]>([]);
-  const [detail, setDetail] = useState<NovelDetail | null>(null);
-  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
-  const [profileDraft, setProfileDraft] = useState<ProfileDraft>(emptyProfile);
-  const [selectedProfileId, setSelectedProfileId] = useState("");
-  const [selectedChapterId, setSelectedChapterId] = useState("");
-  const [selectedBatchId, setSelectedBatchId] = useState("");
+  const {
+    novels, setNovels, detail, setDetail, selectedChapterId, setSelectedChapterId,
+    selectedBatchId, setSelectedBatchId, selectedChapter, selectedBatch,
+    novelSettingsDraft, setNovelSettingsDraft
+  } = useNovels(emptyNovelSettings);
+  const {
+    profiles, setProfiles, profileDraft, setProfileDraft,
+    selectedProfileId, setSelectedProfileId, selectedProfile
+  } = useModelProfiles(emptyProfile);
+  const {
+    busy, setBusy, autoRunState, setAutoRunState, autoControlBusy,
+    setAutoControlBusy, job, setJob, processingTaskActive
+  } = useTaskState();
   const [openNovelMenuId, setOpenNovelMenuId] = useState("");
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
@@ -215,40 +230,19 @@ export default function App() {
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
   const [estimateCollapsed, setEstimateCollapsed] = useState(false);
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
-  const [novelSettingsDraft, setNovelSettingsDraft] = useState<NovelSettingsDraft>(emptyNovelSettings);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "settings">("workspace");
-  const [busy, setBusy] = useState("");
-  const [autoRunState, setAutoRunState] = useState<"idle" | "running" | "paused" | "stopping">("idle");
-  const [autoControlBusy, setAutoControlBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [noticeDuration, setNoticeDuration] = useState(5000);
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
-  const [job, setJob] = useState<Job | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLPreElement | null>(null);
   const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
   const busyRef = useRef("");
   const importInProgressRef = useRef(false);
-  const processingTaskActive =
-    ["analysis", "rewrite", "auto-batch", "auto"].includes(busy) || autoRunState !== "idle";
   const processingTaskActiveRef = useRef(processingTaskActive);
-
-  const selectedChapter = useMemo(
-    () => detail?.chapters.find((chapter) => chapter.id === selectedChapterId) ?? detail?.chapters[0],
-    [detail, selectedChapterId]
-  );
-
-  const selectedBatch = useMemo(
-    () => detail?.batches.find((batch) => batch.id === selectedBatchId) ?? detail?.batches[0],
-    [detail, selectedBatchId]
-  );
-  const selectedProfile = useMemo(
-    () => profiles.find((profile) => profile.id === selectedProfileId),
-    [profiles, selectedProfileId]
-  );
 
   const autoProgressPercent = useMemo(() => {
     if (!job || job.job_type !== "auto" || job.total_chapters <= 0) return 0;
@@ -1110,36 +1104,6 @@ export default function App() {
     return "失败";
   }
 
-  function renderRewriteModeControl() {
-    return (
-      <div className="mode-field">
-        <span>改写模式</span>
-        <div className="mode-toggle" role="radiogroup" aria-label="改写模式">
-          <button
-            type="button"
-            className={novelSettingsDraft.rewrite_mode === "strict" ? "active" : ""}
-            title="AI会更加忠于原文，不做过大改动"
-            aria-checked={novelSettingsDraft.rewrite_mode === "strict"}
-            role="radio"
-            onClick={() => setNovelSettingsDraft({ ...novelSettingsDraft, rewrite_mode: "strict" })}
-          >
-            严谨模式
-          </button>
-          <button
-            type="button"
-            className={novelSettingsDraft.rewrite_mode === "creative" ? "active" : ""}
-            title="AI会更加有创意，可能产生较大改动"
-            aria-checked={novelSettingsDraft.rewrite_mode === "creative"}
-            role="radio"
-            onClick={() => setNovelSettingsDraft({ ...novelSettingsDraft, rewrite_mode: "creative" })}
-          >
-            创意模式
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   function closeQuickStart() {
     try {
       window.localStorage.setItem(quickStartSeenKey, "true");
@@ -1252,36 +1216,16 @@ export default function App() {
 
         <div className="side-section">
           <div className="section-label">模型</div>
-          <div className="model-row">
-            <select
-              value={selectedProfileId}
-              onChange={(event) => setSelectedProfileId(event.target.value)}
-              disabled={processingTaskActive}
-            >
-              <option value="">未选择</option>
-              {profiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.model}
-                </option>
-              ))}
-            </select>
-            <button
-              className="icon-button menu-trigger"
-              aria-label="打开模型菜单"
-              onClick={() => setOpenModelMenu(!openModelMenu)}
-              disabled={!selectedProfileId || processingTaskActive}
-            >
-              <MoreHorizontal size={17} />
-            </button>
-            {openModelMenu && selectedProfileId && (
-              <div className="context-menu">
-                <button onClick={deleteSelectedModelProfile} disabled={busy === "delete-model" || processingTaskActive}>
-                  <Trash2 size={15} />
-                  删除当前模型
-                </button>
-              </div>
-            )}
-          </div>
+          <ModelProfiles
+            profiles={profiles}
+            selectedProfileId={selectedProfileId}
+            menuOpen={openModelMenu}
+            processing={processingTaskActive}
+            busy={busy}
+            onSelect={setSelectedProfileId}
+            onMenuOpenChange={setOpenModelMenu}
+            onDelete={deleteSelectedModelProfile}
+          />
         </div>
 
         <div className="side-section nav-section">
@@ -1511,88 +1455,15 @@ export default function App() {
         )}
 
         {activeView === "novel-settings" && (
-          <div className="page-panel">
-            <div className="page-heading">
-              <h2>基本设定</h2>
-              <div className="panel-actions">
-                <button onClick={() => setActiveView("workspace")}>
-                  <ArrowLeft size={16} />
-                  返回
-                </button>
-                <button onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings" || processingTaskActive}>
-                  {busy === "novel-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-                  保存
-                </button>
-              </div>
-            </div>
-            {detail ? (
-              <section className="settings-section novel-settings-section">
-                <h3>改写基础规则</h3>
-                <fieldset className="form-grid" disabled={processingTaskActive}>
-                  <label>
-                    主角姓名（必填）
-                    <input
-                      value={novelSettingsDraft.protagonist_name}
-                      onChange={(event) =>
-                        setNovelSettingsDraft({ ...novelSettingsDraft, protagonist_name: event.target.value })
-                      }
-                      placeholder="例如：萧炎"
-                    />
-                  </label>
-                  <label className="settings-rewritten-name-field">
-                    改写后姓名（选填）
-                    <input
-                      value={novelSettingsDraft.rewritten_protagonist_name}
-                      onChange={(event) =>
-                        setNovelSettingsDraft({
-                          ...novelSettingsDraft,
-                          rewritten_protagonist_name: event.target.value
-                        })
-                      }
-                      placeholder="留空则让AI生成改写后姓名"
-                    />
-                  </label>
-                  <label className="settings-additional-names-field">
-                    其他需要女性化的人名（选填）
-                    <textarea
-                      value={novelSettingsDraft.additional_feminize_names}
-                      onChange={(event) =>
-                        setNovelSettingsDraft({ ...novelSettingsDraft, additional_feminize_names: event.target.value })
-                      }
-                      placeholder="支持逗号或换行分隔"
-                    />
-                  </label>
-                  <label>
-                    身材
-                    <select
-                      value={novelSettingsDraft.bust}
-                      onChange={(event) => setNovelSettingsDraft({ ...novelSettingsDraft, bust: event.target.value })}
-                    >
-                      <option value="平胸">平胸</option>
-                      <option value="巨乳">巨乳</option>
-                    </select>
-                  </label>
-                  <label>
-                    体型
-                    <select
-                      value={novelSettingsDraft.body_type}
-                      onChange={(event) => setNovelSettingsDraft({ ...novelSettingsDraft, body_type: event.target.value })}
-                    >
-                      <option value="萝莉">萝莉</option>
-                      <option value="御姐">御姐</option>
-                      <option value="少女">少女</option>
-                    </select>
-                  </label>
-                  {renderRewriteModeControl()}
-                </fieldset>
-                <p className="settings-note">
-                  分析和改写会自动附带这些设定。主角姓名会按同音或近音原则女性化，例如萧炎改为萧妍，李火旺改为李火婉。
-                </p>
-              </section>
-            ) : (
-              <p className="muted">请先导入小说。</p>
-            )}
-          </div>
+          <NovelSettingsView
+            draft={novelSettingsDraft}
+            setDraft={setNovelSettingsDraft}
+            disabled={processingTaskActive}
+            hasNovel={Boolean(detail)}
+            busy={busy}
+            onBack={() => setActiveView("workspace")}
+            onSave={saveNovelSettings}
+          />
         )}
 
         {activeView === "core-settings" && (
@@ -1632,380 +1503,63 @@ export default function App() {
         )}
 
         {activeView === "settings" && (
-          <div className="page-panel">
-            <div className="page-heading">
-              <h2>设置</h2>
-              <div className="panel-actions">
-                <button onClick={() => setActiveView("workspace")}>
-                  <ArrowLeft size={16} />
-                  返回
-                </button>
-              </div>
-            </div>
-            <section className="settings-section">
-              <h3>导出目录</h3>
-              <div className="setting-row">
-                <input readOnly value={settings.export_dir || "默认应用数据目录"} />
-                <button onClick={chooseExportDir} disabled={busy === "choose-export-dir" || processingTaskActive}>
-                  <FolderOpen size={16} />
-                  选择目录
-                </button>
-                <button onClick={clearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir" || processingTaskActive}>
-                  恢复默认
-                </button>
-              </div>
-            </section>
-            <section className="settings-section">
-              <div className="settings-section-heading">
-                <h3>改写复检</h3>
-                <span className="setting-help" tabIndex={0} aria-label="改写复检说明">
-                  <HelpCircle size={16} />
-                  <span className="setting-help-tooltip" role="tooltip">
-                    双专家审查会显著增加请求数和等待时间，但能让改写后的文本逻辑更顺、质量更稳。开启后，每个分片最多可能经历“分析、初稿改写、审查判定、打回重写、审查复判、再次打回重写、第三次审查”七次模型请求。建议为审查专家选择逻辑能力强、JSON 输出稳定、长文本一致性检查更可靠的模型。
-                  </span>
-                </span>
-              </div>
-              <div className="setting-toggle-row">
-                <button
-                  className={settings.review_enabled ? "setting-switch active" : "setting-switch"}
-                  onClick={toggleReviewEnabled}
-                  disabled={busy === "review-setting" || processingTaskActive}
-                  title="开启复检时AI改写完成后会检查一遍是否有疏漏，会增加改写时间"
-                >
-                  {settings.review_enabled ? "开启" : "关闭"}
-                </button>
-                <span>默认关闭，开启后每批改写会由审查专家判定；不通过时打回改写模型重写并复判。</span>
-              </div>
-              <div className="setting-row">
-                <select
-                  value={settings.review_profile_id ?? ""}
-                  onChange={(event) => setReviewProfileId(event.target.value)}
-                  disabled={busy === "review-profile-setting" || processingTaskActive}
-                  title="选择第二个 AI 作为审查专家；留空则使用当前改写模型审查"
-                >
-                  <option value="">使用当前改写模型审查</option>
-                  {profiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.model}
-                    </option>
-                  ))}
-                </select>
-                <span>审查专家只判定并列出问题；不通过时会打回改写模型重写，再由审查专家复判。</span>
-              </div>
-            </section>
-            <section className="settings-section">
-              <h3>分析/改写并发</h3>
-              <div
-                className="setting-toggle-row"
-                title="较高并发通常可以缩短分析和改写等待时间，但会同时增加请求数量；请求越多，触发限流、网络失败或分片解析失败的概率越高，也可能因每个分片都携带设定和一致性资产而略微增加 token 消耗。若频繁失败或服务商限流，请降低并发数。"
-              >
-                <div className="mode-toggle mode-toggle-four setting-parallelism" role="radiogroup" aria-label="分析和改写并发请求数">
-                  {([10, 6, 3, 1] as const).map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={(settings.rewrite_parallelism ?? 6) === value ? "active" : ""}
-                      aria-checked={(settings.rewrite_parallelism ?? 6) === value}
-                      role="radio"
-                      disabled={busy === "parallelism-setting" || processingTaskActive}
-                      onClick={() => setRewriteParallelism(value)}
-                    >
-                      {value === 1 ? "不并发" : value}
-                    </button>
-                  ))}
-                </div>
-                <span>默认 6：30 章会拆成 6 个请求，每个约 5 章；分析和改写共用该设置，并尽量共享设定和一致性资产。</span>
-              </div>
-            </section>
-          </div>
+          <AppSettingsView
+            settings={settings}
+            profiles={profiles}
+            busy={busy}
+            processing={processingTaskActive}
+            onBack={() => setActiveView("workspace")}
+            onChooseExportDir={chooseExportDir}
+            onClearExportDir={clearExportDir}
+            onToggleReview={toggleReviewEnabled}
+            onReviewProfileChange={setReviewProfileId}
+            onParallelismChange={setRewriteParallelism}
+          />
         )}
 
         {activeView === "compare" && (
-          <div className="compare-page">
-            <div className="compare-page-toolbar">
-              <label>
-                章节
-                <select value={selectedChapterId} onChange={(event) => setSelectedChapterId(event.target.value)}>
-                  {detail?.chapters.map((chapter) => (
-                    <option key={chapter.id} value={chapter.id}>
-                      {chapter.index}. {chapter.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="compare-toolbar-actions">
-                <button onClick={() => setActiveView("workspace")}>
-                  <ArrowLeft size={17} />
-                  返回
-                </button>
-                <button onClick={() => exportNovel("txt")} disabled={!detail || busy !== ""}>
-                  <Download size={17} />
-                  TXT
-                </button>
-              </div>
-            </div>
-            {selectedChapter ? (
-              <div className="large-compare-grid">
-                <article>
-                  <h2>原文</h2>
-                  <pre ref={originalCompareRef}>{selectedChapter.original_text}</pre>
-                </article>
-                <article>
-                  <h2>改写稿</h2>
-                  <pre ref={rewriteCompareRef}>{selectedChapter.rewrite_text || "尚未改写。"}</pre>
-                </article>
-              </div>
-            ) : (
-              <p className="muted">请选择章节。</p>
-            )}
-          </div>
+          <CompareView
+            chapters={detail?.chapters ?? []}
+            selectedChapter={selectedChapter}
+            selectedChapterId={selectedChapterId}
+            busy={busy}
+            originalRef={originalCompareRef}
+            rewriteRef={rewriteCompareRef}
+            onSelectChapter={setSelectedChapterId}
+            onBack={() => setActiveView("workspace")}
+            onExport={() => exportNovel("txt")}
+          />
         )}
 
         {activeView === "workspace" && (
           <>
-          {detail && (
-            <div className="batch-strip">
-              <label>
-                当前批次
-                <select value={selectedBatchId} onChange={(event) => setSelectedBatchId(event.target.value)}>
-                  {detail.batches.map((batch) => (
-                    <option key={batch.id} value={batch.id}>
-                      {batch.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <span>
-                {selectedBatch
-                  ? `将处理第 ${selectedBatch.start_chapter} - ${selectedBatch.end_chapter} 段/章`
-                  : "暂无批次"}
-              </span>
-            </div>
-          )}
+          {detail && <BatchPanel batches={detail.batches} selectedBatch={selectedBatch} selectedBatchId={selectedBatchId} onSelect={setSelectedBatchId} />}
           {detail && jobEstimate && (
-            <section className={`estimate-panel ${estimateCollapsed ? "collapsed" : ""}`} aria-label="任务预估">
-              <div className="estimate-heading">
-                <h2>任务预估</h2>
-                <div className="estimate-heading-actions">
-                  {!estimateCollapsed && (
-                    <span>
-                      并发 {jobEstimate.parallelism} · 复检{jobEstimate.review_enabled ? "开启" : "关闭"}
-                    </span>
-                  )}
-                  <button
-                    className="icon-button estimate-toggle"
-                    title={estimateCollapsed ? "展开任务预估详情" : "隐藏任务预估详情"}
-                    aria-label={estimateCollapsed ? "展开任务预估详情" : "隐藏任务预估详情"}
-                    aria-expanded={!estimateCollapsed}
-                    onClick={() => setEstimateCollapsed((value) => !value)}
-                  >
-                    <ChevronDown size={17} />
-                  </button>
-                </div>
-              </div>
-              {!estimateCollapsed && (
-                <div className="estimate-grid">
-                  <div>
-                    <span>全文规模</span>
-                    <strong>
-                      {formatNumber(jobEstimate.novel_chapters)} 章 · {formatNumber(jobEstimate.novel_chars)} 字 ·{" "}
-                      {formatNumber(jobEstimate.novel_batches)} 批
-                    </strong>
-                  </div>
-                  <div>
-                    <span>当前批次</span>
-                    <strong>
-                      {formatNumber(jobEstimate.selected_batch_chapters)} 章 ·{" "}
-                      {formatNumber(jobEstimate.selected_batch_chars)} 字
-                    </strong>
-                  </div>
-                  <div>
-                    <span>预计请求数</span>
-                    <strong>
-                      当前 {formatNumber(jobEstimate.current_batch_requests)} · 全文{" "}
-                      {formatNumber(jobEstimate.full_run_requests)}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>预计等待</span>
-                    <strong>
-                      当前 {formatSeconds(jobEstimate.estimated_current_batch_seconds)} · 全文{" "}
-                      {formatSeconds(jobEstimate.estimated_full_run_seconds)}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>历史调用</span>
-                    <strong>
-                      成功 {formatNumber(jobEstimate.recent_success_calls)} · 失败{" "}
-                      {formatNumber(jobEstimate.recent_failed_calls)} · 平均{" "}
-                      {formatSeconds(jobEstimate.average_call_seconds)}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>历史字符</span>
-                    <strong>
-                      输入 {formatNumber(jobEstimate.average_input_chars)} · 输出{" "}
-                      {formatNumber(jobEstimate.average_output_chars)}
-                    </strong>
-                  </div>
-                </div>
-              )}
-            </section>
+            <TaskEstimate
+              estimate={jobEstimate}
+              collapsed={estimateCollapsed}
+              onToggle={() => setEstimateCollapsed((value) => !value)}
+              formatNumber={formatNumber}
+              formatSeconds={formatSeconds}
+            />
           )}
           <div className="content-grid">
-            <section className="panel model-panel">
-              <div className="panel-heading">
-                <h2>模型配置</h2>
-                <div className="panel-actions">
-                  <button onClick={createNewModelProfile} disabled={busy !== "" || processingTaskActive}>
-                    <FilePlus2 size={16} />
-                    新建
-                  </button>
-                  <button onClick={diagnoseProfile} disabled={!selectedProfileId || busy === "diagnose" || processingTaskActive}>
-                    {busy === "diagnose" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}
-                    诊断模型
-                  </button>
-                  <button onClick={saveProfile} disabled={busy === "profile" || processingTaskActive}>
-                    {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-                    保存
-                  </button>
-                </div>
-              </div>
-              <div className="model-scroll">
-                <fieldset className="form-grid model-form-grid" disabled={processingTaskActive}>
-                  <label>
-                    名称
-                    <input value={profileDraft.name} onChange={(event) => setProfileDraft({ ...profileDraft, name: event.target.value })} />
-                  </label>
-                  <label>
-                    Provider
-                    <select
-                      value={profileDraft.provider}
-                      onChange={(event) =>
-                        setProfileDraft({
-                          ...profileDraft,
-                          provider: event.target.value,
-                          base_url:
-                            event.target.value === "gemini"
-                              ? "https://generativelanguage.googleapis.com/v1beta"
-                              : profileDraft.base_url
-                        })
-                      }
-                    >
-                      <option value="openai-compatible">OpenAI 兼容</option>
-                      <option value="gemini">Google Gemini</option>
-                    </select>
-                  </label>
-                  <label>
-                    Base URL
-                    <input value={profileDraft.base_url} onChange={(event) => setProfileDraft({ ...profileDraft, base_url: event.target.value })} />
-                  </label>
-                  <label>
-                    模型名
-                    <div className="model-name-control">
-                      <input
-                        value={profileDraft.model}
-                        onChange={(event) => setProfileDraft({ ...profileDraft, model: event.target.value })}
-                      />
-                      {detectedModelSuggestions.length > 0 && (
-                        <button
-                          type="button"
-                          className="model-suggestion-trigger"
-                          title="选择检测到的服务商模型"
-                          aria-label="选择检测到的服务商模型"
-                          aria-expanded={openModelSuggestions}
-                          onClick={() => setOpenModelSuggestions((open) => !open)}
-                        >
-                          <ChevronDown size={16} />
-                        </button>
-                      )}
-                      {openModelSuggestions && detectedModelSuggestions.length > 0 && (
-                        <div className="model-suggestion-menu" role="listbox">
-                          {detectedModelSuggestions.map((suggestion) => (
-                            <button
-                              type="button"
-                              key={suggestion.model}
-                              role="option"
-                              aria-selected={profileDraft.model === suggestion.model}
-                              onClick={() => {
-                                setProfileDraft((draft) => ({ ...draft, model: suggestion.model }));
-                                setOpenModelSuggestions(false);
-                              }}
-                            >
-                              <span>{suggestion.label}</span>
-                              <small>{suggestion.model}</small>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </label>
-                  <label>
-                    Temperature
-                    <input
-                      type="number"
-                      min="0"
-                      max="2"
-                      step="0.1"
-                      value={profileDraft.temperature}
-                      onChange={(event) => setProfileDraft({ ...profileDraft, temperature: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label className="mode-field thinking-mode-field form-full" title={thinkingModeTooltip}>
-                    <span>思考模式</span>
-                    <div className="mode-toggle mode-toggle-three" role="radiogroup" aria-label="思考模式">
-                      <button
-                        type="button"
-                        className={profileDraft.thinking_mode === "auto" ? "active" : ""}
-                        role="radio"
-                        aria-checked={profileDraft.thinking_mode === "auto"}
-                        title={thinkingModeTooltip}
-                        onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "auto" })}
-                      >
-                        自动
-                      </button>
-                      <button
-                        type="button"
-                        className={profileDraft.thinking_mode === "off" ? "active" : ""}
-                        role="radio"
-                        aria-checked={profileDraft.thinking_mode === "off"}
-                        title={thinkingModeTooltip}
-                        onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "off" })}
-                      >
-                        关闭
-                      </button>
-                      <button
-                        type="button"
-                        className={profileDraft.thinking_mode === "on" ? "active" : ""}
-                        role="radio"
-                        aria-checked={profileDraft.thinking_mode === "on"}
-                        title={thinkingModeTooltip}
-                        onClick={() => setProfileDraft({ ...profileDraft, thinking_mode: "on" })}
-                      >
-                        开启
-                      </button>
-                    </div>
-                  </label>
-                  <label>
-                    API Key
-                    <input
-                      type="password"
-                      value={profileDraft.api_key}
-                      placeholder={selectedProfileId ? "留空则不保存 Key" : "填写 API Key 后保存"}
-                      onFocus={() => {
-                        if (profileDraft.api_key === savedApiKeyMask) setProfileDraft({ ...profileDraft, api_key: "" });
-                      }}
-                      onChange={(event) => setProfileDraft({ ...profileDraft, api_key: event.target.value })}
-                    />
-                    {selectedProfile?.api_key_storage === "database_fallback" && (
-                      <small className="credential-warning">
-                        系统凭据库不可用，API Key 当前以本地数据库兼容模式保存。
-                      </small>
-                    )}
-                  </label>
-                </fieldset>
-              </div>
-            </section>
+            <ModelConfig
+              draft={profileDraft}
+              setDraft={setProfileDraft}
+              selectedProfile={selectedProfile}
+              selectedProfileId={selectedProfileId}
+              suggestions={detectedModelSuggestions}
+              suggestionsOpen={openModelSuggestions}
+              busy={busy}
+              processing={processingTaskActive}
+              savedApiKeyMask={savedApiKeyMask}
+              thinkingModeTooltip={thinkingModeTooltip}
+              onSuggestionsOpenChange={setOpenModelSuggestions}
+              onCreate={createNewModelProfile}
+              onDiagnose={diagnoseProfile}
+              onSave={saveProfile}
+            />
 
             <section className="panel canon-panel">
               <div className="panel-heading">
@@ -2031,36 +1585,20 @@ export default function App() {
               </div>
             </section>
 
-            <section className="panel chapter-list-panel">
-              <div className="panel-heading">
-                <h2>章节</h2>
-              </div>
-              <div className="chapter-list">
-                {detail?.chapters.map((chapter) => (
-                  <button
-                    key={chapter.id}
-                    className={selectedChapter?.id === chapter.id ? "chapter-item active" : "chapter-item"}
-                    onClick={() => setSelectedChapterId(chapter.id)}
-                  >
-                    <span className="chapter-title">
-                      {chapter.index}. {displayChapterTitle(chapter)}
-                    </span>
-                    <small>
-                      分析 {statusText[chapter.analysis_status] ?? chapter.analysis_status} · 改写{" "}
-                      {statusText[chapter.rewrite_status] ?? chapter.rewrite_status}
-                    </small>
-                  </button>
-                ))}
-              </div>
-            </section>
+            <ChapterList
+              chapters={detail?.chapters ?? []}
+              selectedChapterId={selectedChapter?.id}
+              onSelect={setSelectedChapterId}
+              displayTitle={displayChapterTitle}
+              statusText={statusText}
+            />
 
           </div>
           </>
         )}
       </section>
       {settingsDialog && (
-        <div className="modal-backdrop">
-          <div className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
+        <Modal labelledBy="settings-dialog-title">
             {settingsDialog === "basic" ? (
               <>
                 <header className="dialog-titlebar">
@@ -2076,68 +1614,11 @@ export default function App() {
                   </button>
                 </header>
                 <div className="dialog-body">
-                  <fieldset className="form-grid" disabled={processingTaskActive}>
-                    <label>
-                      主角姓名（必填）
-                      <input
-                        value={novelSettingsDraft.protagonist_name}
-                        onChange={(event) =>
-                          setNovelSettingsDraft({ ...novelSettingsDraft, protagonist_name: event.target.value })
-                        }
-                        placeholder="例如：萧炎"
-                    />
-                  </label>
-                    <label className="settings-rewritten-name-field">
-                      改写后姓名（选填）
-                      <input
-                        value={novelSettingsDraft.rewritten_protagonist_name}
-                        onChange={(event) =>
-                          setNovelSettingsDraft({
-                            ...novelSettingsDraft,
-                            rewritten_protagonist_name: event.target.value
-                          })
-                        }
-                        placeholder="留空则让AI生成改写后姓名"
-                      />
-                    </label>
-                    <label className="settings-additional-names-field">
-                      其他需要女性化的人名（选填）
-                      <textarea
-                        value={novelSettingsDraft.additional_feminize_names}
-                        onChange={(event) =>
-                          setNovelSettingsDraft({
-                            ...novelSettingsDraft,
-                            additional_feminize_names: event.target.value
-                          })
-                        }
-                        placeholder="支持逗号或换行分隔"
-                      />
-                    </label>
-                    <label>
-                      身材
-                      <select
-                        value={novelSettingsDraft.bust}
-                        onChange={(event) => setNovelSettingsDraft({ ...novelSettingsDraft, bust: event.target.value })}
-                      >
-                        <option value="平胸">平胸</option>
-                        <option value="巨乳">巨乳</option>
-                      </select>
-                    </label>
-                    <label>
-                      体型
-                      <select
-                        value={novelSettingsDraft.body_type}
-                        onChange={(event) =>
-                          setNovelSettingsDraft({ ...novelSettingsDraft, body_type: event.target.value })
-                        }
-                      >
-                        <option value="萝莉">萝莉</option>
-                        <option value="御姐">御姐</option>
-                        <option value="少女">少女</option>
-                      </select>
-                    </label>
-                    {renderRewriteModeControl()}
-                  </fieldset>
+                  <NovelSettingsFields
+                    draft={novelSettingsDraft}
+                    setDraft={setNovelSettingsDraft}
+                    disabled={processingTaskActive}
+                  />
                 </div>
                 <footer className="dialog-actions">
                   <button onClick={() => setSettingsDialog("advanced")} disabled={busy === "novel-settings" || processingTaskActive}>
@@ -2182,12 +1663,10 @@ export default function App() {
                 </footer>
               </>
             )}
-          </div>
-        </div>
+        </Modal>
       )}
       {showQuickStart && (
-        <div className="modal-backdrop">
-          <div className="quickstart-dialog" role="dialog" aria-modal="true" aria-labelledby="quickstart-title">
+        <Modal className="quickstart-dialog" labelledBy="quickstart-title">
             <div className="quickstart-content">
               <h2 id="quickstart-title">快速上手</h2>
               <ol>
@@ -2203,8 +1682,7 @@ export default function App() {
                 确定
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   );

@@ -1,0 +1,130 @@
+import { ChevronDown, FilePlus2, KeyRound, Loader2, Save } from "lucide-react";
+import type { Dispatch, SetStateAction } from "react";
+import type { ModelProfile, ProfileDraft } from "../../types";
+import { ScrollablePanel } from "../common/ScrollablePanel";
+
+type ModelConfigProps = {
+  draft: ProfileDraft;
+  setDraft: Dispatch<SetStateAction<ProfileDraft>>;
+  selectedProfile?: ModelProfile;
+  selectedProfileId: string;
+  suggestions: Array<{ label: string; model: string }>;
+  suggestionsOpen: boolean;
+  busy: string;
+  processing: boolean;
+  savedApiKeyMask: string;
+  thinkingModeTooltip: string;
+  onSuggestionsOpenChange: (open: boolean) => void;
+  onCreate: () => void;
+  onDiagnose: () => void;
+  onSave: () => void;
+};
+
+export function ModelConfig(props: ModelConfigProps) {
+  const {
+    draft, setDraft, selectedProfile, selectedProfileId, suggestions, suggestionsOpen,
+    busy, processing, savedApiKeyMask, thinkingModeTooltip, onSuggestionsOpenChange,
+    onCreate, onDiagnose, onSave
+  } = props;
+  return (
+    <section className="panel model-panel">
+      <div className="panel-heading">
+        <h2>模型配置</h2>
+        <div className="panel-actions">
+          <button onClick={onCreate} disabled={busy !== "" || processing}><FilePlus2 size={16} />新建</button>
+          <button onClick={onDiagnose} disabled={!selectedProfileId || busy === "diagnose" || processing}>
+            {busy === "diagnose" ? <Loader2 className="spin" size={16} /> : <KeyRound size={16} />}诊断模型
+          </button>
+          <button onClick={onSave} disabled={busy === "profile" || processing}>
+            {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}保存
+          </button>
+        </div>
+      </div>
+      <ScrollablePanel className="model-scroll">
+        <fieldset className="form-grid model-form-grid" disabled={processing}>
+          <label>名称<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+          <label>
+            Provider
+            <select
+              value={draft.provider}
+              onChange={(event) => setDraft({
+                ...draft,
+                provider: event.target.value,
+                base_url: event.target.value === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : draft.base_url
+              })}
+            >
+              <option value="openai-compatible">OpenAI 兼容</option>
+              <option value="gemini">Google Gemini</option>
+            </select>
+          </label>
+          <label>Base URL<input value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} /></label>
+          <label>
+            模型名
+            <div className="model-name-control">
+              <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} />
+              {suggestions.length > 0 && (
+                <button
+                  type="button"
+                  className="model-suggestion-trigger"
+                  title="选择检测到的服务商模型"
+                  aria-label="选择检测到的服务商模型"
+                  aria-expanded={suggestionsOpen}
+                  onClick={() => onSuggestionsOpenChange(!suggestionsOpen)}
+                ><ChevronDown size={16} /></button>
+              )}
+              {suggestionsOpen && suggestions.length > 0 && (
+                <div className="model-suggestion-menu" role="listbox">
+                  {suggestions.map((suggestion) => (
+                    <button
+                      type="button"
+                      key={suggestion.model}
+                      role="option"
+                      aria-selected={draft.model === suggestion.model}
+                      onClick={() => {
+                        setDraft((current) => ({ ...current, model: suggestion.model }));
+                        onSuggestionsOpenChange(false);
+                      }}
+                    ><span>{suggestion.label}</span><small>{suggestion.model}</small></button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </label>
+          <label>
+            Temperature
+            <input type="number" min="0" max="2" step="0.1" value={draft.temperature} onChange={(event) => setDraft({ ...draft, temperature: Number(event.target.value) })} />
+          </label>
+          <label className="mode-field thinking-mode-field form-full" title={thinkingModeTooltip}>
+            <span>思考模式</span>
+            <div className="mode-toggle mode-toggle-three" role="radiogroup" aria-label="思考模式">
+              {(["auto", "off", "on"] as const).map((mode) => (
+                <button
+                  type="button"
+                  key={mode}
+                  className={draft.thinking_mode === mode ? "active" : ""}
+                  role="radio"
+                  aria-checked={draft.thinking_mode === mode}
+                  title={thinkingModeTooltip}
+                  onClick={() => setDraft({ ...draft, thinking_mode: mode })}
+                >{mode === "auto" ? "自动" : mode === "off" ? "关闭" : "开启"}</button>
+              ))}
+            </div>
+          </label>
+          <label>
+            API Key
+            <input
+              type="password"
+              value={draft.api_key}
+              placeholder={selectedProfileId ? "留空则不保存 Key" : "填写 API Key 后保存"}
+              onFocus={() => { if (draft.api_key === savedApiKeyMask) setDraft({ ...draft, api_key: "" }); }}
+              onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}
+            />
+            {selectedProfile?.api_key_storage === "database_fallback" && (
+              <small className="credential-warning">系统凭据库不可用，API Key 当前以本地数据库兼容模式保存。</small>
+            )}
+          </label>
+        </fieldset>
+      </ScrollablePanel>
+    </section>
+  );
+}
