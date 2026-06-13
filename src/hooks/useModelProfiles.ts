@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
-import type { ModelProfile, ProfileDraft } from "../types";
+import { useAppStore } from "../store/appStore";
+import type { ProfileDraft } from "../types";
 
 export function useModelProfiles(initialDraft: ProfileDraft) {
-  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
+  const profiles = useAppStore((state) => state.profiles);
+  const setProfiles = useAppStore((state) => state.setProfiles);
   const [profileDraft, setProfileDraft] = useState(initialDraft);
-  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const selectedProfileId = useAppStore((state) => state.selectedProfileId);
+  const setSelectedProfileId = useAppStore((state) => state.setSelectedProfileId);
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedProfileId),
     [profiles, selectedProfileId]

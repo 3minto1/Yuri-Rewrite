@@ -81,6 +81,22 @@ pre {
   height: 100vh;
 }
 
+.fatal-error-page {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.fatal-error-page section {
+  background: #fff;
+  border: 1px solid #ded9ce;
+  border-radius: 10px;
+  max-width: 560px;
+  padding: 24px;
+}
+
 .drop-import-overlay {
   align-items: center;
   background: rgba(28, 27, 25, 0.38);
@@ -1406,6 +1422,15 @@ label {
   flex: 1;
   min-height: 0;
   padding-right: 8px;
+}
+
+.virtual-chapter-list [role="listitem"] {
+  padding-right: 8px;
+}
+
+.virtual-chapter-list .chapter-item {
+  width: 100%;
+  height: 68px;
 }
 
 .chapter-item {

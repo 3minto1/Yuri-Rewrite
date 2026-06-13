@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { ChapterBatch } from "../../types";
 
 type BatchPanelProps = {
@@ -7,7 +8,7 @@ type BatchPanelProps = {
   onSelect: (batchId: string) => void;
 };
 
-export function BatchPanel({ batches, selectedBatch, selectedBatchId, onSelect }: BatchPanelProps) {
+export const BatchPanel = memo(function BatchPanel({ batches, selectedBatch, selectedBatchId, onSelect }: BatchPanelProps) {
   return (
     <div className="batch-strip">
       <label>
@@ -27,4 +28,4 @@ export function BatchPanel({ batches, selectedBatch, selectedBatchId, onSelect }
       </span>
     </div>
   );
-}
+});

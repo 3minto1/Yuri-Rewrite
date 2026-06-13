@@ -21,7 +21,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CompareView } from "./components/Compare/CompareView";
 import { Modal } from "./components/common/Modal";
 import { AppSettingsView } from "./components/Settings/AppSettings";
@@ -1077,17 +1077,17 @@ export default function App() {
     });
   }
 
-  function displayChapterTitle(chapter: Chapter) {
+  const displayChapterTitle = useCallback((chapter: Chapter) => {
     const title = chapter.title.replace(/\s+/g, " ").trim();
     return title || `第 ${chapter.index} 章`;
-  }
+  }, []);
 
-  function formatNumber(value?: number | null) {
+  const formatNumber = useCallback((value?: number | null) => {
     if (value === null || value === undefined) return "暂无";
     return new Intl.NumberFormat("zh-CN").format(Math.round(value));
-  }
+  }, []);
 
-  function formatSeconds(value?: number | null) {
+  const formatSeconds = useCallback((value?: number | null) => {
     if (value === null || value === undefined) return "暂无历史数据";
     if (value < 60) return `${value.toFixed(1)} 秒`;
     const minutes = Math.floor(value / 60);
@@ -1096,7 +1096,7 @@ export default function App() {
     const hours = Math.floor(minutes / 60);
     const restMinutes = minutes % 60;
     return `${hours} 小时 ${restMinutes} 分`;
-  }
+  }, []);
 
   function diagnosisStatusText(status: DiagnosisStatus) {
     if (status === "ok") return "通过";

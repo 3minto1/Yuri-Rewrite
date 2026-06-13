@@ -1,5 +1,5 @@
 import { ArrowLeft, Download } from "lucide-react";
-import type { RefObject } from "react";
+import { memo, type RefObject } from "react";
 import type { Chapter } from "../../types";
 
 type CompareViewProps = {
@@ -14,7 +14,7 @@ type CompareViewProps = {
   onExport: () => void;
 };
 
-export function CompareView(props: CompareViewProps) {
+export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const { chapters, selectedChapter, selectedChapterId, busy, originalRef, rewriteRef, onSelectChapter, onBack, onExport } = props;
   return (
     <div className="compare-page">
@@ -38,4 +38,4 @@ export function CompareView(props: CompareViewProps) {
       ) : <p className="muted">请选择章节。</p>}
     </div>
   );
-}
+});

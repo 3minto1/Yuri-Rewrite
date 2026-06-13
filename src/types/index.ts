@@ -172,3 +172,4 @@ export type NovelSettingsDraft = {
 
 export type ExportResult = { path: string };
 export type CanonAssetInput = Pick<CanonAsset, "kind" | "content">;
+export type AutoRunState = "idle" | "running" | "paused" | "stopping";

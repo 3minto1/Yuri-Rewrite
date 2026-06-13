@@ -355,7 +355,8 @@ pub fn run() {
             export_novel,
             open_github_url,
             check_for_updates,
-            download_latest_update
+            download_latest_update,
+            record_frontend_error
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuri Rewrite");
@@ -3615,6 +3616,36 @@ fn append_text_file(path: &Path, content: &str) -> Result<(), String> {
         .open(path)
         .map_err(to_string)?;
     file.write_all(content.as_bytes()).map_err(to_string)
+}
+
+#[tauri::command]
+fn record_frontend_error(
+    message: String,
+    stack: Option<String>,
+    component_stack: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let content =
+        format_frontend_error_entry(&message, stack.as_deref(), component_stack.as_deref());
+    append_text_file(&state.app_dir.join("frontend-errors.log"), &content)
+}
+
+fn format_frontend_error_entry(
+    message: &str,
+    stack: Option<&str>,
+    component_stack: Option<&str>,
+) -> String {
+    let message = redact_sensitive_text(&truncate_text(message, 4_000));
+    let stack = redact_sensitive_text(&truncate_text(stack.unwrap_or(""), 12_000));
+    let component_stack =
+        redact_sensitive_text(&truncate_text(component_stack.unwrap_or(""), 12_000));
+    format!(
+        "[{}] Frontend render error\nMessage: {}\nStack:\n{}\nComponent stack:\n{}\n\n",
+        Utc::now().to_rfc3339(),
+        message,
+        stack,
+        component_stack
+    )
 }
 
 fn format_review_issues(issues: &[String]) -> String {
@@ -9188,5 +9219,18 @@ mod tests {
         // Empty text.
         assert!(extract_tailing_json_from_text("").is_none());
         assert!(extract_tailing_json_from_text("   ").is_none());
+    }
+
+    #[test]
+    fn frontend_error_log_redacts_sensitive_values() {
+        let entry = format_frontend_error_entry(
+            "request failed Authorization: Bearer secret-token",
+            Some("https://example.com?api_key=secret-key"),
+            Some("at App"),
+        );
+        assert!(!entry.contains("secret-token"));
+        assert!(!entry.contains("secret-key"));
+        assert!(entry.contains("[REDACTED]"));
+        assert!(entry.contains("at App"));
     }
 }

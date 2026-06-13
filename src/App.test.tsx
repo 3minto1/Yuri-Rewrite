@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
 import type { AppSettings, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
 
@@ -109,6 +110,7 @@ describe("App feature behavior", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
+    useAppStore.getState().reset();
     mocks.invoke.mockReset();
     mocks.progressCallback = undefined;
     window.localStorage.setItem("yuri-rewrite.quick-start-seen", "true");

@@ -1,4 +1,5 @@
 import { ChevronDown } from "lucide-react";
+import { memo } from "react";
 import type { JobEstimate } from "../../types";
 
 type TaskEstimateProps = {
@@ -9,7 +10,7 @@ type TaskEstimateProps = {
   formatSeconds: (value?: number | null) => string;
 };
 
-export function TaskEstimate({ estimate, collapsed, onToggle, formatNumber, formatSeconds }: TaskEstimateProps) {
+export const TaskEstimate = memo(function TaskEstimate({ estimate, collapsed, onToggle, formatNumber, formatSeconds }: TaskEstimateProps) {
   return (
     <section className={`estimate-panel ${collapsed ? "collapsed" : ""}`} aria-label="任务预估">
       <div className="estimate-heading">
@@ -39,4 +40,4 @@ export function TaskEstimate({ estimate, collapsed, onToggle, formatNumber, form
       )}
     </section>
   );
-}
+});
