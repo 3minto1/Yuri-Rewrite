@@ -95,7 +95,7 @@ function installDefaultCommands() {
     if (command === "list_ai_logs") return [];
     if (command === "estimate_job_cost") return estimate;
     if (command === "check_for_updates") {
-      return { current_version: "0.1.20", latest_version: "0.1.20", latest_tag: "v0.1.20", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return { current_version: "0.1.21", latest_version: "0.1.21", latest_tag: "v0.1.21", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
     }
     if (command === "start_analysis") {
       return { id: "job-1", novel_id: "novel-1", job_type: "analysis", status: "completed", current_chapter: 1, total_chapters: 1, message: "完成" };
@@ -166,5 +166,44 @@ describe("App feature behavior", () => {
     expect(screen.getByText("原文内容")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "TXT" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("export_novel", { novelId: "novel-1", format: "txt" }));
+  });
+
+  it("closes compare search before Escape returns to the workspace", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    await screen.findByRole("textbox", { name: "全局搜索" });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("textbox", { name: "全局搜索" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("heading", { name: "章节" })).toBeInTheDocument();
+  });
+
+  it("requires explicit confirmation and describes novel deletion scope", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    fireEvent.click(screen.getByRole("button", { name: "打开《测试小说》菜单" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除当前小说" }));
+
+    const dialog = screen.getByRole("dialog", { name: "确认删除小说" });
+    expect(within(dialog).getByText("该小说生成的审查警告日志")).toBeInTheDocument();
+    expect(within(dialog).getByText("最初导入的原始 TXT 文件")).toBeInTheDocument();
+    expect(within(dialog).getByText("已经导出到输出目录的改写 TXT 文件")).toBeInTheDocument();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("delete_novel", expect.anything());
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog", { name: "确认删除小说" })).not.toBeInTheDocument();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("delete_novel", expect.anything());
+
+    fireEvent.click(screen.getByRole("button", { name: "打开《测试小说》菜单" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除当前小说" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("delete_novel", { novelId: "novel-1" })
+    );
   });
 });

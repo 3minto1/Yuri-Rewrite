@@ -24,7 +24,7 @@ use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
 };
@@ -1816,7 +1816,7 @@ fn append_review_warning_file_for_title(
     second_decision: &ReviewDecision,
     third_decision: &ReviewDecision,
 ) -> String {
-    let file_name = format!("{}_审查警告.log", sanitize_file_name(novel_title));
+    let [root_path, fallback_path] = review_warning_file_paths(app_dir, data_dir, novel_title);
     let content = format!(
         "\n===== {} =====\n小说：{}\n分片：{}\n结果：第三次审查仍未通过，程序已保存第二次重写稿并继续处理后续分片。\n\n第二次审查问题：\n{}\n\n第三次审查问题：\n{}\n",
         Utc::now().to_rfc3339(),
@@ -1826,24 +1826,29 @@ fn append_review_warning_file_for_title(
         format_review_issues(&third_decision.issues)
     );
 
-    let root_path = app_dir.join(&file_name);
     match append_text_file(&root_path, &content) {
         Ok(()) => root_path.to_string_lossy().to_string(),
-        Err(root_error) => {
-            let fallback_path = data_dir.join(&file_name);
-            match append_text_file(&fallback_path, &content) {
-                Ok(()) => format!(
-                    "{}（写入软件根目录失败，已改写入应用数据目录：{}）",
-                    fallback_path.to_string_lossy(),
-                    root_error
-                ),
-                Err(fallback_error) => format!(
-                    "警告日志写入失败；软件根目录错误：{}；应用数据目录错误：{}",
-                    root_error, fallback_error
-                ),
-            }
-        }
+        Err(root_error) => match append_text_file(&fallback_path, &content) {
+            Ok(()) => format!(
+                "{}（写入软件根目录失败，已改写入应用数据目录：{}）",
+                fallback_path.to_string_lossy(),
+                root_error
+            ),
+            Err(fallback_error) => format!(
+                "警告日志写入失败；软件根目录错误：{}；应用数据目录错误：{}",
+                root_error, fallback_error
+            ),
+        },
     }
+}
+
+pub(crate) fn review_warning_file_paths(
+    app_dir: &Path,
+    data_dir: &Path,
+    novel_title: &str,
+) -> [PathBuf; 2] {
+    let file_name = format!("{}_审查警告.log", sanitize_file_name(novel_title));
+    [app_dir.join(&file_name), data_dir.join(file_name)]
 }
 
 fn append_text_file(path: &Path, content: &str) -> Result<(), String> {

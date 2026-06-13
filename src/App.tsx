@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CompareView } from "./components/Compare/CompareView";
+import { DeleteNovelDialog } from "./components/common/DeleteNovelDialog";
 import { Modal } from "./components/common/Modal";
 import { AppSettingsView } from "./components/Settings/AppSettings";
 import { ModelProfiles } from "./components/Settings/ModelProfiles";
@@ -231,6 +232,7 @@ export default function App() {
   const [estimateCollapsed, setEstimateCollapsed] = useState(false);
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
+  const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "settings">("workspace");
   const [notice, setNotice] = useState("");
   const [noticeDuration, setNoticeDuration] = useState(5000);
@@ -238,8 +240,8 @@ export default function App() {
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [showQuickStart, setShowQuickStart] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const originalCompareRef = useRef<HTMLPreElement | null>(null);
-  const rewriteCompareRef = useRef<HTMLPreElement | null>(null);
+  const originalCompareRef = useRef<HTMLDivElement | null>(null);
+  const rewriteCompareRef = useRef<HTMLDivElement | null>(null);
   const busyRef = useRef("");
   const importInProgressRef = useRef(false);
   const processingTaskActiveRef = useRef(processingTaskActive);
@@ -369,14 +371,19 @@ export default function App() {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && activeView !== "workspace" && !settingsDialog) {
+      if (event.key !== "Escape") return;
+      if (novelPendingDeletion && busy !== "delete-novel") {
+        setNovelPendingDeletion(null);
+        return;
+      }
+      if (activeView !== "workspace" && !settingsDialog && !novelPendingDeletion) {
         setActiveView("workspace");
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, settingsDialog]);
+  }, [activeView, busy, novelPendingDeletion, settingsDialog]);
 
   useEffect(() => {
     const profile = selectedProfile;
@@ -595,12 +602,23 @@ export default function App() {
     }
   }
 
-  async function deleteNovel(novel: Novel) {
+  function deleteNovel(novel: Novel) {
     if (processingTaskActive) {
       showNotice("当前任务运行或暂停中，不能删除小说。");
       return;
     }
-    if (!window.confirm(`删除《${novel.title}》及其本地分析、改写和日志数据？`)) return;
+    setOpenNovelMenuId("");
+    setNovelPendingDeletion(novel);
+  }
+
+  async function confirmDeleteNovel() {
+    const novel = novelPendingDeletion;
+    if (!novel) return;
+    if (processingTaskActive) {
+      setNovelPendingDeletion(null);
+      showNotice("当前任务运行或暂停中，不能删除小说。");
+      return;
+    }
     setBusy("delete-novel");
     setNotice("");
     try {
@@ -620,6 +638,7 @@ export default function App() {
           setLogs([]);
         }
       }
+      setNovelPendingDeletion(null);
       showNotice(`已删除《${novel.title}》。`);
     } catch (error) {
       showNotice(String(error));
@@ -1664,6 +1683,14 @@ export default function App() {
               </>
             )}
         </Modal>
+      )}
+      {novelPendingDeletion && (
+        <DeleteNovelDialog
+          busy={busy === "delete-novel"}
+          novel={novelPendingDeletion}
+          onCancel={() => setNovelPendingDeletion(null)}
+          onConfirm={confirmDeleteNovel}
+        />
       )}
       {showQuickStart && (
         <Modal className="quickstart-dialog" labelledBy="quickstart-title">
