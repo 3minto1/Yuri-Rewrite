@@ -95,7 +95,7 @@ function installDefaultCommands() {
     if (command === "list_ai_logs") return [];
     if (command === "estimate_job_cost") return estimate;
     if (command === "check_for_updates") {
-      return { current_version: "0.1.21", latest_version: "0.1.21", latest_tag: "v0.1.21", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return { current_version: "0.2.0", latest_version: "0.2.0", latest_tag: "v0.2.0", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
     }
     if (command === "start_analysis") {
       return { id: "job-1", novel_id: "novel-1", job_type: "analysis", status: "completed", current_chapter: 1, total_chapters: 1, message: "完成" };

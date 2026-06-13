@@ -66,6 +66,31 @@ pub(crate) fn parse_gemini_parts(value: &Value) -> Result<(String, Option<String
     ))
 }
 
+pub(crate) fn model_output_truncation_error(raw_response: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(raw_response).ok()?;
+    let reason = value["choices"][0]["finish_reason"]
+        .as_str()
+        .or_else(|| value["candidates"][0]["finishReason"].as_str())
+        .or_else(|| value["stop_reason"].as_str())
+        .or_else(|| value["incomplete_details"]["reason"].as_str())?;
+    let normalized = reason.trim().to_ascii_lowercase();
+    let truncated = matches!(
+        normalized.as_str(),
+        "length"
+            | "max_tokens"
+            | "max_token"
+            | "max_output_tokens"
+            | "max_completion_tokens"
+            | "token_limit"
+    );
+    truncated.then(|| {
+        format!(
+            "模型输出因达到长度上限被截断（结束原因：{}），当前结果不完整",
+            reason.trim()
+        )
+    })
+}
+
 pub(crate) fn should_retry_without_thinking(status: u16, body: &str) -> bool {
     if !matches!(status, 400 | 422) {
         return false;
@@ -146,5 +171,25 @@ mod tests {
         assert!(!should_retry_without_thinking(429, "thinking rate limit"));
         assert!(!should_retry_without_thinking(500, "unsupported thinking"));
         assert!(!should_retry_without_thinking(400, "invalid model name"));
+    }
+
+    #[test]
+    fn detects_provider_output_length_truncation() {
+        for value in [
+            json!({"choices": [{"finish_reason": "length"}]}),
+            json!({"candidates": [{"finishReason": "MAX_TOKENS"}]}),
+            json!({"stop_reason": "max_tokens"}),
+            json!({"incomplete_details": {"reason": "max_output_tokens"}}),
+        ] {
+            let error = model_output_truncation_error(&value.to_string())
+                .expect("length truncation should be detected");
+            assert!(error.contains("达到长度上限被截断"));
+        }
+
+        assert!(model_output_truncation_error(
+            &json!({"choices": [{"finish_reason": "stop"}]}).to_string()
+        )
+        .is_none());
+        assert!(model_output_truncation_error("not json").is_none());
     }
 }

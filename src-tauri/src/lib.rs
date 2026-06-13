@@ -16,6 +16,7 @@ use commands::{
 use credentials::{classify_api_key_storage, read_api_key, write_api_key, ApiKeyStorage};
 use db::init_db;
 use domain::*;
+use model_support::model_output_truncation_error;
 use regex::Regex;
 use reqwest::Client;
 use rusqlite::{params, Connection};
@@ -928,7 +929,7 @@ async fn generate_rewrite_shards(
                     output.reasoning.as_deref(),
                     Some(&output.raw_response),
                 )?;
-                let parsed = match parse_batch_rewrite_output(&output.text, &shard) {
+                let parsed = match parse_rewrite_model_output(&output, &shard) {
                     Ok(parsed) => parsed,
                     Err(error) => {
                         append_ai_log(
@@ -1093,7 +1094,7 @@ async fn recover_rewrite_shard_by_subdivision(
                     Some(&output.raw_response),
                 )?;
 
-                match parse_batch_rewrite_output(&output.text, &subshard) {
+                match parse_rewrite_model_output(&output, &subshard) {
                     Ok(mut subparsed) => parsed.append(&mut subparsed),
                     Err(parse_error) => {
                         append_ai_log(
@@ -1681,7 +1682,7 @@ async fn revise_rewrite_shard_after_review(
                 output.reasoning.as_deref(),
                 Some(&output.raw_response),
             )?;
-            match parse_batch_rewrite_output(&output.text, shard) {
+            match parse_rewrite_model_output(&output, shard) {
                 Ok(parsed) => Ok(parsed),
                 Err(error) => {
                     append_ai_log(
@@ -1695,7 +1696,43 @@ async fn revise_rewrite_shard_after_review(
                         output.reasoning.as_deref(),
                         Some(&output.raw_response),
                     )?;
-                    Err(format!("审查打回后重写结果无法解析：{}", error))
+                    match retry_revision_shard_after_parse_error(
+                        state,
+                        novel_id,
+                        profile,
+                        api_key,
+                        shard,
+                        rewrites,
+                        canon_text,
+                        settings,
+                        core_prompt,
+                        shard_context,
+                        shard_label,
+                        decision,
+                        &error,
+                        &output.text,
+                    )
+                    .await
+                    {
+                        Ok(parsed) => Ok(parsed),
+                        Err(retry_error) => {
+                            recover_revision_shard_by_subdivision(
+                                state,
+                                novel_id,
+                                profile,
+                                api_key,
+                                shard,
+                                rewrites,
+                                canon_text,
+                                settings,
+                                core_prompt,
+                                shard_label,
+                                decision,
+                                &retry_error,
+                            )
+                            .await
+                        }
+                    }
                 }
             }
         }
@@ -1877,6 +1914,316 @@ fn format_review_issues(issues: &[String]) -> String {
     }
 }
 
+fn parse_rewrite_model_output(
+    output: &ModelOutput,
+    chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    if let Some(error) = model_output_truncation_error(&output.raw_response) {
+        return Err(error);
+    }
+    parse_batch_rewrite_output(&output.text, chapters)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retry_revision_shard_after_parse_error(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    shard_context: &str,
+    shard_label: &str,
+    decision: &ReviewDecision,
+    parse_error: &str,
+    bad_output: &str,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let retry_context = format!(
+        "{}\n\n审查打回格式修复重试：上一次完整重写输出无法解析，错误：{}。必须重新输出当前分片的全部章节，并完整保留每章开始和结束标记。",
+        shard_context.trim(),
+        parse_error
+    );
+    let base_prompt = build_batch_revision_prompt_with_context(
+        shard,
+        rewrites,
+        canon_text,
+        settings,
+        core_prompt,
+        retry_context.trim(),
+        decision,
+    );
+    let prompt = format!(
+        "{}\n\n上一次无法解析的审查打回重写输出如下，仅用于识别格式错误，不要照抄残缺正文或错误边界：\n{}",
+        base_prompt,
+        truncate_text(bad_output, 12_000)
+    );
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说审查打回重写格式修复助手。必须按审查问题重新输出当前分片的完整改写稿，逐字保留全部章节开始和结束标记，不要解释。",
+        &prompt,
+        false,
+    )
+    .await;
+
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次打回重写重试",
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, Some(true)),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            match parse_rewrite_model_output(&output, shard) {
+                Ok(parsed) => Ok(parsed),
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        "批次打回重写重试解析",
+                        Some(shard_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    Err(format!(
+                        "审查打回重写解析失败后已自动重试，但重试输出仍无法解析：{}",
+                        error
+                    ))
+                }
+            }
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次打回重写重试",
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(format!("审查打回重写解析失败后自动重试也失败：{}", error))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_revision_shard_by_subdivision(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    shard_label: &str,
+    decision: &ReviewDecision,
+    original_error: &str,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let Some(split) = split_revision_for_recovery(shard, rewrites) else {
+        return Err(format!(
+            "审查打回重写自动细分到单章后仍无法解析：{}",
+            original_error
+        ));
+    };
+    let (left_chapters, left_rewrites) = split.left;
+    let (right_chapters, right_rewrites) = split.right;
+
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &profile.id,
+        "批次打回重写自动细分",
+        Some(shard_label),
+        "running",
+        &format!(
+            "审查打回重写解析重试后仍失败，开始自动细分为更小分片。原错误：{}",
+            original_error
+        ),
+        None,
+        None,
+    )?;
+
+    let mut pending = std::collections::VecDeque::from([
+        (
+            format!("{} · 审查打回自动细分 1", shard_label),
+            left_chapters,
+            left_rewrites,
+        ),
+        (
+            format!("{} · 审查打回自动细分 2", shard_label),
+            right_chapters,
+            right_rewrites,
+        ),
+    ]);
+    let mut parsed = Vec::new();
+
+    while let Some((label, subshard, subrewrites)) = pending.pop_front() {
+        if let Some(status) = requested_auto_run_stop(state, novel_id)? {
+            return Err(status);
+        }
+
+        let batch_label = format_batch_label(&subshard);
+        let context = format!(
+            "{}\n\n审查打回自动细分：当前只重新处理这个更小分片。必须逐条修复审查问题，完整输出当前分片内全部章节，不要输出原大分片中的其他章节。",
+            format_shard_context(0, 1, 1, &batch_label, &subshard)
+        );
+        let prompt = build_batch_revision_prompt_with_context(
+            &subshard,
+            &subrewrites,
+            canon_text,
+            settings,
+            core_prompt,
+            &context,
+            decision,
+        );
+        let output = generate_text(
+            &state.client,
+            profile,
+            api_key,
+            "你是中文小说改写专家。当前是审查打回稿的自动细分重写，只输出当前输入章节的完整边界标记、标题和正文，不要解释。",
+            &prompt,
+            false,
+        )
+        .await;
+
+        match output {
+            Ok(output) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次打回重写自动细分",
+                    Some(&label),
+                    "success",
+                    &format_model_log_content(&output, profile, Some(true)),
+                    output.reasoning.as_deref(),
+                    Some(&output.raw_response),
+                )?;
+                match parse_rewrite_model_output(&output, &subshard) {
+                    Ok(mut subparsed) => parsed.append(&mut subparsed),
+                    Err(parse_error) => {
+                        append_ai_log(
+                            state,
+                            Some(novel_id),
+                            &profile.id,
+                            "批次打回重写自动细分解析",
+                            Some(&label),
+                            "error",
+                            &parse_error,
+                            output.reasoning.as_deref(),
+                            Some(&output.raw_response),
+                        )?;
+                        match retry_revision_shard_after_parse_error(
+                            state,
+                            novel_id,
+                            profile,
+                            api_key,
+                            &subshard,
+                            &subrewrites,
+                            canon_text,
+                            settings,
+                            core_prompt,
+                            &context,
+                            &label,
+                            decision,
+                            &parse_error,
+                            &output.text,
+                        )
+                        .await
+                        {
+                            Ok(mut retried) => parsed.append(&mut retried),
+                            Err(retry_error) => {
+                                if let Some(split) =
+                                    split_revision_for_recovery(&subshard, &subrewrites)
+                                {
+                                    let (left_chapters, left_rewrites) = split.left;
+                                    let (right_chapters, right_rewrites) = split.right;
+                                    pending.push_front((
+                                        format!("{} · 继续细分 2", label),
+                                        right_chapters,
+                                        right_rewrites,
+                                    ));
+                                    pending.push_front((
+                                        format!("{} · 继续细分 1", label),
+                                        left_chapters,
+                                        left_rewrites,
+                                    ));
+                                } else {
+                                    return Err(format!(
+                                        "审查打回重写自动细分到单章后仍无法解析：{}",
+                                        retry_error
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                append_ai_log(
+                    state,
+                    Some(novel_id),
+                    &profile.id,
+                    "批次打回重写自动细分",
+                    Some(&label),
+                    "error",
+                    &error,
+                    None,
+                    None,
+                )?;
+                return Err(format!("审查打回自动细分调用失败：{}", error));
+            }
+        }
+    }
+
+    parsed.sort_by_key(|rewrite| rewrite.index);
+    if parsed.len() == shard.len() {
+        Ok(parsed)
+    } else {
+        Err(format!(
+            "审查打回自动细分后章节数量不匹配：期望 {} 章，得到 {} 章。",
+            shard.len(),
+            parsed.len()
+        ))
+    }
+}
+
+struct RevisionRecoverySplit {
+    left: (Vec<Chapter>, Vec<ParsedChapterRewrite>),
+    right: (Vec<Chapter>, Vec<ParsedChapterRewrite>),
+}
+
+fn split_revision_for_recovery(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+) -> Option<RevisionRecoverySplit> {
+    if chapters.len() <= 1 || chapters.len() != rewrites.len() {
+        return None;
+    }
+    let mid = chapters.len().div_ceil(2);
+    Some(RevisionRecoverySplit {
+        left: (chapters[..mid].to_vec(), rewrites[..mid].to_vec()),
+        right: (chapters[mid..].to_vec(), rewrites[mid..].to_vec()),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn retry_rewrite_shard_after_parse_error(
     state: &State<'_, AppState>,
@@ -1933,7 +2280,7 @@ async fn retry_rewrite_shard_after_parse_error(
                 output.reasoning.as_deref(),
                 Some(&output.raw_response),
             )?;
-            match parse_batch_rewrite_output(&output.text, shard) {
+            match parse_rewrite_model_output(&output, shard) {
                 Ok(parsed) => Ok(parsed),
                 Err(error) => {
                     append_ai_log(
@@ -4074,6 +4421,62 @@ mod tests {
         assert_eq!(left.len(), 2);
         assert_eq!(right.len(), 1);
         assert!(split_chapters_for_rewrite_recovery(&chapters[..1]).is_none());
+    }
+
+    #[test]
+    fn rewrite_parser_rejects_provider_length_truncation_before_marker_parsing() {
+        let chapter = sample_chapter(1, "第一章", "原文");
+        let output = ModelOutput {
+            text: format!(
+                "{}\n标题：第一章\n正文：\n完整正文\n{}",
+                chapter_start_marker(&chapter),
+                chapter_end_marker(&chapter)
+            ),
+            reasoning: None,
+            raw_response: json!({
+                "choices": [{"finish_reason": "length"}]
+            })
+            .to_string(),
+            input_chars: 10,
+            output_chars: 10,
+            elapsed_ms: 10,
+            retried_without_thinking: false,
+        };
+
+        let error = parse_rewrite_model_output(&output, &[chapter])
+            .expect_err("truncated output must not be saved");
+        assert!(error.contains("达到长度上限被截断"));
+    }
+
+    #[test]
+    fn review_revision_recovery_keeps_chapters_and_previous_rewrites_aligned() {
+        let chapters = (1..=5)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
+            .collect::<Vec<_>>();
+        let rewrites = chapters
+            .iter()
+            .map(|chapter| ParsedChapterRewrite {
+                id: chapter.id.clone(),
+                index: chapter.index,
+                title: chapter.title.clone(),
+                text: format!("改写正文 {}", chapter.index),
+            })
+            .collect::<Vec<_>>();
+
+        let split = split_revision_for_recovery(&chapters, &rewrites).expect("split revisions");
+        let (left_chapters, left_rewrites) = split.left;
+        let (right_chapters, right_rewrites) = split.right;
+
+        assert_eq!(left_chapters.len(), 3);
+        assert_eq!(right_chapters.len(), 2);
+        for (chapter, rewrite) in left_chapters
+            .iter()
+            .zip(left_rewrites.iter())
+            .chain(right_chapters.iter().zip(right_rewrites.iter()))
+        {
+            assert_eq!(chapter.id, rewrite.id);
+            assert_eq!(chapter.index, rewrite.index);
+        }
     }
 
     #[test]
