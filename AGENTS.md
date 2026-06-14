@@ -2,219 +2,201 @@
 
 ## Project Overview
 
-Yuri Rewrite is a Windows-first local desktop app for importing TXT novels, analyzing them with user-configured AI models, and rewriting content into dual-female-lead / yuri versions.
+Yuri Rewrite is a Windows-first, local-first Tauri desktop application. It imports TXT novels, analyzes original canon with user-configured AI models, and rewrites eligible chapters into dual-female-lead / yuri versions.
 
-The app is local-first. Novel text, chapter batches, internal batch TXT files, analysis output, rewrite drafts, canon assets, logs, model profiles, novel settings, app settings, and export output are stored on the user's machine.
+The user owns the AI account and API key. Novel content, SQLite data, internal batch files, rewrite drafts, canon assets, logs, settings, and exports are stored locally. Online model calls send only the content required for the selected operation to the configured provider.
 
 ## Tech Stack
 
-- Frontend: React + TypeScript + Vite
-- Desktop shell: Tauri v2
-- Backend: Rust Tauri commands
-- Local storage: SQLite through `rusqlite`
+- Frontend: React 18, TypeScript, Vite, Zustand, Vitest, React Testing Library
+- Desktop: Tauri v2
+- Backend: Rust
+- Storage: SQLite through `rusqlite`
+- Credentials: Windows Credential Manager through `keyring`, with an explicit SQLite fallback
 - UI icons: `lucide-react`
 - AI providers: OpenAI-compatible chat completions and Gemini
 
-## Repository Layout
+## Current Repository Layout
 
-- `src/`: React frontend.
-- `App.tsx`: Main UI, navigation, model configuration, model diagnosis, quick-start/help modal, settings dialogs, logs page, compare page, workspace interactions, one-click controls.
-  - `styles.css`: Application styling.
-  - `main.tsx`: React entrypoint.
-- `src-tauri/`: Rust / Tauri backend.
-- `src/lib.rs`: Tauri commands, SQLite schema and migrations, import/export logic, chapter splitting, model calls, model diagnosis, task estimation, batch analysis/rewrite/review, AI logs.
-  - `src/main.rs`: Tauri entrypoint. Release builds use `windows_subsystem = "windows"` to hide the console window.
-  - `capabilities/default.json`: Tauri ACL permissions.
-  - `tauri.conf.json`: Tauri app and bundle configuration.
-- `scripts/package-portable.ps1`: Builds a portable Windows zip from the release executable.
-- `portable/`: Generated local release artifacts. Ignored by git.
-- `dist/`, `node_modules/`, `src-tauri/target/`: Generated artifacts. Ignored by git.
+- `src/App.tsx`: top-level navigation, orchestration, and page composition.
+- `src/components/Workspace/`: workspace panels such as chapter, batch, model, and task views.
+- `src/components/Settings/`: application, novel, and model settings views.
+- `src/components/Compare/`: compare page, global search, diff worker, and highlighting.
+- `src/components/common/`: shared modal, error boundary, and layout components.
+- `src/hooks/`: novel, model-profile, and task-state hooks.
+- `src/store/appStore.ts`: non-persistent Zustand runtime state.
+- `src/types/`: shared frontend domain types.
+- `src/tauriApi.ts`: strongly typed Tauri command boundary. Keep command names and argument mappings centralized here.
+- `src-tauri/src/commands/`: Tauri commands grouped by domain.
+- `src-tauri/src/ai/`: provider calls, prompts, response parsing, and shared AI behavior.
+- `src-tauri/src/db/`: SQLite schema and migrations.
+- `src-tauri/src/text/`: encoding detection and chapter splitting.
+- `src-tauri/src/credentials.rs`: system credential and database-fallback behavior.
+- `src-tauri/src/task_control.rs`: active-task locking and cancellation.
+- `src-tauri/src/lib.rs`: application setup, shared orchestration, and `generate_handler!` registration.
+- `scripts/package-portable.ps1`: portable Windows packaging.
+- `clean-debug-cache.ps1`: guarded cleanup for Rust debug/dev artifacts only.
+
+## Windows Shell Rules
+
+Commands that may print Chinese text must set UTF-8 output first:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+```
+
+Use explicit UTF-8 encoding when reading or writing text files that may contain Chinese, for example `Get-Content -Encoding UTF8`. Use `apply_patch` for source-controlled manual edits.
 
 ## Common Commands
 
-Install dependencies:
-
 ```powershell
 npm install
-```
-
-Run development app:
-
-```powershell
 npm run tauri:dev
-```
-
-Build frontend only:
-
-```powershell
+npm test
 npm run build
-```
-
-Build Windows release:
-
-```powershell
+cargo test --manifest-path .\src-tauri\Cargo.toml
+cargo clippy --manifest-path .\src-tauri\Cargo.toml --all-targets --all-features -- -D warnings
 npm run tauri:build
-```
-
-Generate portable zip:
-
-```powershell
 npm run package:portable
 ```
 
-The portable zip is generated at:
+Safe debug-cache cleanup:
 
-```text
-portable/YuriRewrite-v{version}-windows-x64.zip
+```powershell
+powershell -ExecutionPolicy Bypass -File .\clean-debug-cache.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File .\clean-debug-cache.ps1
 ```
 
-## Product Behavior
+The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's dev profile. It must not remove source files, release artifacts, user data, `node_modules`, or portable packages.
 
-- TXT import should happen through Tauri backend commands, not browser-only file APIs.
-- Chapter recognition should handle common Chinese web novel heading formats, including common chapter units such as `章`, `节`, `回`, `卷`, `部`, `篇`, `集`, `幕`, `话`, `夜`, `案`, `场`, `弹`, `折`, and `更`.
-- Loose numbered headings are a fallback only: use them only when no standard `第 N 章`-style headings are detected, and require sequential candidate numbering so ordinary numbered lists are not misclassified as chapters.
-- When chapters cannot be detected, split the text by length.
-- Chapter-based batching is fixed at 30 chapters per batch.
-- Non-chapter batching is fixed at 100,000 characters per batch.
-- Analysis requires the novel settings record to exist, but the analysis prompt must still analyze the original novel only.
-- Analysis works at batch level and may split a batch into parallel shards. It should produce or merge compact consistency assets instead of chapter-by-chapter bulky JSON.
-- Rewrite operates only on the selected batch and only processes chapters in that batch that have completed analysis.
-- Rewrite works at batch or shard level with stable machine chapter markers, then parses model output back into per-chapter `rewrite_text` for the Compare page.
-- When app review is disabled, rewrite flow is analysis plus rewrite only. When app review is enabled, rewrite flow becomes dual-expert review: rewrite model generates the draft, review model returns JSON approval/issues, rejected drafts can be rewritten up to two times by the rewrite model, and each rewritten draft is reviewed again.
-- If dual-expert review passes, save the draft or rewritten draft. If the third review still fails, append a per-novel warning log in the app root, save the second rewritten draft, and continue processing later shards instead of failing the whole batch.
-- Export supports TXT only and must include only chapters with `rewrite_status = 'completed'` and non-empty `rewrite_text`; never fall back to original text.
-- Task estimation should report novel/batch chapter counts, character counts, request counts, recent success/failure stats, average input/output chars, and wall-clock wait estimates by pipeline stage. With review enabled, estimate up to seven requests/stages per shard.
-- Current-batch one-click runs analysis then rewrite for the selected batch.
-- Full one-click runs batches in order: analyze batch, rewrite batch, export `{novel_title}_第N批.txt`, then continue. At the end it exports the full rewritten TXT and keeps all per-batch files.
-- Full one-click supports pause, continue, and terminate. Pause/terminate requests abort in-flight AI work where possible. Continue restarts from the first unfinished batch; an unfinished batch is rerun from analysis.
-- After normal rewrite completes, the UI should navigate to the Compare page.
-- The selected batch should remain selected after analysis/rewrite refreshes; do not unexpectedly jump back to the first batch.
-- Esc and visible Back buttons should return non-workspace pages to the workspace without disrupting open settings dialogs.
-- Notifications should auto-dismiss after 5 seconds unless a specific dialog behavior is required.
-- First launch should show the quick-start modal once. The top Help button should reopen the same quick-start content at any time.
-- Model diagnosis results should appear near the top workspace notice area and have a close button that only hides the diagnosis panel.
+## Architecture Boundaries
 
-## Novel Settings
+- Keep Tauri command names, serialized fields, event names, and argument shapes backward compatible unless a change is explicitly requested.
+- Add new frontend command calls to `src/tauriApi.ts`; do not scatter raw `invoke` strings through components.
+- Keep API keys and unsaved secret form values in local component state, never Zustand.
+- Zustand stores runtime UI/domain state only and is not a second persistence layer. SQLite and Tauri remain the source of truth.
+- Prefer domain modules under `commands`, `ai`, `db`, and `text`. Do not move unrelated logic back into a monolithic `lib.rs` or `App.tsx`.
+- Preserve existing prompts and parsing behavior during structural refactors. Move one domain at a time and test immediately.
+- Use `pub(crate)` for internal Rust APIs unless a wider public surface is required.
 
-Each novel has its own settings record:
+## Core Product Invariants
 
-- `protagonist_name`: required before analysis and rewrite.
-- `rewritten_protagonist_name`: optional forced rewritten protagonist name. If filled, rewrite must use it consistently.
-- `additional_feminize_names`: optional names to feminize if they appear in processed text.
-- `bust`: only `平胸` or `巨乳`.
-- `body_type`: only `萝莉`, `御姐`, or `少女`.
-- `rewrite_mode`: only `strict` or `creative`.
-- `advanced_settings`: free-form user instructions.
+### Import and Chapters
 
-Important behavior:
+- TXT import goes through Tauri backend commands, not browser-only file APIs.
+- Recognize common Chinese web-novel heading units including `章`, `节`, `回`, `卷`, `部`, `篇`, `集`, `幕`, `话`, `夜`, `案`, `场`, `弹`, `折`, and `更`.
+- Loose numbered headings are fallback-only. Use them only when standard headings are absent and candidate numbers are sequential.
+- If no chapters can be detected, split by text length.
+- Chapter-based batches contain 30 chapters. Non-chapter batches contain at most 100,000 characters.
 
-- Settings are bound to `novel_id`.
-- Deleting a novel must delete its settings.
-- The Settings button is disabled when no novel is selected.
-- If analysis, rewrite, current-batch one-click, or full one-click is clicked while required settings are missing, open the settings dialog.
-- Do not automatically open the settings dialog after importing a novel.
-- Strict mode should preserve the original plot and avoid unnecessary embellishment while still completing required feminization.
-- Creative mode should more actively reinforce the protagonist's female identity, appearance details, expressions, and dual-female-lead interactions, while keeping plot continuity and character consistency.
+### Analysis and Rewrite
 
-## App Settings
+- Analysis requires a novel-settings record but analyzes the original novel only. Do not inject yuri instructions, feminization settings, body settings, or advanced rewrite instructions into analysis prompts.
+- Analysis produces compact original-canon assets: outline, characters, original genders, pronouns, aliases, relationships, titles, locations, foreshadowing, terms, and name-mapping candidates.
+- Rewrite processes only the selected batch and only chapters eligible after analysis.
+- Rewrite prompts include global core settings before normal rules, then novel settings, advanced settings, compact canon, and stable name mappings.
+- Forced protagonist naming has highest priority. Otherwise use one consistent feminine mapping across shards and batches.
+- Do not alter non-target characters' gender, pronouns, titles, seniority, relationships, or social roles.
+- Remove masculine residue from the target protagonist while preserving plot continuity and established appearance details.
+- Strict mode preserves plot and avoids unnecessary embellishment. Creative mode may reinforce female identity, appearance, expression, and dual-female-lead interaction without breaking continuity.
 
-- `export_dir`: output folder for exported TXT files and one-click batch files.
-- `core_prompt`: global rewrite guidance for style, prose rhythm, description preferences, and other cross-novel instructions. It is sent with every rewrite and should avoid specific plot or character facts from a particular novel.
-- `review_enabled`: optional dual-expert review pass after rewrite. Default is off because it significantly increases request count and wait time.
-- `review_profile_id`: optional model profile ID for the review expert. If empty or missing, review uses the current rewrite model. If set, the selected review profile must have a saved API key.
-- `rewrite_parallelism`: shared concurrency setting for analysis and rewrite. Allowed values are `10`, `6`, `3`, and `1`; default is `6`.
-- Higher concurrency can reduce wall-clock time, but it increases request count, failure probability, and may slightly increase token usage. Keep prompts and parsing robust across shard boundaries.
+### Stable Chapter Parsing
 
-## Model Profiles
+- Batch and shard rewrite output uses stable chapter start/end markers and must preserve chapter order and count.
+- Parse only output that can be mapped reliably to the requested chapters.
+- Missing markers, truncated output, extra unrelated output, or ambiguous marker-free output must trigger a bounded retry, smaller subdivision, or a clear failure. Never write corrupted text into chapters.
+- Provider `content_filter` responses are provider safety errors, not marker errors.
+- MiMo-specific prompt sanitization may soften direct body-type wording, but must not weaken prompts for other providers.
 
-- Model profiles support OpenAI-compatible chat completions and Gemini.
-- API keys must be stored locally and never logged.
-- Saving a new model profile must not discard existing profiles.
-- Diagnosis replaces the old simple model test. It should check connection/API key/basic response, JSON output capability, and thinking-mode compatibility, then return checklist-style results with `ok`, `warning`, or `failed` statuses.
-- Diagnosis should use only lightweight requests and should not save model output into novel content.
-- The UI can suggest model IDs when Base URL or model name indicates common providers, including DeepSeek, OpenAI, Kimi / Moonshot, MiniMax, Xiaomi MiMo, SiliconFlow, and Claude-compatible endpoints.
-- `thinking_mode` supports `auto`, `off`, and `on`. Provider compatibility varies; unsupported thinking parameters should be retried without those parameters when practical.
-- DeepSeek analysis should use official JSON output when applicable.
-- Provider `content_filter` responses should be shown as safety/provider interception errors, not as marker parsing errors.
-- MiMo-family models need softer prompt wording for direct body-type terms that may trigger filtering. This sanitization is MiMo-specific and should not weaken non-MiMo prompts.
+### Optional Dual-Expert Review
 
-## Prompting Rules
+- Review is disabled by default because it substantially increases request count and wait time.
+- When enabled, the rewrite model produces a full shard and the review model returns JSON approval/issues.
+- Rejected drafts may be regenerated twice. Each regeneration must return the full shard with the original stable markers and must be reviewed again.
+- If the third decision still fails, append a per-novel warning, save the second regenerated draft, and continue later shards instead of failing the whole batch.
+- Logs must distinguish draft generation, review decisions, rejection rewrites, final review, and fallback warning paths.
 
-- Analysis prompts should analyze the original novel only. Do not inject yuri rewrite instructions, feminization instructions, basic rewrite settings, or advanced rewrite settings into analysis prompts.
-- Analysis should extract compact original-canon assets: outline, characters, original genders, pronouns, names and aliases, relationships, titles, locations, foreshadowing, terms, and name mapping candidates when available.
-- Rewrite prompts must include basic settings, advanced settings, compact consistency assets, and name mapping rules.
-- Core settings must be included before normal rewrite rules so global user style requirements keep the highest prompt priority during rewrite.
-- Name mapping has highest priority:
-  - If `rewritten_protagonist_name` is filled, force the protagonist to that name everywhere, including titles and body text.
-  - Otherwise, feminize the protagonist's name consistently, preferably with homophones or near-homophones while preserving the surname.
-  - Replace masculine given-name characters with feminine alternatives where appropriate.
-  - Examples: `萧炎 -> 萧妍`, `李火旺 -> 李火婉`.
-- Optional names should only be feminized if they appear in the processed text.
-- Reuse the same name mapping across shards and batches. Never let different shards invent different rewritten names for the same person.
-- Preserve non-target characters' original gender, pronouns, titles, seniority, relationships, and social role unless they are explicitly listed for feminization. A male supporting character must not drift into female pronouns in later chapters.
-- The protagonist's male-coded descriptions must be rewritten into female-coded descriptions so that a new reader cannot tell the protagonist was originally male.
-- Appearance details must remain consistent across chapters. If the protagonist is established as black-haired, do not change her to blond or red-haired in later chapters unless the original plot explicitly changes it.
-- Rewrite must preserve chapter order, chapter count, stable start/end markers, and per-chapter boundaries. If AI output is missing markers, includes extra unrelated content after markers, or cannot be parsed reliably, retry or fail clearly instead of writing corrupted chapters.
-- Review decision prompts, when enabled, should output JSON only. They judge whether the rewrite is acceptable and list blocking issues; they do not directly rewrite text.
-- Review prompts must check original plot logic, protagonist and optional-name feminization, non-target character gender preservation, pronouns, titles, masculine residue, appearance consistency, relationship continuity, and chapter boundaries.
-- Revision prompts after review rejection must ask the rewrite model to output the full current shard again with the original stable markers preserved, not a partial patch.
+### Task Lifecycle
 
-## Backend Guidelines
+- Validate model, API key, settings, batch, and output directory before registering an active task.
+- Use one cleanup guard so success, failure, cancellation, pause, or early return always releases the task lock.
+- Reject duplicate active tasks for the same novel.
+- Reject deletion of a novel or model used by an active task.
+- Progress events remain `job-progress` and must be filtered by `novel_id` and the current task ID in the frontend.
+- Disable novel/model switching, import, deletion, and relevant settings changes while the active task makes those operations unsafe.
+- Parallel shard failure must cancel and await sibling requests so quota is not consumed in the background.
+- Full one-click runs batches in order: analyze, rewrite, export the batch, then continue. It supports pause, continue, and terminate. Continue restarts from the first unfinished batch and reruns that batch's analysis.
 
-- Add app capabilities as Tauri commands in `src-tauri/src/lib.rs`.
-- When adding persistent data, update `init_db` and include lightweight migration logic through `ensure_column` or explicit migration statements.
-- Keep destructive operations scoped:
-  - Deleting a novel must delete chapters, chapter batches, internal batch TXT files, novel settings, canon assets, jobs, rewrites, and related AI logs.
-  - Deleting a model profile must delete its stored API key and related logs.
-- API keys must never be logged.
-- AI logs may include model outputs and raw provider responses, but must not include API keys or Authorization headers.
-- For AI provider errors, preserve the provider response body in the user-facing error where practical.
-- For successful AI calls, store:
-  - `content`: extracted output text.
-  - `reasoning`: model thinking / reasoning content if returned.
-  - `raw_response`: raw provider JSON.
-  - input character count.
-  - output character count.
-  - AI call duration.
-  - whether review was enabled for that call.
-  - thinking mode used for that call.
-- AI logs for dual-expert review should distinguish draft rewrite, review decision, review rejection, rejected-draft rewrite, final review, third review warnings, and fallback warning-log paths so users can understand where a shard degraded instead of failing.
+### Provider Calls and Logs
 
-## Frontend Guidelines
+- HTTP clients use a connection timeout and a bounded request timeout. Timeout errors must be explicit.
+- Remove unsupported thinking parameters and retry only for HTTP 400/422 responses that clearly identify parameter incompatibility. Do not duplicate 401, 403, 429, or 5xx requests.
+- Gemini reasoning consists of all `thought: true` text parts; final content consists of all other text parts. Do not assume `parts[0]` is the answer.
+- Preserve provider response bodies in user-facing errors where practical.
+- Successful AI logs store extracted content, reasoning, raw provider JSON, input/output character counts, duration, review state, and thinking mode.
+- Never log API keys, Authorization headers, or credential-store contents.
 
-- The UI is an operational desktop tool, not a landing page.
-- Keep navigation predictable:
-  - The left brand button returns to the main workspace.
-  - The top menu contains cross-workspace views such as Compare, Settings, and Help.
-  - The left sidebar contains import, novel list, model selector, logs, and application settings.
-- Use modal dialogs for novel settings.
-- Keep long text in scrollable regions with stable dimensions.
-- Use the Compare page for large original/rewrite text panes and the TXT export entry.
-- Do not put large original/rewrite panes inside small workspace cards.
-- Use icon buttons for compact actions where possible.
-- Make selected chapter titles visible; status text must not overlap the title.
-- Model configuration, chapter list, and consistency asset panels should each have their own scrollable region and remain usable when the window is small. Avoid relying on a single page-level scrollbar for these areas.
-- Task estimate details should be collapsible from the header while keeping the title visible.
-- One-click pause, continue, and terminate controls should be visible only while a full one-click run is active or paused.
-- Settings page should focus on actual controls; do not add decorative subtitles such as "配置导出目录".
+### Settings and Export
 
-## Build and Release Notes
+- Novel settings are keyed by `novel_id`; the protagonist name is required before analysis or rewrite.
+- Do not automatically open novel settings after import. Open them when a required operation is attempted without valid settings.
+- Application settings include export directory, global core prompt, review configuration, and shared analysis/rewrite concurrency.
+- Allowed concurrency values remain `10`, `6`, `3`, and `1`, with `6` as the default unless the product behavior is intentionally changed.
+- Export TXT only. Include only chapters with completed rewrite status and non-empty rewrite text. Never fall back to the original text.
+- After normal rewrite completion, navigate to Compare. Preserve the selected batch after refreshes.
 
-- Do not commit generated build outputs such as `dist/`, `node_modules/`, `portable/`, or `src-tauri/target/`.
-- Commit lockfiles and source-managed Tauri schema/capability files.
-- Release target is Windows x64 portable zip.
-- `tauri build` also creates installer artifacts, but the intended distribution artifact is the portable zip.
-- The app is currently unsigned, so Windows SmartScreen may warn users about an unknown publisher.
-- Do not update version numbers, create releases, or push generated portable packages unless the user explicitly asks for that release/upload step.
-- When generating a new local portable package, delete old local portable zips first.
+## Credentials and Destructive Operations
 
-## Verification Checklist
+- Prefer Windows Credential Manager for API keys.
+- Use SQLite plaintext fallback only when system credential storage fails, and expose `api_key_storage` as `system`, `database_fallback`, or `none`.
+- After a verified system-store write, clear the corresponding SQLite fallback. Retry migration of old fallback keys at startup.
+- Model deletion separately reports database deletion and credential deletion failures; never silently ignore credential cleanup failure.
+- Novel deletion requires a confirmation dialog describing all affected files and records.
+- Deleting a novel must remove chapters, batches, internal batch TXT files, settings, canon assets, jobs, rewrites, review warnings, and related AI logs.
+- Move batch directories to the temporary recycle area before committing database deletion. Startup cleanup handles leftovers.
 
-Before handing off functional changes:
+## Frontend Behavior and Performance
 
-1. Run `npm run build`.
-2. Run `cargo test` when backend code changed.
-3. Run `cargo clippy --all-targets --all-features -- -D warnings` before release or when Rust control flow changed.
-4. Run `npm run tauri:build` for release-impacting changes.
-5. Run `npm run package:portable` when producing a user-distributable build.
-6. Confirm `git status -sb` before committing or pushing.
+- The UI is an operational desktop tool. Keep navigation and existing control placement predictable.
+- Esc and visible Back buttons return non-workspace pages to the workspace without closing unrelated settings dialogs.
+- Notifications auto-dismiss after five seconds unless a specific dialog requires persistence.
+- First launch shows quick-start once; Help reopens the same content.
+- Keep model configuration, chapters, canon assets, and other long content in independent, stable scroll regions.
+- Use the Compare page for full original/rewrite text. Do not place large text panes in workspace cards.
+- Compare search is plain-text, cross-chapter, searches original then rewrite, supports next/previous navigation, and excludes empty rewrite placeholders.
+- Compare diff is current-chapter-only and defaults on. Search highlighting has higher visual priority than diff highlighting.
+- Diff state is bound to chapter ID and text versions. Never apply stale ranges or stale Worker results to a new chapter.
+- Keep the 12-entry in-memory LRU diff cache and cancellation of obsolete per-calculation Workers unless replaced by an equally interruptible design.
+- Prefer CSS Custom Highlight API so each text pane remains a single text node. Preserve the memoized linear-scan fallback for older WebView2 versions.
+- Mixed diff has a time budget and degrades to line mode for excessive cost/ranges, then to plain mode if necessary. Responsiveness is more important than forcing fine-grained highlights.
+- Do not add full-text virtualization or `content-visibility` to visible compare panes without proving text selection, search positioning, and scroll height remain correct.
+
+## Documentation Rules
+
+- Keep `README.md` beginner-oriented: installation, prerequisites, first successful workflow, troubleshooting, privacy, and developer commands should be easy to find.
+- Do not put a fixed application version number in `README.md`; releases change independently and stale version text creates unnecessary maintenance.
+- Document user-visible behavior accurately. Do not promise provider availability, fixed model IDs, or pricing.
+
+## Editing and Git Safety
+
+- Default to ASCII in source files unless Chinese content or an existing Unicode context requires otherwise.
+- Add comments only when they explain non-obvious behavior.
+- Keep changes scoped and preserve unrelated user modifications in a dirty worktree.
+- Never use destructive Git commands such as `git reset --hard` or `git checkout --` without an explicit request.
+- Do not commit generated outputs: `dist/`, `node_modules/`, `portable/`, or `src-tauri/target/`.
+- Commit lockfiles and source-managed Tauri schemas/capabilities when they intentionally change.
+
+## Verification
+
+Match verification effort to the change, but complete the relevant checks before handoff:
+
+1. Frontend or shared changes: `npm test` and `npm run build`.
+2. Backend changes: `cargo test --manifest-path .\src-tauri\Cargo.toml`.
+3. Rust control-flow or release changes: strict Clippy.
+4. Release-impacting changes: `npm run tauri:build`.
+5. User-distributable builds: delete old local portable zips, then run `npm run package:portable`.
+6. All commits: `git diff --check` and `git status -sb`.
+
+Do not update versions, generate releases, upload portable packages, or create GitHub Releases unless the user explicitly asks for that release step. The intended release asset is the Windows x64 portable zip; installer artifacts are incidental.
