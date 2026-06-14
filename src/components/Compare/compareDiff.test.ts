@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { calculateDiff, tokenizeMixed } from "./compareDiff";
+import { clearDiffCache, getCachedDiff, getDiffCacheSize, setCachedDiff } from "./compareDiffCache";
 import { buildTextSegments } from "./HighlightedText";
 
 describe("compare diff", () => {
@@ -46,6 +47,21 @@ describe("compare diff", () => {
     expect(calculateDiff("甲".repeat(80_001), "乙").mode).toBe("line");
   });
 
+  it("bounds a 7,500-character high-difference chapter", () => {
+    const result = calculateDiff("甲".repeat(3_750), "乙".repeat(3_750), { mixedTimeoutMs: -1 });
+    expect(result.mode).toBe("line");
+    expect(result.ranges).toHaveLength(2);
+  });
+
+  it("falls back to line diff after mixed timeout or too many ranges", () => {
+    expect(calculateDiff("甲\n乙", "甲\n丙", { mixedTimeoutMs: -1 }).mode).toBe("line");
+    expect(calculateDiff("甲乙丙", "甲丁丙", { rangeLimit: 0 }).mode).toBe("plain");
+  });
+
+  it("falls back to plain text when line diff also exceeds its budget", () => {
+    expect(calculateDiff("甲\n乙", "丙\n丁", { mixedTimeoutMs: -1, lineTimeoutMs: -1 }).mode).toBe("plain");
+  });
+
   it("keeps search highlighting when it overlaps a diff range", () => {
     const segments = buildTextSegments(
       "目标文本",
@@ -54,5 +70,18 @@ describe("compare diff", () => {
       [{ id: "m1", chapter_id: "c1", side: "original", start: 0, end: 2 }]
     );
     expect(segments[0]).toMatchObject({ diffKind: "removed", searchMatch: { id: "m1" } });
+  });
+});
+
+describe("compare diff cache", () => {
+  it("keeps twelve recent chapters and invalidates changed text", () => {
+    clearDiffCache();
+    for (let index = 0; index < 13; index += 1) {
+      setCachedDiff(`c${index}`, `原文${index}`, `改写${index}`, { ranges: [], mode: "mixed" });
+    }
+    expect(getDiffCacheSize()).toBe(12);
+    expect(getCachedDiff("c0", "原文0", "改写0")).toBeUndefined();
+    expect(getCachedDiff("c12", "原文12", "改写12")).toEqual({ ranges: [], mode: "mixed" });
+    expect(getCachedDiff("c12", "已变化", "改写12")).toBeUndefined();
   });
 });

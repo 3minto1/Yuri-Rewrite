@@ -2,6 +2,7 @@ import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareA
 import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Chapter } from "../../types";
 import { calculateDiff, type DiffRange, type DiffResult, type DiffSide } from "./compareDiff";
+import { getCachedDiff, setCachedDiff } from "./compareDiffCache";
 import { HighlightedText } from "./HighlightedText";
 import { buildSearchMatches, initialSearchIndex, moveSearchIndex, type SearchMatch } from "./compareSearch";
 
@@ -17,29 +18,51 @@ type CompareViewProps = {
   onExport: () => void;
 };
 
-type DiffState = DiffResult & { loading: boolean; error?: string };
+type DiffState = DiffResult & {
+  loading: boolean;
+  chapterId: string;
+  original: string;
+  rewrite: string;
+  cached: boolean;
+  error?: string;
+};
 
-const EMPTY_DIFF: DiffState = { ranges: [], mode: "mixed", loading: false };
+const EMPTY_RANGES: DiffRange[] = [];
 
-function useChapterDiff(original: string, rewrite: string, enabled: boolean): DiffState {
+function emptyDiffState(chapterId: string, original: string, rewrite: string, loading = false): DiffState {
+  return { ranges: [], mode: "mixed", loading, chapterId, original, rewrite, cached: false };
+}
+
+export function useChapterDiff(chapterId: string, original: string, rewrite: string, enabled: boolean): DiffState {
   const requestIdRef = useRef(0);
-  const [state, setState] = useState<DiffState>(EMPTY_DIFF);
+  const [state, setState] = useState<DiffState>(() => emptyDiffState(chapterId, original, rewrite));
 
   useEffect(() => {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     if (!enabled || !rewrite.trim()) {
-      setState(EMPTY_DIFF);
+      setState(emptyDiffState(chapterId, original, rewrite));
+      return undefined;
+    }
+
+    const cached = getCachedDiff(chapterId, original, rewrite);
+    if (cached) {
+      setState({ ...cached, loading: false, chapterId, original, rewrite, cached: true });
       return undefined;
     }
 
     let cancelled = false;
-    setState((current) => ({ ...current, loading: true, error: undefined }));
+    setState(emptyDiffState(chapterId, original, rewrite, true));
     if (typeof Worker === "undefined") {
       Promise.resolve().then(() => calculateDiff(original, rewrite)).then((result) => {
-        if (!cancelled && requestIdRef.current === requestId) setState({ ...result, loading: false });
+        if (!cancelled && requestIdRef.current === requestId) {
+          setCachedDiff(chapterId, original, rewrite, result);
+          setState({ ...result, loading: false, chapterId, original, rewrite, cached: false });
+        }
       }).catch((error) => {
-        if (!cancelled && requestIdRef.current === requestId) setState({ ranges: [], mode: "mixed", loading: false, error: String(error) });
+        if (!cancelled && requestIdRef.current === requestId) {
+          setState({ ...emptyDiffState(chapterId, original, rewrite), error: String(error) });
+        }
       });
       return () => { cancelled = true; };
     }
@@ -47,20 +70,27 @@ function useChapterDiff(original: string, rewrite: string, enabled: boolean): Di
     const worker = new Worker(new URL("./compareDiff.worker.ts", import.meta.url), { type: "module" });
     worker.onmessage = (event: MessageEvent<{ requestId: number; result?: DiffResult; error?: string }>) => {
       if (cancelled || event.data.requestId !== requestId || requestIdRef.current !== requestId) return;
-      if (event.data.result) setState({ ...event.data.result, loading: false });
-      else setState({ ranges: [], mode: "mixed", loading: false, error: event.data.error || "差异计算失败" });
+      if (event.data.result) {
+        setCachedDiff(chapterId, original, rewrite, event.data.result);
+        setState({ ...event.data.result, loading: false, chapterId, original, rewrite, cached: false });
+      } else {
+        setState({ ...emptyDiffState(chapterId, original, rewrite), error: event.data.error || "差异计算失败" });
+      }
     };
     worker.onerror = () => {
-      if (!cancelled && requestIdRef.current === requestId) setState({ ranges: [], mode: "mixed", loading: false, error: "差异计算失败" });
+      if (!cancelled && requestIdRef.current === requestId) {
+        setState({ ...emptyDiffState(chapterId, original, rewrite), error: "差异计算失败" });
+      }
     };
     worker.postMessage({ requestId, original, rewrite });
     return () => {
       cancelled = true;
       worker.terminate();
     };
-  }, [enabled, original, rewrite]);
+  }, [chapterId, enabled, original, rewrite]);
 
-  return state;
+  if (state.chapterId === chapterId && state.original === original && state.rewrite === rewrite) return state;
+  return emptyDiffState(chapterId, original, rewrite, enabled && Boolean(rewrite.trim()));
 }
 
 type TextPaneProps = {
@@ -72,11 +102,10 @@ type TextPaneProps = {
   diffRanges: DiffRange[];
   searchMatches: SearchMatch[];
   activeMatchId?: string;
-  activeMatchRef: RefObject<HTMLElement>;
 };
 
 const TextPane = memo(function TextPane(props: TextPaneProps) {
-  const { heading, side, text, emptyText, containerRef, diffRanges, searchMatches, activeMatchId, activeMatchRef } = props;
+  const { heading, side, text, emptyText, containerRef, diffRanges, searchMatches, activeMatchId } = props;
   return (
     <article>
       <h2>{heading}</h2>
@@ -85,10 +114,10 @@ const TextPane = memo(function TextPane(props: TextPaneProps) {
           <HighlightedText
             text={text}
             side={side}
+            containerRef={containerRef}
             diffRanges={diffRanges}
             searchMatches={searchMatches}
             activeMatchId={activeMatchId}
-            activeMatchRef={activeMatchRef}
           />
         ) : <span className="muted">{emptyText}</span>}
       </div>
@@ -106,7 +135,6 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [diffEnabled, setDiffEnabled] = useState(true);
   const deferredQuery = useDeferredValue(query);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const activeMatchRef = useRef<HTMLElement | null>(null);
   const navigationTargetRef = useRef<string | null>(null);
   const previousChapterRef = useRef(selectedChapterId);
   const globalMatches = useMemo(
@@ -116,8 +144,8 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const activeMatch = activeMatchIndex === null ? undefined : globalMatches[activeMatchIndex];
   const originalText = selectedChapter?.original_text ?? "";
   const rewriteText = selectedChapter?.rewrite_text ?? "";
-  const diff = useChapterDiff(originalText, rewriteText, diffEnabled);
-  const visibleDiffRanges = diffEnabled ? diff.ranges : [];
+  const diff = useChapterDiff(selectedChapterId, originalText, rewriteText, diffEnabled);
+  const visibleDiffRanges = diffEnabled ? diff.ranges : EMPTY_RANGES;
   const chapterMatches = useMemo(() => globalMatches.filter((match) => match.chapter_id === selectedChapterId), [globalMatches, selectedChapterId]);
   const originalMatches = useMemo(() => chapterMatches.filter((match) => match.side === "original"), [chapterMatches]);
   const rewriteMatches = useMemo(() => chapterMatches.filter((match) => match.side === "rewrite"), [chapterMatches]);
@@ -204,12 +232,6 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     previousChapterRef.current = selectedChapterId;
   }, [selectedChapterId]);
 
-  useEffect(() => {
-    if (!activeMatch || activeMatch.chapter_id !== selectedChapterId) return;
-    const frame = window.requestAnimationFrame(() => activeMatchRef.current?.scrollIntoView({ block: "center", inline: "nearest" }));
-    return () => window.cancelAnimationFrame(frame);
-  }, [activeMatch, selectedChapterId]);
-
   return (
     <div className="compare-page">
       <div className="compare-page-toolbar">
@@ -251,9 +273,15 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
           <button className="icon-button" aria-label="关闭查找" title="关闭查找" onClick={closeSearch}><X size={20} /></button>
         </div>
       )}
-      {diffEnabled && (diff.loading || diff.mode === "line" || diff.error) && (
+      {diffEnabled && (diff.loading || diff.mode === "line" || diff.mode === "plain" || diff.error) && (
         <div className={diff.error ? "compare-diff-status error" : "compare-diff-status"} role="status">
-          {diff.loading ? "正在计算差异…" : diff.error ? `${diff.error}，已显示普通文本。` : "长文本已使用行级差异高亮。"}
+          {diff.loading
+            ? "正在计算差异…"
+            : diff.error
+              ? `${diff.error}，已显示普通文本。`
+              : diff.mode === "plain"
+                ? "文本差异过大，已关闭本章差异高亮。"
+                : "长文本或高差异内容已使用行级差异高亮。"}
         </div>
       )}
       {selectedChapter ? (
@@ -266,7 +294,6 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
             diffRanges={visibleDiffRanges}
             searchMatches={originalMatches}
             activeMatchId={activeMatch?.id}
-            activeMatchRef={activeMatchRef}
           />
           <TextPane
             heading="改写稿"
@@ -277,7 +304,6 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
             diffRanges={visibleDiffRanges}
             searchMatches={rewriteMatches}
             activeMatchId={activeMatch?.id}
-            activeMatchRef={activeMatchRef}
           />
         </div>
       ) : <p className="muted">请选择章节。</p>}

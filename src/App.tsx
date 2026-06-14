@@ -500,11 +500,11 @@ export default function App() {
     }
   }
 
-  function showNotice(message: string, duration = 5000, keepPendingUpdate = false) {
+  const showNotice = useCallback((message: string, duration = 5000, keepPendingUpdate = false) => {
     if (!keepPendingUpdate) setPendingUpdate(null);
     setNoticeDuration(duration);
     setNotice(message);
-  }
+  }, []);
 
   function isTxtFilePath(filePath: string) {
     return filePath.trim().toLowerCase().endsWith(".txt");
@@ -907,7 +907,7 @@ export default function App() {
     }
   }
 
-  async function exportNovel(format: "txt") {
+  const exportNovel = useCallback(async (format: "txt") => {
     if (!detail) return;
     setBusy(`export-${format}`);
     setNotice("");
@@ -922,7 +922,7 @@ export default function App() {
     } finally {
       setBusy("");
     }
-  }
+  }, [detail, setBusy, showNotice]);
 
   function appSettingsPayload(overrides: Partial<AppSettings> = {}): AppSettings {
     return {
@@ -1116,6 +1116,11 @@ export default function App() {
     const restMinutes = minutes % 60;
     return `${hours} 小时 ${restMinutes} 分`;
   }, []);
+
+  const handleCompareBack = useCallback(() => setActiveView("workspace"), []);
+  const handleCompareExport = useCallback(() => {
+    void exportNovel("txt");
+  }, [exportNovel]);
 
   function diagnosisStatusText(status: DiagnosisStatus) {
     if (status === "ok") return "通过";
@@ -1545,8 +1550,8 @@ export default function App() {
             originalRef={originalCompareRef}
             rewriteRef={rewriteCompareRef}
             onSelectChapter={setSelectedChapterId}
-            onBack={() => setActiveView("workspace")}
-            onExport={() => exportNovel("txt")}
+            onBack={handleCompareBack}
+            onExport={handleCompareExport}
           />
         )}
 

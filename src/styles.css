@@ -1646,11 +1646,14 @@ label {
 }
 
 .large-compare-grid .compare-text {
+  contain: paint;
   flex: 1;
   font-size: 16px;
   line-height: 1.8;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 18px;
+  text-rendering: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1676,6 +1679,29 @@ mark.search-match.active-search-match {
   background: #ffbf47;
   box-shadow: 0 0 0 2px rgb(175 111 16 / 35%);
   outline-color: #a9650d;
+}
+
+::highlight(compare-original-removed) {
+  background: #fde2df;
+  color: #8d3126;
+}
+
+::highlight(compare-rewrite-added) {
+  background: #dcf2df;
+  color: #256536;
+}
+
+::highlight(compare-original-search),
+::highlight(compare-rewrite-search) {
+  background: #ffe99b;
+  color: inherit;
+}
+
+::highlight(compare-original-active),
+::highlight(compare-rewrite-active) {
+  background: #ffbf47;
+  color: inherit;
+  text-decoration: underline #a9650d 1px;
 }
 
 .compare-grid {

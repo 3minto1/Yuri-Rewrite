@@ -2,6 +2,7 @@ import { createRef, useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Chapter } from "../../types";
+import { clearDiffCache } from "./compareDiffCache";
 import { CompareView } from "./CompareView";
 
 const chapters: Chapter[] = [
@@ -28,6 +29,7 @@ function Harness({ onBack = vi.fn() }: { onBack?: () => void }) {
 
 describe("CompareView", () => {
   beforeEach(() => {
+    clearDiffCache();
     vi.stubGlobal("Worker", undefined);
   });
 
@@ -99,5 +101,81 @@ describe("CompareView", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
     await waitFor(() => expect(workers).toHaveLength(2));
     expect(workers[0].terminate).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an obsolete worker result after switching chapters", async () => {
+    const workers: Array<{
+      onmessage: ((event: MessageEvent) => void) | null;
+      terminate: ReturnType<typeof vi.fn>;
+      requestId?: number;
+    }> = [];
+    class WorkerMock {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror = null;
+      terminate = vi.fn();
+      requestId?: number;
+      postMessage(message: { requestId: number }) { this.requestId = message.requestId; }
+      constructor() { workers.push(this); }
+    }
+    vi.stubGlobal("Worker", WorkerMock);
+    render(<Harness />);
+    await waitFor(() => expect(workers).toHaveLength(1));
+    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+    await waitFor(() => expect(workers).toHaveLength(2));
+    workers[0].onmessage?.({
+      data: {
+        requestId: workers[0].requestId,
+        result: { mode: "mixed", ranges: [{ side: "original", start: 0, end: 2, kind: "removed" }] }
+      }
+    } as MessageEvent);
+    expect(screen.getByLabelText("原文内容")).toHaveTextContent("第二章也有目标");
+    expect(screen.getByLabelText("原文内容").querySelector(".diff-removed")).toBeNull();
+  });
+
+  it("reuses a completed chapter diff from the LRU cache", async () => {
+    const workers: Array<{ onmessage: ((event: MessageEvent) => void) | null; requestId?: number }> = [];
+    class WorkerMock {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror = null;
+      terminate = vi.fn();
+      requestId?: number;
+      postMessage(message: { requestId: number }) {
+        this.requestId = message.requestId;
+        this.onmessage?.({ data: { requestId: message.requestId, result: { mode: "mixed", ranges: [] } } } as MessageEvent);
+      }
+      constructor() { workers.push(this); }
+    }
+    vi.stubGlobal("Worker", WorkerMock);
+    render(<Harness />);
+    await waitFor(() => expect(workers).toHaveLength(1));
+    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+    await waitFor(() => expect(workers).toHaveLength(2));
+    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c1" } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c1"));
+    expect(workers).toHaveLength(2);
+  });
+
+  it("uses CSS Custom Highlight without expanding the text into diff nodes", async () => {
+    const registry = new Map<string, unknown>();
+    class HighlightMock {
+      priority = 0;
+      constructor(..._ranges: Range[]) {}
+    }
+    vi.stubGlobal("Highlight", HighlightMock);
+    vi.stubGlobal("CSS", {
+      highlights: {
+        set: (name: string, value: unknown) => registry.set(name, value),
+        delete: (name: string) => registry.delete(name)
+      }
+    });
+    render(<Harness />);
+    await waitFor(() => expect(registry.has("compare-original-removed")).toBe(true));
+    expect(screen.getByLabelText("原文内容").querySelectorAll(".diff-removed, mark")).toHaveLength(0);
+    expect(screen.getByLabelText("原文内容").children).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "全局搜索" }), { target: { value: "目标" } });
+    await waitFor(() => expect(registry.has("compare-original-search")).toBe(true));
+    expect(registry.has("compare-original-active")).toBe(true);
+    expect(screen.getByLabelText("原文内容").children).toHaveLength(1);
   });
 });
