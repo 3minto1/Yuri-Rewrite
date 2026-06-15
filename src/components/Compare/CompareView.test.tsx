@@ -33,6 +33,26 @@ describe("CompareView", () => {
     vi.stubGlobal("Worker", undefined);
   });
 
+  it("can limit global search to original or rewrite text", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "全局搜索" }), {
+      target: { value: "Alpha" }
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 / 2"));
+
+    fireEvent.change(screen.getByRole("combobox", { name: "查找范围" }), {
+      target: { value: "original" }
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 / 1"));
+
+    fireEvent.change(screen.getByRole("combobox", { name: "查找范围" }), {
+      target: { value: "rewrite" }
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 / 1"));
+    expect(screen.getByLabelText("改写稿内容").textContent).toContain("alpha");
+  });
+
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();

@@ -266,7 +266,17 @@ pub(crate) struct ParsedChapterAnalysis {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ReviewIssue {
+    pub(crate) chapter_indexes: Vec<i64>,
+    pub(crate) scope: String,
+    pub(crate) category: String,
+    pub(crate) severity: String,
+    pub(crate) problem: String,
+    pub(crate) required_fix: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ReviewDecision {
     pub(crate) approved: bool,
-    pub(crate) issues: Vec<String>,
+    pub(crate) issues: Vec<ReviewIssue>,
 }

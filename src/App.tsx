@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   ClipboardList,
   Download,
   FilePlus2,
@@ -239,12 +240,14 @@ export default function App() {
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [showQuickStart, setShowQuickStart] = useState(false);
+  const [autoRunMenuOpen, setAutoRunMenuOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLDivElement | null>(null);
   const rewriteCompareRef = useRef<HTMLDivElement | null>(null);
   const busyRef = useRef("");
   const importInProgressRef = useRef(false);
   const processingTaskActiveRef = useRef(processingTaskActive);
+  const autoRunMenuRef = useRef<HTMLDivElement | null>(null);
 
   const autoProgressPercent = useMemo(() => {
     if (!job || job.job_type !== "auto" || job.total_chapters <= 0) return 0;
@@ -278,6 +281,17 @@ export default function App() {
   useEffect(() => {
     processingTaskActiveRef.current = processingTaskActive;
   }, [processingTaskActive]);
+
+  useEffect(() => {
+    if (!autoRunMenuOpen) return undefined;
+    const closeMenu = (event: MouseEvent) => {
+      if (!autoRunMenuRef.current?.contains(event.target as Node)) {
+        setAutoRunMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", closeMenu);
+    return () => window.removeEventListener("mousedown", closeMenu);
+  }, [autoRunMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -838,7 +852,7 @@ export default function App() {
     }
   }
 
-  async function runAnalyzeRewriteAll() {
+  async function runAnalyzeRewriteAll(startBatchId: string | null = null) {
     if (!detail || !selectedProfileId) {
       showNotice("请先导入小说并选择模型配置。");
       return;
@@ -850,14 +864,19 @@ export default function App() {
     }
     setBusy("auto");
     setAutoRunState("running");
+    setAutoRunMenuOpen(false);
     setNotice("");
     try {
       const result = await invoke("start_analyze_rewrite_all", {
         novelId: detail.novel.id,
-        profileId: selectedProfileId
+        profileId: selectedProfileId,
+        startBatchId
       });
       setJob(result);
-      await loadNovel(detail.novel.id);
+      await loadNovel(detail.novel.id, {
+        preserveBatchId: startBatchId ?? selectedBatchId,
+        preserveChapterId: selectedChapterId
+      });
       await refreshLogs(detail.novel.id);
       if (result.status === "completed") {
         setAutoRunState("idle");
@@ -1308,7 +1327,7 @@ export default function App() {
               {autoRunState !== "idle" && (
                 <>
                   <button
-                    onClick={autoRunState === "paused" ? runAnalyzeRewriteAll : pauseAnalyzeRewriteAll}
+                    onClick={autoRunState === "paused" ? () => void runAnalyzeRewriteAll() : pauseAnalyzeRewriteAll}
                     disabled={autoControlBusy || autoRunState === "stopping"}
                     title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
                   >
@@ -1327,14 +1346,37 @@ export default function App() {
                   </button>
                 </>
               )}
-              <button
-                onClick={runAnalyzeRewriteAll}
-                disabled={!detail || !selectedProfileId || busy !== "" || autoRunState !== "idle"}
-                title="AI自动分析改写全文，耗时较久"
-              >
-                {busy === "auto" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-                一键分析改写
-              </button>
+              <div className="split-button" ref={autoRunMenuRef}>
+                <button
+                  className="split-button-main"
+                  onClick={() => void runAnalyzeRewriteAll()}
+                  disabled={!detail || !selectedProfileId || busy !== "" || autoRunState !== "idle"}
+                  title="AI自动分析改写全文，耗时较久"
+                >
+                  {busy === "auto" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
+                  一键分析改写
+                </button>
+                <button
+                  className="split-button-toggle"
+                  aria-label="一键分析改写选项"
+                  aria-expanded={autoRunMenuOpen}
+                  onClick={() => setAutoRunMenuOpen((open) => !open)}
+                  disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+                  title="更多一键分析改写选项"
+                >
+                  <ChevronDown size={16} />
+                </button>
+                {autoRunMenuOpen && selectedBatch && (
+                  <div className="split-button-menu" role="menu">
+                    <button
+                      role="menuitem"
+                      onClick={() => void runAnalyzeRewriteAll(selectedBatch.id)}
+                    >
+                      从当前批次开始一键分析改写
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 onClick={runAnalyzeRewriteCurrentBatch}
                 disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}

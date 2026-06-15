@@ -4,7 +4,7 @@ import type { Chapter } from "../../types";
 import { calculateDiff, type DiffRange, type DiffResult, type DiffSide } from "./compareDiff";
 import { getCachedDiff, setCachedDiff } from "./compareDiffCache";
 import { HighlightedText } from "./HighlightedText";
-import { buildSearchMatches, initialSearchIndex, moveSearchIndex, type SearchMatch } from "./compareSearch";
+import { buildSearchMatches, initialSearchIndex, moveSearchIndex, type SearchMatch, type SearchScope } from "./compareSearch";
 
 type CompareViewProps = {
   chapters: Chapter[];
@@ -130,6 +130,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
+  const [searchScope, setSearchScope] = useState<SearchScope>("both");
   const [activeMatchIndex, setActiveMatchIndex] = useState<number | null>(null);
   const [wrapped, setWrapped] = useState(false);
   const [diffEnabled, setDiffEnabled] = useState(true);
@@ -138,8 +139,8 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const navigationTargetRef = useRef<string | null>(null);
   const previousChapterRef = useRef(selectedChapterId);
   const globalMatches = useMemo(
-    () => buildSearchMatches(chapters, deferredQuery, caseSensitive),
-    [caseSensitive, chapters, deferredQuery]
+    () => buildSearchMatches(chapters, deferredQuery, caseSensitive, searchScope),
+    [caseSensitive, chapters, deferredQuery, searchScope]
   );
   const activeMatch = activeMatchIndex === null ? undefined : globalMatches[activeMatchIndex];
   const originalText = selectedChapter?.original_text ?? "";
@@ -220,7 +221,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     }
     const index = initialSearchIndex(globalMatches, selectedChapterId, 1);
     selectSearchMatch(index);
-  }, [caseSensitive, deferredQuery]);
+  }, [caseSensitive, deferredQuery, searchScope]);
 
   useEffect(() => {
     if (previousChapterRef.current === selectedChapterId) return;
@@ -254,7 +255,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
           <input
             ref={searchInputRef}
             aria-label="全局搜索"
-            placeholder="同时搜索全部章节的原文和改写稿"
+            placeholder={searchScope === "both" ? "搜索全部章节的原文和改写稿" : searchScope === "original" ? "仅搜索全部章节的原文" : "仅搜索全部章节的改写稿"}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -264,6 +265,16 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
               }
             }}
           />
+          <select
+            className="compare-search-scope"
+            aria-label="查找范围"
+            value={searchScope}
+            onChange={(event) => setSearchScope(event.target.value as SearchScope)}
+          >
+            <option value="both">原文和改写稿</option>
+            <option value="original">仅原文</option>
+            <option value="rewrite">仅改写稿</option>
+          </select>
           <span className="search-result-count" role="status">
             {deferredQuery ? (globalMatches.length ? `${activeMatchIndex === null ? "—" : activeMatchIndex + 1} / ${globalMatches.length}${wrapped ? " · 已循环" : ""}` : "无结果") : "输入词语开始查找"}
           </span>

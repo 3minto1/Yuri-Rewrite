@@ -51,7 +51,10 @@ type CommandMap = {
   update_canon_assets: { args: { novelId: string; assets: CanonAssetInput[] }; result: CanonAsset[] };
   start_analysis: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
   start_rewrite: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
-  start_analyze_rewrite_all: { args: { novelId: string; profileId: string }; result: Job };
+  start_analyze_rewrite_all: {
+    args: { novelId: string; profileId: string; startBatchId: string | null };
+    result: Job;
+  };
   pause_analyze_rewrite_all: { args: { novelId: string }; result: Job };
   terminate_analyze_rewrite_all: { args: { novelId: string }; result: Job };
   export_novel: { args: { novelId: string; format: "txt" }; result: ExportResult };

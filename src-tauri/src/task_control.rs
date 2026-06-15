@@ -82,6 +82,7 @@ impl Drop for ActiveTaskPermit<'_> {
 #[derive(Debug, Clone)]
 pub(crate) struct AutoRunControl {
     pub(crate) status: String,
+    pub(crate) start_batch_index: i64,
     pub(crate) completed_batches: i64,
     pub(crate) job_id: Option<String>,
     pub(crate) profile_ids: HashSet<String>,
@@ -143,6 +144,7 @@ mod tests {
             "novel-1".to_string(),
             AutoRunControl {
                 status: "running".to_string(),
+                start_batch_index: 0,
                 completed_batches: 0,
                 job_id: None,
                 profile_ids: HashSet::new(),
@@ -155,6 +157,7 @@ mod tests {
             "novel-1".to_string(),
             AutoRunControl {
                 status: "paused".to_string(),
+                start_batch_index: 0,
                 completed_batches: 1,
                 job_id: None,
                 profile_ids: HashSet::new(),

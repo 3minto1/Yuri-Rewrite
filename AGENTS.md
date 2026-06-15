@@ -98,6 +98,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Rewrite processes only the selected batch and only chapters eligible after analysis.
 - Rewrite prompts include global core settings before normal rules, then novel settings, advanced settings, compact canon, and stable name mappings.
 - Forced protagonist naming has highest priority. Otherwise use one consistent feminine mapping across shards and batches.
+- Preserve original chapter titles and their original numbering by default. Change a title only when it explicitly contains the protagonist's source name or clearly describes the protagonist's male identity, title, or body state. This rule is identical in strict and creative modes.
+- Stable marker `index` values are internal ordering identifiers, not title chapter numbers. Prologues, interludes, and extras may make them differ; never renumber titles to match marker indexes.
 - Do not alter non-target characters' gender, pronouns, titles, seniority, relationships, or social roles.
 - Remove masculine residue from the target protagonist while preserving plot continuity and established appearance details.
 - Strict mode preserves plot and avoids unnecessary embellishment. Creative mode may reinforce female identity, appearance, expression, and dual-female-lead interaction without breaking continuity.
@@ -114,9 +116,14 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 - Review is disabled by default because it substantially increases request count and wait time.
 - When enabled, the rewrite model produces a full shard and the review model returns JSON approval/issues.
-- Rejected drafts may be regenerated twice. Each regeneration must return the full shard with the original stable markers and must be reviewed again.
+- Each shard enters review immediately after its draft is parsed while other shards continue drafting. The total number of active model requests must not exceed the configured rewrite concurrency.
+- Review issues use stable marker indexes internally. When all actionable issues resolve to no more than half of the shard, rewrite only those chapters and merge them by chapter ID without changing untouched drafts.
+- Fall back to full-shard regeneration for missing or invalid indexes, cross-chapter continuity or boundary defects, excessive target counts, or unreliable targeted output. Every post-repair review still checks the complete merged shard.
+- Rejected drafts may be repaired twice. Targeted repairs return only the requested chapter markers; full-shard fallbacks return every shard marker. The merged complete shard must be reviewed again after either path.
 - If the third decision still fails, append a per-novel warning, save the second regenerated draft, and continue later shards instead of failing the whole batch.
 - Logs must distinguish draft generation, review decisions, rejection rewrites, final review, and fallback warning paths.
+- Review `issues` contain only actionable blocking defects. Never log compliant passages, passed checks, correctly preserved non-target male descriptions, positive observations, or confirmation-only notes as blocking issues.
+- A claimed protagonist-name or pronoun residue must quote text that still exists in the current rewrite draft. Original-text evidence alone is not actionable and must not survive deterministic post-validation.
 
 ### Task Lifecycle
 
@@ -128,6 +135,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Disable novel/model switching, import, deletion, and relevant settings changes while the active task makes those operations unsafe.
 - Parallel shard failure must cancel and await sibling requests so quota is not consumed in the background.
 - Full one-click runs batches in order: analyze, rewrite, export the batch, then continue. It supports pause, continue, and terminate. Continue restarts from the first unfinished batch and reruns that batch's analysis.
+- Full one-click may start from the currently selected batch. In that mode, progress and the final combined TXT cover only the selected batch through the end; earlier batches are not included in that combined export.
 
 ### Provider Calls and Logs
 
@@ -165,8 +173,9 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - First launch shows quick-start once; Help reopens the same content.
 - Keep model configuration, chapters, canon assets, and other long content in independent, stable scroll regions.
 - Use the Compare page for full original/rewrite text. Do not place large text panes in workspace cards.
-- Compare search is plain-text, cross-chapter, searches original then rewrite, supports next/previous navigation, and excludes empty rewrite placeholders.
+- Compare search is plain-text, cross-chapter, supports original-only, rewrite-only, or original-then-rewrite scope, supports next/previous navigation, and excludes empty rewrite placeholders.
 - Compare diff is current-chapter-only and defaults on. Search highlighting has higher visual priority than diff highlighting.
+- Compare diff ignores differences that consist only of line-leading indentation, including ASCII spaces, tabs, and full-width spaces. Whitespace changes inside a sentence remain visible.
 - Diff state is bound to chapter ID and text versions. Never apply stale ranges or stale Worker results to a new chapter.
 - Keep the 12-entry in-memory LRU diff cache and cancellation of obsolete per-calculation Workers unless replaced by an equally interruptible design.
 - Prefer CSS Custom Highlight API so each text pane remains a single text node. Preserve the memoized linear-scan fallback for older WebView2 versions.

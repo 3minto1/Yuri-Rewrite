@@ -20,6 +20,15 @@ describe("compare search", () => {
     expect(initialSearchIndex(matches, "c2", 1)).toBe(2);
   });
 
+  it("filters matches by original or rewrite scope", () => {
+    expect(buildSearchMatches(chapters, "目标", false, "original").map((match) => match.side))
+      .toEqual(["original", "original"]);
+    expect(buildSearchMatches(chapters, "目标", false, "rewrite").map((match) => match.side))
+      .toEqual(["rewrite"]);
+    expect(buildSearchMatches(chapters, "目标", false, "both").map((match) => match.side))
+      .toEqual(["original", "rewrite", "original"]);
+  });
+
   it("moves in both directions and reports wrapping", () => {
     expect(moveSearchIndex(2, 3, 1)).toEqual({ index: 0, wrapped: true });
     expect(moveSearchIndex(0, 3, -1)).toEqual({ index: 2, wrapped: true });

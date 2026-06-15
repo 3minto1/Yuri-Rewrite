@@ -16,6 +16,7 @@ use commands::{
 use credentials::{classify_api_key_storage, read_api_key, write_api_key, ApiKeyStorage};
 use db::init_db;
 use domain::*;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use model_support::model_output_truncation_error;
 use regex::Regex;
 use reqwest::Client;
@@ -831,39 +832,36 @@ async fn rewrite_batch_with_parallelism(
     review_api_key: Option<&str>,
     rewrite_parallelism: usize,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
-    let parsed_rewrite = generate_rewrite_shards(
-        state,
-        novel_id,
-        profile,
-        api_key,
-        chapters,
-        canon_text,
-        settings,
-        core_prompt,
-        review_enabled,
-        rewrite_parallelism,
-    )
-    .await?;
-
-    if !review_enabled {
-        return Ok(parsed_rewrite);
+    if review_enabled {
+        generate_reviewed_rewrite_pipeline(
+            state,
+            novel_id,
+            profile,
+            api_key,
+            review_profile.unwrap_or(profile),
+            review_api_key.unwrap_or(api_key),
+            chapters,
+            canon_text,
+            settings,
+            core_prompt,
+            rewrite_parallelism,
+        )
+        .await
+    } else {
+        generate_rewrite_shards(
+            state,
+            novel_id,
+            profile,
+            api_key,
+            chapters,
+            canon_text,
+            settings,
+            core_prompt,
+            false,
+            rewrite_parallelism,
+        )
+        .await
     }
-
-    generate_review_shards(
-        state,
-        novel_id,
-        profile,
-        api_key,
-        review_profile.unwrap_or(profile),
-        review_api_key.unwrap_or(api_key),
-        chapters,
-        &parsed_rewrite,
-        canon_text,
-        settings,
-        core_prompt,
-        rewrite_parallelism,
-    )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -882,126 +880,50 @@ async fn generate_rewrite_shards(
     let shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
     let shard_total = shards.len();
     let batch_label = format_batch_label(chapters);
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut tasks = FuturesUnordered::new();
 
     for (idx, shard) in shards.into_iter().enumerate() {
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
         let context =
             format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
-        let prompt = build_batch_rewrite_prompt_with_context(
-            &shard,
-            canon_text,
-            settings,
-            core_prompt,
-            &context,
-        );
-        let client = state.client.clone();
-        let profile_for_task = profile.clone();
-        let api_key = api_key.to_string();
-        let shard_for_task = shard.clone();
-        tasks.spawn(async move {
-            let output = generate_text(
-                &client,
-                &profile_for_task,
-                &api_key,
-                "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和正文，不要输出输入外章节。",
-                &prompt,
-                false,
+        tasks.push(async move {
+            let parsed = generate_single_rewrite_shard(
+                state,
+                novel_id,
+                profile,
+                api_key,
+                &shard,
+                canon_text,
+                settings,
+                core_prompt,
+                &context,
+                &shard_label,
+                review_enabled,
             )
             .await;
-            (idx, shard_label, context, shard_for_task, output)
+            (idx, shard_label, parsed)
         });
     }
 
     let mut parsed_by_shard = Vec::new();
-    while let Some(result) = next_auto_join(&mut tasks, state, novel_id).await? {
-        let (idx, shard_label, context, shard, output) = result;
-        match output {
-            Ok(output) => {
-                append_ai_log(
-                    state,
-                    Some(novel_id),
-                    &profile.id,
-                    "批次改写",
-                    Some(&shard_label),
-                    "success",
-                    &format_model_log_content(&output, profile, Some(review_enabled)),
-                    output.reasoning.as_deref(),
-                    Some(&output.raw_response),
-                )?;
-                let parsed = match parse_rewrite_model_output(&output, &shard) {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        append_ai_log(
-                            state,
-                            Some(novel_id),
-                            &profile.id,
-                            "批次改写解析",
-                            Some(&shard_label),
-                            "error",
-                            &error,
-                            output.reasoning.as_deref(),
-                            Some(&output.raw_response),
-                        )?;
-                        match retry_rewrite_shard_after_parse_error(
-                            state,
-                            novel_id,
-                            profile,
-                            api_key,
-                            &shard,
-                            canon_text,
-                            settings,
-                            core_prompt,
-                            &context,
-                            &shard_label,
-                            review_enabled,
-                            &error,
-                            &output.text,
-                        )
-                        .await
-                        {
-                            Ok(parsed) => parsed,
-                            Err(retry_error) => {
-                                match recover_rewrite_shard_by_subdivision(
-                                    state,
-                                    novel_id,
-                                    profile,
-                                    api_key,
-                                    &shard,
-                                    canon_text,
-                                    settings,
-                                    core_prompt,
-                                    &shard_label,
-                                    review_enabled,
-                                    &retry_error,
-                                )
-                                .await
-                                {
-                                    Ok(parsed) => parsed,
-                                    Err(recovery_error) => {
-                                        abort_and_drain_tasks(&mut tasks).await;
-                                        return Err(format!("{}：{}", shard_label, recovery_error));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                };
-                parsed_by_shard.push((idx, parsed));
+    while !tasks.is_empty() {
+        let result = tokio::select! {
+            result = tasks.next() => result,
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                if let Some(status) = requested_auto_run_stop(state, novel_id)? {
+                    drop(tasks);
+                    return Err(status);
+                }
+                continue;
             }
+        };
+        let Some((idx, shard_label, parsed)) = result else {
+            break;
+        };
+        match parsed {
+            Ok(parsed) => parsed_by_shard.push((idx, parsed)),
             Err(error) => {
-                append_ai_log(
-                    state,
-                    Some(novel_id),
-                    &profile.id,
-                    "批次改写",
-                    Some(&shard_label),
-                    "error",
-                    &error,
-                    None,
-                    None,
-                )?;
-                abort_and_drain_tasks(&mut tasks).await;
+                drop(tasks);
                 return Err(format!("{}：{}", shard_label, error));
             }
         }
@@ -1012,6 +934,118 @@ async fn generate_rewrite_shards(
         .into_iter()
         .flat_map(|(_, parsed)| parsed)
         .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_single_rewrite_shard(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    shard_context: &str,
+    shard_label: &str,
+    review_enabled: bool,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let prompt = build_batch_rewrite_prompt_with_context(
+        shard,
+        canon_text,
+        settings,
+        core_prompt,
+        shard_context,
+    );
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和正文，不要输出输入外章节。",
+        &prompt,
+        false,
+    )
+    .await;
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次改写",
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, Some(review_enabled)),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            match parse_rewrite_model_output(&output, shard) {
+                Ok(parsed) => Ok(parsed),
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        "批次改写解析",
+                        Some(shard_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    match retry_rewrite_shard_after_parse_error(
+                        state,
+                        novel_id,
+                        profile,
+                        api_key,
+                        shard,
+                        canon_text,
+                        settings,
+                        core_prompt,
+                        shard_context,
+                        shard_label,
+                        review_enabled,
+                        &error,
+                        &output.text,
+                    )
+                    .await
+                    {
+                        Ok(parsed) => Ok(parsed),
+                        Err(retry_error) => {
+                            recover_rewrite_shard_by_subdivision(
+                                state,
+                                novel_id,
+                                profile,
+                                api_key,
+                                shard,
+                                canon_text,
+                                settings,
+                                core_prompt,
+                                shard_label,
+                                review_enabled,
+                                &retry_error,
+                            )
+                            .await
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次改写",
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(error)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1184,7 +1218,7 @@ fn split_chapters_for_rewrite_recovery(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn generate_review_shards(
+async fn generate_reviewed_rewrite_pipeline(
     state: &State<'_, AppState>,
     novel_id: &str,
     rewrite_profile: &ModelProfile,
@@ -1192,7 +1226,6 @@ async fn generate_review_shards(
     review_profile: &ModelProfile,
     review_api_key: &str,
     chapters: &[Chapter],
-    rewrites: &[ParsedChapterRewrite],
     canon_text: &str,
     settings: &NovelSettings,
     core_prompt: &str,
@@ -1201,243 +1234,68 @@ async fn generate_review_shards(
     let chapter_shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
     let shard_total = chapter_shards.len();
     let batch_label = format_batch_label(chapters);
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut rewrite_offset = 0usize;
+    let mut tasks = FuturesUnordered::new();
 
     for (idx, shard) in chapter_shards.into_iter().enumerate() {
-        let count = shard.len();
-        let rewrite_shard = rewrites
-            .get(rewrite_offset..rewrite_offset + count)
-            .ok_or_else(|| "复检分片与改写结果数量不匹配。".to_string())?
-            .to_vec();
-        rewrite_offset += count;
-
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
         let context =
             format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
-        let client = state.client.clone();
-        let rewrite_profile_for_task = rewrite_profile.clone();
-        let review_profile_for_task = review_profile.clone();
-        let rewrite_api_key = rewrite_api_key.to_string();
-        let review_api_key = review_api_key.to_string();
-        let shard_for_task = shard.clone();
-        let rewrite_shard_for_task = rewrite_shard.clone();
-        let canon_text = canon_text.to_string();
-        let settings = settings.clone();
-        let core_prompt = core_prompt.to_string();
-        tasks.spawn(async move {
-            let prompt = build_batch_review_decision_prompt_with_context(
-                &shard_for_task,
-                &rewrite_shard_for_task,
-                &settings,
-                &core_prompt,
-                &context,
-            );
-            let output = generate_text(
-                &client,
-                &review_profile_for_task,
-                &review_api_key,
-                "你是中文小说改写审查专家。只负责判断改写稿是否合格，并列出必须打回的问题；不要直接改写正文。必须输出合法 JSON。",
-                &prompt,
-                true,
-            )
-            .await;
-            (
-                idx,
-                shard_label,
-                context,
-                shard_for_task,
-                rewrite_shard_for_task,
+        tasks.push(async move {
+            let rewrite_shard = generate_single_rewrite_shard(
+                state,
+                novel_id,
+                rewrite_profile,
+                rewrite_api_key,
+                &shard,
                 canon_text,
                 settings,
-                rewrite_profile_for_task,
-                rewrite_api_key,
-                review_profile_for_task,
-                review_api_key,
                 core_prompt,
-                output,
+                &context,
+                &shard_label,
+                true,
             )
+            .await
+            .map_err(|error| format!("{}：{}", shard_label, error))?;
+            let reviewed = review_rewrite_shard_strict(
+                state,
+                novel_id,
+                rewrite_profile,
+                rewrite_api_key,
+                review_profile,
+                review_api_key,
+                &shard,
+                rewrite_shard,
+                canon_text,
+                settings,
+                core_prompt,
+                &context,
+                &shard_label,
+            )
+            .await?;
+            Ok::<_, String>((idx, shard_label, reviewed))
         });
     }
 
     let mut parsed_by_shard = Vec::new();
-    while let Some(result) = next_auto_join(&mut tasks, state, novel_id).await? {
-        let (
-            idx,
-            shard_label,
-            context,
-            shard,
-            rewrite_shard,
-            canon_text,
-            settings,
-            rewrite_profile,
-            rewrite_api_key,
-            review_profile,
-            review_api_key,
-            core_prompt,
-            output,
-        ) = result;
-        match output {
-            Ok(output) => {
-                append_ai_log(
-                    state,
-                    Some(novel_id),
-                    &review_profile.id,
-                    "批次审查决策",
-                    Some(&shard_label),
-                    "success",
-                    &format_model_log_content(&output, &review_profile, Some(true)),
-                    output.reasoning.as_deref(),
-                    Some(&output.raw_response),
-                )?;
-                let decision = match parse_review_decision_output(&output.text) {
-                    Ok(decision) => decision,
-                    Err(error) => {
-                        append_ai_log(
-                            state,
-                            Some(novel_id),
-                            &review_profile.id,
-                            "批次审查决策解析",
-                            Some(&shard_label),
-                            "error",
-                            &error,
-                            output.reasoning.as_deref(),
-                            Some(&output.raw_response),
-                        )?;
-                        abort_and_drain_tasks(&mut tasks).await;
-                        return Err(format!("{}：审查决策无法解析：{}", shard_label, error));
-                    }
-                };
-                if decision.approved {
-                    parsed_by_shard.push((idx, rewrite_shard));
-                    continue;
+    while !tasks.is_empty() {
+        let result = tokio::select! {
+            result = tasks.next() => result,
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                if let Some(status) = requested_auto_run_stop(state, novel_id)? {
+                    drop(tasks);
+                    return Err(status);
                 }
-
-                append_ai_log(
-                    state,
-                    Some(novel_id),
-                    &review_profile.id,
-                    "批次审查打回",
-                    Some(&shard_label),
-                    "warning",
-                    &decision.issues.join("\n"),
-                    None,
-                    None,
-                )?;
-                let revised = revise_rewrite_shard_after_review(
-                    state,
-                    novel_id,
-                    &rewrite_profile,
-                    &rewrite_api_key,
-                    &shard,
-                    &rewrite_shard,
-                    &canon_text,
-                    &settings,
-                    &core_prompt,
-                    &context,
-                    &shard_label,
-                    &decision,
-                )
-                .await?;
-                let final_decision = review_revised_shard(
-                    state,
-                    novel_id,
-                    &review_profile,
-                    &review_api_key,
-                    &shard,
-                    &revised,
-                    &settings,
-                    &core_prompt,
-                    &context,
-                    &shard_label,
-                )
-                .await?;
-                if final_decision.approved {
-                    parsed_by_shard.push((idx, revised));
-                } else {
-                    append_ai_log(
-                        state,
-                        Some(novel_id),
-                        &review_profile.id,
-                        "批次审查二次打回",
-                        Some(&shard_label),
-                        "warning",
-                        &final_decision.issues.join("\n"),
-                        None,
-                        None,
-                    )?;
-                    let second_revised = revise_rewrite_shard_after_review(
-                        state,
-                        novel_id,
-                        &rewrite_profile,
-                        &rewrite_api_key,
-                        &shard,
-                        &revised,
-                        &canon_text,
-                        &settings,
-                        &core_prompt,
-                        &context,
-                        &shard_label,
-                        &final_decision,
-                    )
-                    .await?;
-                    let third_decision = review_revised_shard(
-                        state,
-                        novel_id,
-                        &review_profile,
-                        &review_api_key,
-                        &shard,
-                        &second_revised,
-                        &settings,
-                        &core_prompt,
-                        &context,
-                        &format!("{} · 第三次审查", shard_label),
-                    )
-                    .await?;
-                    if third_decision.approved {
-                        parsed_by_shard.push((idx, second_revised));
-                    } else {
-                        let warning_log_result = append_review_warning_file(
-                            state,
-                            novel_id,
-                            &shard_label,
-                            &final_decision,
-                            &third_decision,
-                        );
-                        append_ai_log(
-                            state,
-                            Some(novel_id),
-                            &review_profile.id,
-                            "批次审查三次未通过",
-                            Some(&shard_label),
-                            "warning",
-                            &format!(
-                                "第三次审查仍未通过，已保存第二次重写稿并继续处理后续分片。\n警告日志：{}\n\n第二次审查问题：\n{}\n\n第三次审查问题：\n{}",
-                                warning_log_result,
-                                final_decision.issues.join("\n"),
-                                third_decision.issues.join("\n")
-                            ),
-                            None,
-                            None,
-                        )?;
-                        parsed_by_shard.push((idx, second_revised));
-                    }
-                }
+                continue;
             }
+        };
+        let Some(result) = result else {
+            break;
+        };
+        match result {
+            Ok((idx, _, parsed)) => parsed_by_shard.push((idx, parsed)),
             Err(error) => {
-                append_ai_log(
-                    state,
-                    Some(novel_id),
-                    &review_profile.id,
-                    "批次审查决策",
-                    Some(&shard_label),
-                    "error",
-                    &error,
-                    None,
-                    None,
-                )?;
-                abort_and_drain_tasks(&mut tasks).await;
-                return Err(format!("{}：{}", shard_label, error));
+                drop(tasks);
+                return Err(error);
             }
         }
     }
@@ -1449,11 +1307,262 @@ async fn generate_review_shards(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn review_rewrite_shard_strict(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    rewrite_profile: &ModelProfile,
+    rewrite_api_key: &str,
+    review_profile: &ModelProfile,
+    review_api_key: &str,
+    shard: &[Chapter],
+    rewrite_shard: Vec<ParsedChapterRewrite>,
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    shard_context: &str,
+    shard_label: &str,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let first_decision = review_shard_decision(
+        state,
+        novel_id,
+        review_profile,
+        review_api_key,
+        shard,
+        &rewrite_shard,
+        settings,
+        core_prompt,
+        canon_text,
+        shard_context,
+        shard_label,
+        "批次审查决策",
+        "你是中文小说改写审查专家。只负责判断改写稿是否合格，并列出必须打回的问题；不要直接改写正文。必须输出合法 JSON。",
+    )
+    .await?;
+    if first_decision.approved {
+        return Ok(rewrite_shard);
+    }
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &review_profile.id,
+        "批次审查打回",
+        Some(shard_label),
+        "warning",
+        &review_issues_text(&first_decision.issues),
+        None,
+        None,
+    )?;
+    let revised = revise_rewrite_shard_after_review(
+        state,
+        novel_id,
+        rewrite_profile,
+        rewrite_api_key,
+        shard,
+        &rewrite_shard,
+        canon_text,
+        settings,
+        core_prompt,
+        shard_context,
+        shard_label,
+        &first_decision,
+    )
+    .await?;
+    let second_label = format!("{} · 第二次审查", shard_label);
+    let second_decision = review_revised_shard(
+        state,
+        novel_id,
+        review_profile,
+        review_api_key,
+        shard,
+        &revised,
+        settings,
+        core_prompt,
+        canon_text,
+        shard_context,
+        &second_label,
+    )
+    .await?;
+    if second_decision.approved {
+        return Ok(revised);
+    }
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &review_profile.id,
+        "批次审查二次打回",
+        Some(shard_label),
+        "warning",
+        &review_issues_text(&second_decision.issues),
+        None,
+        None,
+    )?;
+    let second_revised = revise_rewrite_shard_after_review(
+        state,
+        novel_id,
+        rewrite_profile,
+        rewrite_api_key,
+        shard,
+        &revised,
+        canon_text,
+        settings,
+        core_prompt,
+        shard_context,
+        shard_label,
+        &second_decision,
+    )
+    .await?;
+    let third_label = format!("{} · 第三次审查", shard_label);
+    let third_decision = review_revised_shard(
+        state,
+        novel_id,
+        review_profile,
+        review_api_key,
+        shard,
+        &second_revised,
+        settings,
+        core_prompt,
+        canon_text,
+        shard_context,
+        &third_label,
+    )
+    .await?;
+    if third_decision.approved {
+        return Ok(second_revised);
+    }
+    let warning_log_result = append_review_warning_file(
+        state,
+        novel_id,
+        shard_label,
+        &second_decision,
+        &third_decision,
+    );
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &review_profile.id,
+        "批次审查三次未通过",
+        Some(shard_label),
+        "warning",
+        &format!(
+            "第三次审查仍未通过，已保存第二次修复后的完整分片并继续处理后续分片。\n警告日志：{}\n\n第二次审查问题：\n{}\n\n第三次审查问题：\n{}",
+            warning_log_result,
+            review_issues_text(&second_decision.issues),
+            review_issues_text(&third_decision.issues)
+        ),
+        None,
+        None,
+    )?;
+    Ok(second_revised)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn review_shard_decision(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+    core_prompt: &str,
+    canon_text: &str,
+    shard_context: &str,
+    shard_label: &str,
+    log_action: &str,
+    system_prompt: &str,
+) -> Result<ReviewDecision, String> {
+    let prompt = build_batch_review_decision_prompt_with_context(
+        shard,
+        rewrites,
+        settings,
+        core_prompt,
+        canon_text,
+        shard_context,
+    );
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        system_prompt,
+        &prompt,
+        true,
+    )
+    .await;
+    match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                log_action,
+                Some(shard_label),
+                "success",
+                &format_model_log_content(&output, profile, Some(true)),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            match parse_review_decision_output(&output.text, settings) {
+                Ok(decision) => {
+                    let (decision, filtered_issues) =
+                        filter_review_decision_against_rewrites(decision, rewrites, settings);
+                    if !filtered_issues.is_empty() {
+                        append_ai_log(
+                            state,
+                            Some(novel_id),
+                            &profile.id,
+                            "批次审查误判过滤",
+                            Some(shard_label),
+                            "warning",
+                            &format!(
+                                "以下问题声称当前改写稿仍含主角原名，但程序在对应改写章节中未找到该原名，已忽略：\n{}",
+                                review_issues_text(&filtered_issues)
+                            ),
+                            None,
+                            None,
+                        )?;
+                    }
+                    Ok(decision)
+                }
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        &format!("{}解析", log_action),
+                        Some(shard_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    Err(format!("{}：审查决策无法解析：{}", shard_label, error))
+                }
+            }
+        }
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                log_action,
+                Some(shard_label),
+                "error",
+                &error,
+                None,
+                None,
+            )?;
+            Err(format!("{}：{}", shard_label, error))
+        }
+    }
+}
+
 fn build_batch_review_decision_prompt_with_context(
     chapters: &[Chapter],
     rewrites: &[ParsedChapterRewrite],
     settings: &NovelSettings,
     core_prompt: &str,
+    canon_text: &str,
     shard_context: &str,
 ) -> String {
     let shard_context = if shard_context.trim().is_empty() {
@@ -1461,6 +1570,7 @@ fn build_batch_review_decision_prompt_with_context(
     } else {
         shard_context.trim().to_string()
     };
+    let review_constraints = build_compact_review_constraints(settings, core_prompt, canon_text);
     format!(
         r#"请以“审查专家”身份判断改写稿是否合格。你只做判定和列问题，不直接改写正文。
 
@@ -1468,7 +1578,7 @@ fn build_batch_review_decision_prompt_with_context(
 
 审查目标：
 1. 改写稿是否保持原文事件顺序、因果、战力、伏笔、人物动机和章节内逻辑。
-2. 主角是否已按设置完成女性化，标题和正文都不能残留主角男性姓名、男性身份、男性代词、男性称谓、男性身体特征或男性社会角色。
+2. 主角是否已按设置完成女性化，正文不能残留主角男性姓名、男性身份、男性代词、男性称谓、男性身体特征或男性社会角色。
 3. 用户指定要女性化的其他姓名是否在出现处完成女性化，并保持前后一致。
 4. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别、身份、称谓和人称代词，不能因为百合改写目标被误改。
 5. 身材、体型、外貌、发色、瞳色、年龄感、能力状态、标志性服饰和伤痕是否前后一致。
@@ -1476,11 +1586,17 @@ fn build_batch_review_decision_prompt_with_context(
 7. 改写是否自然合理，不能只机械替换姓名/代词，也不能为了强调女性化而破坏剧情逻辑。
 8. 改写稿是否遵守最高优先级核心设定中的文风、描写方式、节奏、语气和其他全局写作要求。
 9. 章节边界、标题、正文是否完整，没有缺句、重复、串章、空正文或额外章节。
+10. 章节标题原则上保留原标题和原编号。只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才需要修改；普通意象、事件概括、其他角色描述或无法确认指向主角的男性词语均不属于标题问题。此规则对严谨模式和创意模式都相同。
+11. marker 中的 index 是内部顺序标识，不是原标题中的章节编号。序章、楔子、番外等会使两者不同；标题编号与 marker index 不一致不是问题，禁止要求按 index 重编号、补零或消除所谓数字矛盾。
 
 判定规则：
 - 只有不存在必须修改的问题时，approved 才能为 true。
 - 如果存在任何主角男性残留、指定角色未女性化、未指定角色被误改性别、逻辑断裂、章节边界错误、正文缺失或明显不自然，approved 必须为 false。
 - 问题必须具体到章节、角色、原文逻辑或需要修改的称谓/特征，方便写作专家重写。
+- 每个问题必须以“待审查改写稿”中的实际文字为证据；禁止把“原文章节”中的姓名、代词或句子误报为改写稿残留。声称姓名或代词残留时，problem 必须引用改写稿中仍存在的原词。
+- issues 只能列出会导致 approved=false、且必须实际修改正文或符合上述条件的标题才能解决的阻断问题。
+- 已正确保留的原文、符合规则的男性配角描述、正确的姓名/代词替换、通过的审查项、优点、确认事项和“无需修改”的内容禁止写入 issues，也不得标记为 blocking。
+- 不要为了展示审查过程而逐项汇报通过情况；这些内容既不能出现在 issues，也不能成为打回理由。
 
 输出要求：
 只输出合法 JSON，不要 Markdown，不要解释。格式：
@@ -1489,7 +1605,9 @@ fn build_batch_review_decision_prompt_with_context(
   "summary": "一句话总体判断",
   "issues": [
     {{
-      "chapter_index": 1,
+      "chapter_indexes": [1],
+      "scope": "chapter",
+      "category": "gender_residue",
       "severity": "blocking",
       "problem": "具体问题",
       "required_fix": "必须如何修改"
@@ -1504,7 +1622,7 @@ fn build_batch_review_decision_prompt_with_context(
   "issues": []
 }}
 
-{}
+`chapter_indexes` 必须列出问题涉及的全部 marker 内部 index，仅用于定位，不代表标题中的章节编号。`scope` 只能是 `chapter` 或 `cross_chapter`；跨章连续性、章节边界、缺失、重复或串章问题使用 `cross_chapter`。`category` 使用简短英文分类。兼容旧格式时可使用单个 `chapter_index`。所有 issues 的 severity 必须为 `blocking`；没有实际阻断问题时必须返回 approved=true 和空 issues。
 
 并发分片上下文：
 {}
@@ -1514,12 +1632,81 @@ fn build_batch_review_decision_prompt_with_context(
 
 待审查改写稿：
 {}"#,
-        build_core_prompt_section(core_prompt),
-        build_rewrite_settings_prompt(settings),
+        review_constraints,
         shard_context,
         build_batch_chapter_text(chapters, false),
         build_batch_rewrite_text(chapters, rewrites)
     )
+}
+
+fn build_compact_review_constraints(
+    settings: &NovelSettings,
+    core_prompt: &str,
+    canon_text: &str,
+) -> String {
+    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
+        "按姓名映射表或同音近音规则生成，并保持一致"
+    } else {
+        settings.rewritten_protagonist_name.trim()
+    };
+    let additional_names = if settings.additional_feminize_names.trim().is_empty() {
+        "无"
+    } else {
+        settings.additional_feminize_names.trim()
+    };
+    let advanced_settings = if settings.advanced_settings.trim().is_empty() {
+        "无".to_string()
+    } else {
+        truncate_text(settings.advanced_settings.trim(), 2_000)
+    };
+    let core_prompt = if core_prompt.trim().is_empty() {
+        "无".to_string()
+    } else {
+        truncate_text(core_prompt.trim(), 2_000)
+    };
+    let canon_summary = compact_review_canon(canon_text);
+    format!(
+        "严格复检约束摘要：\n- 主角原姓名：{}\n- 主角改写后姓名：{}\n- 其他指定女性化姓名：{}\n- 身材 / 体型：{} / {}\n- 改写模式：{}\n- 高级设定：{}\n- 最高优先级核心设定：{}\n\n关键一致性资料：\n{}\n\n必须检查主角女性化、未指定角色原性别保持、姓名/代词/称谓、原文逻辑、外貌与关系连续性、文风要求及章节完整性。标题默认保留，仅在明确涉及主角原名或主角男性状态时修改。",
+        settings.protagonist_name.trim(),
+        rewritten_name,
+        additional_names,
+        settings.bust,
+        settings.body_type,
+        rewrite_mode_label(&settings.rewrite_mode),
+        advanced_settings,
+        core_prompt,
+        canon_summary
+    )
+}
+
+fn compact_review_canon(canon_text: &str) -> String {
+    let mut selected = Vec::new();
+    let mut current_name = "";
+    let mut current_lines = Vec::new();
+    let flush = |name: &str, lines: &mut Vec<&str>, output: &mut Vec<String>| {
+        if matches!(name, "姓名映射表" | "人物卡" | "人物关系") && !lines.is_empty() {
+            output.push(format!(
+                "## {}\n{}",
+                name,
+                truncate_text(&lines.join("\n"), 2_000)
+            ));
+        }
+        lines.clear();
+    };
+    for line in canon_text.lines() {
+        if let Some(name) = line.trim().strip_prefix("## ") {
+            flush(current_name, &mut current_lines, &mut selected);
+            current_name = name.trim();
+        } else if !line.trim().is_empty() {
+            current_lines.push(line);
+        }
+    }
+    flush(current_name, &mut current_lines, &mut selected);
+    if selected.is_empty() {
+        truncate_text(canon_text, 4_000)
+    } else {
+        selected.join("\n\n")
+    }
 }
 
 fn build_batch_revision_prompt_with_context(
@@ -1538,7 +1725,7 @@ fn build_batch_revision_prompt_with_context(
             .issues
             .iter()
             .enumerate()
-            .map(|(idx, issue)| format!("{}. {}", idx + 1, issue))
+            .map(|(idx, issue)| format!("{}. {}", idx + 1, review_issue_text(issue)))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -1571,7 +1758,274 @@ fn build_batch_revision_prompt_with_context(
     )
 }
 
-fn parse_review_decision_output(output: &str) -> Result<ReviewDecision, String> {
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn review_issue_text(issue: &ReviewIssue) -> String {
+    let location = if issue.chapter_indexes.is_empty() {
+        "未指定章节".to_string()
+    } else {
+        format!(
+            "分片索引 {}",
+            issue
+                .chapter_indexes
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+    };
+    format!(
+        "{} [{} / {} / {}] {} {}",
+        location,
+        issue.severity,
+        issue.scope,
+        issue.category,
+        issue.problem.trim(),
+        issue.required_fix.trim()
+    )
+    .trim()
+    .to_string()
+}
+
+fn review_issues_text(issues: &[ReviewIssue]) -> String {
+    issues
+        .iter()
+        .map(review_issue_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn filter_review_decision_against_rewrites(
+    decision: ReviewDecision,
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> (ReviewDecision, Vec<ReviewIssue>) {
+    let source_name = settings.protagonist_name.trim();
+    if source_name.is_empty() {
+        return (decision, Vec::new());
+    }
+    let rewrites_by_index = rewrites
+        .iter()
+        .map(|rewrite| (rewrite.index, rewrite))
+        .collect::<HashMap<_, _>>();
+    let mut retained = Vec::new();
+    let mut filtered = Vec::new();
+    for issue in decision.issues {
+        let issue_text = format!("{} {}", issue.problem, issue.required_fix);
+        let claims_source_name_residue = issue_text.contains(source_name)
+            && contains_any(
+                &issue_text,
+                &[
+                    "原名",
+                    "男性姓名",
+                    "姓名残留",
+                    "仍残留",
+                    "残留主角",
+                    "没有被替换",
+                    "未被替换",
+                    "未替换",
+                    "未改写",
+                ],
+            );
+        let relevant_rewrites = if issue.chapter_indexes.is_empty() {
+            rewrites.iter().collect::<Vec<_>>()
+        } else {
+            issue
+                .chapter_indexes
+                .iter()
+                .filter_map(|index| rewrites_by_index.get(index).copied())
+                .collect::<Vec<_>>()
+        };
+        let source_name_is_present = relevant_rewrites.iter().any(|rewrite| {
+            rewrite.title.contains(source_name) || rewrite.text.contains(source_name)
+        });
+        if claims_source_name_residue && !relevant_rewrites.is_empty() && !source_name_is_present {
+            filtered.push(issue);
+        } else {
+            retained.push(issue);
+        }
+    }
+    (
+        ReviewDecision {
+            approved: retained.is_empty(),
+            issues: retained,
+        },
+        filtered,
+    )
+}
+
+fn extract_review_issue_indexes(text: &str) -> Vec<i64> {
+    let pattern = Regex::new(r"(?:分片索引|chapter_index)\s*[:：=]?\s*(\d+)")
+        .expect("valid review issue index regex");
+    let mut indexes = pattern
+        .captures_iter(text)
+        .filter_map(|capture| capture.get(1)?.as_str().parse::<i64>().ok())
+        .collect::<Vec<_>>();
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes
+}
+
+fn is_non_actionable_review_issue(
+    problem: &str,
+    required_fix: &str,
+    settings: &NovelSettings,
+) -> bool {
+    let text = format!("{} {}", problem.trim(), required_fix.trim());
+    let text = text.trim();
+    if text.is_empty() {
+        return true;
+    }
+
+    let title_index_false_positive = text.contains("标题")
+        && text.contains("索引")
+        && contains_any(
+            text,
+            &[
+                "编号",
+                "章号",
+                "数字",
+                "不匹配",
+                "不对应",
+                "矛盾",
+                "统一",
+                "重编号",
+                "补零",
+            ],
+        );
+    if title_index_false_positive {
+        return true;
+    }
+
+    let title_only_issue = text.contains("标题") && !text.contains("正文");
+    if title_only_issue {
+        let original_name = settings.protagonist_name.trim();
+        let rewritten_name = settings.rewritten_protagonist_name.trim();
+        let identifies_protagonist = text.contains("主角")
+            || (!original_name.is_empty() && text.contains(original_name))
+            || (!rewritten_name.is_empty() && text.contains(rewritten_name));
+        let structural_problem = contains_any(
+            text,
+            &[
+                "标题缺失",
+                "标题为空",
+                "空标题",
+                "标题重复",
+                "串章",
+                "边界",
+                "截断",
+                "乱码",
+                "不完整",
+            ],
+        );
+        if !identifies_protagonist && !structural_problem {
+            return true;
+        }
+    }
+
+    let explicitly_compliant = contains_any(
+        text,
+        &[
+            "符合规则",
+            "符合要求",
+            "正确保留",
+            "确认保留",
+            "无需修改",
+            "不需要修改",
+            "各项通过",
+            "基本通过",
+            "基本合格",
+            "整体合格",
+            "全部合格",
+            "审查通过",
+            "审查点基本通过",
+            "保持良好",
+            "表现良好",
+            "文风自然",
+            "章节完整",
+            "修改正确",
+            "替换正确",
+            "完整性均符合",
+            "正确且一致",
+            "均已正确",
+            "未见残留",
+            "未发现问题",
+            "未发现阻断",
+            "不存在阻断",
+            "无阻断问题",
+            "没有阻断问题",
+            "符合原文",
+            "符合情节",
+            "符合设定",
+            "补充适当",
+            "确认即可",
+            "保持即可",
+            "维持原样",
+        ],
+    );
+    let defect_text = text
+        .replace("无需修改", "")
+        .replace("不需要修改", "")
+        .replace("无需修正", "")
+        .replace("不需要修正", "")
+        .replace("无需替换", "")
+        .replace("不需要替换", "");
+    let has_actual_defect = contains_any(
+        &defect_text,
+        &[
+            "关键错误",
+            "存在错误",
+            "违反",
+            "不符合",
+            "未遵守",
+            "误改",
+            "缺失",
+            "缺少",
+            "遗漏",
+            "不一致",
+            "矛盾",
+            "冲突",
+            "断裂",
+            "错乱",
+            "空正文",
+            "不完整",
+            "截断",
+            "未女性化",
+            "没有女性化",
+            "仍为男性",
+            "仍使用男性",
+            "错误地",
+            "误将",
+            "未改",
+            "未替换",
+            "破坏",
+            "突然跳跃",
+            "突然重置",
+            "必须修改",
+            "需要修改",
+            "需要修正",
+            "必须修正",
+            "应当修改",
+            "应修改",
+            "需修改",
+            "应当修正",
+            "应修正",
+            "需修正",
+            "应当替换",
+            "应替换",
+            "需替换",
+        ],
+    );
+
+    explicitly_compliant && !has_actual_defect
+}
+
+fn parse_review_decision_output(
+    output: &str,
+    settings: &NovelSettings,
+) -> Result<ReviewDecision, String> {
     let value = parse_jsonish_value(output)?;
     let approved = value
         .get("approved")
@@ -1587,24 +2041,49 @@ fn parse_review_decision_output(output: &str) -> Result<ReviewDecision, String> 
                 })
             })
         });
+    let summary = value
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty());
     let mut issues = Vec::new();
-    if let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) {
-        if !summary.trim().is_empty() && !matches!(summary.trim(), "合格" | "通过") {
-            issues.push(format!("总体判断：{}", summary.trim()));
-        }
-    }
+    let mut raw_issue_count = 0usize;
     if let Some(array) = value.get("issues").and_then(serde_json::Value::as_array) {
         for item in array {
             if let Some(text) = item.as_str() {
-                if !text.trim().is_empty() {
-                    issues.push(text.trim().to_string());
+                raw_issue_count += 1;
+                if !is_non_actionable_review_issue(text, "", settings) {
+                    let chapter_indexes = extract_review_issue_indexes(text);
+                    issues.push(ReviewIssue {
+                        scope: if chapter_indexes.is_empty() {
+                            "shard".to_string()
+                        } else {
+                            "chapter".to_string()
+                        },
+                        chapter_indexes,
+                        category: "legacy".to_string(),
+                        severity: "blocking".to_string(),
+                        problem: text.trim().to_string(),
+                        required_fix: String::new(),
+                    });
                 }
             } else if item.is_object() {
-                let chapter = item
+                raw_issue_count += 1;
+                let mut chapter_indexes = item
+                    .get("chapter_indexes")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_i64)
+                    .collect::<Vec<_>>();
+                if let Some(chapter_index) = item
                     .get("chapter_index")
                     .and_then(serde_json::Value::as_i64)
-                    .map(|value| format!("第{}章", value))
-                    .unwrap_or_else(|| "未指定章节".to_string());
+                {
+                    chapter_indexes.push(chapter_index);
+                }
+                chapter_indexes.sort_unstable();
+                chapter_indexes.dedup();
                 let problem = item
                     .get("problem")
                     .and_then(serde_json::Value::as_str)
@@ -1617,27 +2096,462 @@ fn parse_review_decision_output(output: &str) -> Result<ReviewDecision, String> 
                     .get("severity")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("blocking");
-                let text = format!(
-                    "{} [{}] {} {}",
-                    chapter,
-                    severity,
-                    problem.trim(),
-                    required_fix.trim()
-                )
-                .trim()
-                .to_string();
-                if !text.is_empty() {
-                    issues.push(text);
+                let scope = item
+                    .get("scope")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(if chapter_indexes.is_empty() {
+                        "shard"
+                    } else {
+                        "chapter"
+                    });
+                let category = item
+                    .get("category")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("general");
+                if is_non_actionable_review_issue(problem, required_fix, settings) {
+                    continue;
+                }
+                if !problem.trim().is_empty() || !required_fix.trim().is_empty() {
+                    issues.push(ReviewIssue {
+                        chapter_indexes,
+                        scope: scope.trim().to_ascii_lowercase(),
+                        category: category.trim().to_ascii_lowercase(),
+                        severity: severity.trim().to_ascii_lowercase(),
+                        problem: problem.trim().to_string(),
+                        required_fix: required_fix.trim().to_string(),
+                    });
                 }
             }
         }
     }
-    let approved = approved.unwrap_or(issues.is_empty());
+    if issues.is_empty() {
+        if let Some(summary) = summary {
+            if !matches!(summary, "合格" | "通过")
+                && !is_non_actionable_review_issue(summary, "", settings)
+            {
+                issues.push(ReviewIssue {
+                    chapter_indexes: Vec::new(),
+                    scope: "shard".to_string(),
+                    category: "summary".to_string(),
+                    severity: "blocking".to_string(),
+                    problem: format!("总体判断：{}", summary),
+                    required_fix: String::new(),
+                });
+            }
+        }
+    }
+    if issues.is_empty() && approved == Some(false) && raw_issue_count == 0 {
+        issues.push(ReviewIssue {
+            chapter_indexes: Vec::new(),
+            scope: "shard".to_string(),
+            category: "summary".to_string(),
+            severity: "blocking".to_string(),
+            problem: "总体判断：审查模型判定不合格，但未提供具体可执行问题。".to_string(),
+            required_fix: String::new(),
+        });
+    }
+    let approved = issues.is_empty();
     Ok(ReviewDecision { approved, issues })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RevisionPlan {
+    Targeted(Vec<i64>),
+    Full(String),
+}
+
+fn plan_review_revision(shard: &[Chapter], decision: &ReviewDecision) -> RevisionPlan {
+    let shard_indexes = shard
+        .iter()
+        .map(|chapter| chapter.index)
+        .collect::<HashSet<_>>();
+    let mut target_indexes = HashSet::new();
+    for issue in &decision.issues {
+        let issue_text = format!("{} {}", issue.problem, issue.required_fix);
+        let category = issue.category.to_ascii_lowercase();
+        let scope = issue.scope.to_ascii_lowercase();
+        let crosses_chapters = scope != "chapter"
+            || contains_any(
+                &category,
+                &[
+                    "cross",
+                    "boundary",
+                    "continuity",
+                    "missing",
+                    "duplicate",
+                    "order",
+                ],
+            )
+            || contains_any(
+                &issue_text,
+                &[
+                    "跨章",
+                    "连续性",
+                    "章节边界",
+                    "章节缺失",
+                    "缺少章节",
+                    "章节重复",
+                    "重复章节",
+                    "串章",
+                    "额外章节",
+                    "章节顺序",
+                    "空正文",
+                ],
+            );
+        if crosses_chapters {
+            return RevisionPlan::Full(format!(
+                "问题涉及跨章一致性或章节结构：{}",
+                review_issue_text(issue)
+            ));
+        }
+        if issue.chapter_indexes.is_empty() {
+            return RevisionPlan::Full(format!(
+                "审查问题未提供可定位的分片索引：{}",
+                review_issue_text(issue)
+            ));
+        }
+        if issue
+            .chapter_indexes
+            .iter()
+            .any(|index| !shard_indexes.contains(index))
+        {
+            return RevisionPlan::Full(format!(
+                "审查问题包含当前分片之外的索引：{}",
+                review_issue_text(issue)
+            ));
+        }
+        target_indexes.extend(issue.chapter_indexes.iter().copied());
+    }
+
+    if target_indexes.is_empty() {
+        return RevisionPlan::Full("审查未提供可执行的目标章节。".to_string());
+    }
+    if target_indexes.len() * 2 > shard.len() {
+        return RevisionPlan::Full(format!(
+            "目标章节 {} 个，超过当前分片 {} 章的一半。",
+            target_indexes.len(),
+            shard.len()
+        ));
+    }
+    let mut ordered = shard
+        .iter()
+        .filter(|chapter| target_indexes.contains(&chapter.index))
+        .map(|chapter| chapter.index)
+        .collect::<Vec<_>>();
+    ordered.dedup();
+    RevisionPlan::Targeted(ordered)
+}
+
+fn build_targeted_revision_context(
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    target_indexes: &HashSet<i64>,
+) -> String {
+    let mut context = Vec::new();
+    let rewrite_by_id = rewrites
+        .iter()
+        .map(|rewrite| (rewrite.id.as_str(), rewrite))
+        .collect::<HashMap<_, _>>();
+    let mut included = HashSet::new();
+    for (position, chapter) in shard.iter().enumerate() {
+        if !target_indexes.contains(&chapter.index) {
+            continue;
+        }
+        for neighbor in [position.checked_sub(1), position.checked_add(1)]
+            .into_iter()
+            .flatten()
+            .filter(|neighbor| *neighbor < shard.len())
+        {
+            let neighbor_chapter = &shard[neighbor];
+            if target_indexes.contains(&neighbor_chapter.index)
+                || !included.insert(neighbor_chapter.id.clone())
+            {
+                continue;
+            }
+            if let Some(rewrite) = rewrite_by_id.get(neighbor_chapter.id.as_str()) {
+                context.push(format!(
+                    "分片索引 {} · 标题：{}\n原文摘要：{}\n当前改写摘要：{}",
+                    neighbor_chapter.index,
+                    rewrite.title,
+                    truncate_text(neighbor_chapter.original_text.trim(), 600),
+                    truncate_text(rewrite.text.trim(), 800)
+                ));
+            }
+        }
+    }
+    if context.is_empty() {
+        "无相邻章节。".to_string()
+    } else {
+        context.join("\n\n")
+    }
+}
+
+fn merge_targeted_rewrites(
+    rewrites: &[ParsedChapterRewrite],
+    targeted: Vec<ParsedChapterRewrite>,
+    target_indexes: &[i64],
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let expected = target_indexes.iter().copied().collect::<HashSet<_>>();
+    let mut replacements = HashMap::new();
+    for rewrite in targeted {
+        if !expected.contains(&rewrite.index) {
+            return Err(format!("定向重写返回了非目标分片索引 {}。", rewrite.index));
+        }
+        if replacements.insert(rewrite.id.clone(), rewrite).is_some() {
+            return Err("定向重写返回了重复章节。".to_string());
+        }
+    }
+    if replacements.len() != expected.len() {
+        return Err(format!(
+            "定向重写章节数量不匹配：期望 {} 章，得到 {} 章。",
+            expected.len(),
+            replacements.len()
+        ));
+    }
+    let mut merged = Vec::with_capacity(rewrites.len());
+    for rewrite in rewrites {
+        if expected.contains(&rewrite.index) {
+            let replacement = replacements
+                .remove(&rewrite.id)
+                .ok_or_else(|| format!("定向重写缺少章节 ID：{}。", rewrite.id))?;
+            if replacement.index != rewrite.index {
+                return Err(format!("定向重写章节 ID 与索引不匹配：{}。", rewrite.id));
+            }
+            merged.push(replacement);
+        } else {
+            merged.push(rewrite.clone());
+        }
+    }
+    Ok(merged)
+}
+
+fn validate_targeted_rewrite_markers(
+    output: &str,
+    target_chapters: &[Chapter],
+) -> Result<(), String> {
+    let marker_pattern =
+        Regex::new(r"<<<YURI_REWRITE_CHAPTER_(START|END)\s+index=(\d+)\s+id=([^>\s]+)>>>")
+            .expect("valid targeted rewrite marker regex");
+    let expected = target_chapters
+        .iter()
+        .map(|chapter| (chapter.index, chapter.id.as_str()))
+        .collect::<HashSet<_>>();
+    let mut starts = HashSet::new();
+    let mut ends = HashSet::new();
+    for capture in marker_pattern.captures_iter(output) {
+        let kind = capture.get(1).map(|value| value.as_str()).unwrap_or("");
+        let index = capture
+            .get(2)
+            .and_then(|value| value.as_str().parse::<i64>().ok())
+            .ok_or_else(|| "定向重写返回了无效 marker 索引。".to_string())?;
+        let id = capture.get(3).map(|value| value.as_str()).unwrap_or("");
+        if !expected.contains(&(index, id)) {
+            return Err(format!(
+                "定向重写返回了非目标或 ID 不匹配的 marker：index={} id={}。",
+                index, id
+            ));
+        }
+        let inserted = if kind == "START" {
+            starts.insert((index, id))
+        } else {
+            ends.insert((index, id))
+        };
+        if !inserted {
+            return Err(format!(
+                "定向重写返回了重复的 {} marker：index={} id={}。",
+                kind, index, id
+            ));
+        }
+    }
+    if starts.len() != expected.len() || ends.len() != expected.len() {
+        return Err(format!(
+            "定向重写 marker 不完整：期望 {} 组，得到 {} 个开始 marker 和 {} 个结束 marker。",
+            expected.len(),
+            starts.len(),
+            ends.len()
+        ));
+    }
+    if starts != expected || ends != expected {
+        return Err("定向重写 marker 与目标章节不一致。".to_string());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn revise_rewrite_shard_after_review(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile: &ModelProfile,
+    api_key: &str,
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    shard_context: &str,
+    shard_label: &str,
+    decision: &ReviewDecision,
+) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let target_indexes = match plan_review_revision(shard, decision) {
+        RevisionPlan::Targeted(indexes) => indexes,
+        RevisionPlan::Full(reason) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次审查修复规划",
+                Some(shard_label),
+                "running",
+                &format!("修复方式：整分片重写。原因：{}", reason),
+                None,
+                None,
+            )?;
+            return revise_full_rewrite_shard_after_review(
+                state,
+                novel_id,
+                profile,
+                api_key,
+                shard,
+                rewrites,
+                canon_text,
+                settings,
+                core_prompt,
+                shard_context,
+                shard_label,
+                decision,
+            )
+            .await;
+        }
+    };
+
+    let target_set = target_indexes.iter().copied().collect::<HashSet<_>>();
+    let target_chapters = shard
+        .iter()
+        .filter(|chapter| target_set.contains(&chapter.index))
+        .cloned()
+        .collect::<Vec<_>>();
+    let target_rewrites = rewrites
+        .iter()
+        .filter(|rewrite| target_set.contains(&rewrite.index))
+        .cloned()
+        .collect::<Vec<_>>();
+    let target_issues = ReviewDecision {
+        approved: false,
+        issues: decision
+            .issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .chapter_indexes
+                    .iter()
+                    .any(|index| target_set.contains(index))
+            })
+            .cloned()
+            .collect(),
+    };
+    let adjacent_context = build_targeted_revision_context(shard, rewrites, &target_set);
+    let prompt = format!(
+        "{}\n\n定向修复规则：只重写下列目标章节，禁止输出其他章节。未列出的章节已经通过，将由程序原样合并。每个目标章节必须完整输出原 marker、标题和正文。\n\n相邻章节只读上下文（不得输出）：\n{}",
+        build_batch_revision_prompt_with_context(
+            &target_chapters,
+            &target_rewrites,
+            canon_text,
+            settings,
+            core_prompt,
+            shard_context,
+            &target_issues,
+        ),
+        adjacent_context
+    );
+    append_ai_log(
+        state,
+        Some(novel_id),
+        &profile.id,
+        "批次审查修复规划",
+        Some(shard_label),
+        "running",
+        &format!(
+            "修复方式：定向章节重写。目标章节数：{}。分片索引：{}。",
+            target_indexes.len(),
+            target_indexes
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+        None,
+        None,
+    )?;
+    let output = generate_text(
+        &state.client,
+        profile,
+        api_key,
+        "你是中文小说定向修复专家。只输出明确要求修复的目标章节，逐字保留目标章节 marker，不得输出相邻只读章节。",
+        &prompt,
+        false,
+    )
+    .await;
+    let targeted_result = match output {
+        Ok(output) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次定向打回重写",
+                Some(shard_label),
+                "success",
+                &format!(
+                    "修复方式：定向章节重写；目标章节数：{}。\n{}",
+                    target_indexes.len(),
+                    format_model_log_content(&output, profile, Some(true))
+                ),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+            validate_targeted_rewrite_markers(&output.text, &target_chapters)
+                .and_then(|_| parse_rewrite_model_output(&output, &target_chapters))
+                .and_then(|parsed| merge_targeted_rewrites(rewrites, parsed, &target_indexes))
+        }
+        Err(error) => Err(error),
+    };
+    match targeted_result {
+        Ok(merged) => Ok(merged),
+        Err(error) => {
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次定向打回重写回退",
+                Some(shard_label),
+                "warning",
+                &format!(
+                    "定向重写无法可靠解析或合并，回退整分片重写。原因：{}",
+                    error
+                ),
+                None,
+                None,
+            )?;
+            revise_full_rewrite_shard_after_review(
+                state,
+                novel_id,
+                profile,
+                api_key,
+                shard,
+                rewrites,
+                canon_text,
+                settings,
+                core_prompt,
+                shard_context,
+                shard_label,
+                decision,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn revise_full_rewrite_shard_after_review(
     state: &State<'_, AppState>,
     novel_id: &str,
     profile: &ModelProfile,
@@ -1763,55 +2677,26 @@ async fn review_revised_shard(
     rewrites: &[ParsedChapterRewrite],
     settings: &NovelSettings,
     core_prompt: &str,
+    canon_text: &str,
     shard_context: &str,
     shard_label: &str,
 ) -> Result<ReviewDecision, String> {
-    let prompt = build_batch_review_decision_prompt_with_context(
+    review_shard_decision(
+        state,
+        novel_id,
+        profile,
+        api_key,
         shard,
         rewrites,
         settings,
         core_prompt,
+        canon_text,
         shard_context,
-    );
-    let output = generate_text(
-        &state.client,
-        profile,
-        api_key,
+        shard_label,
+        "批次审查复判",
         "你是中文小说改写终审专家。请复判打回重写后的稿件是否已经合格，只输出合法 JSON。",
-        &prompt,
-        true,
     )
-    .await;
-    match output {
-        Ok(output) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次审查复判",
-                Some(shard_label),
-                "success",
-                &format_model_log_content(&output, profile, Some(true)),
-                output.reasoning.as_deref(),
-                Some(&output.raw_response),
-            )?;
-            parse_review_decision_output(&output.text)
-        }
-        Err(error) => {
-            append_ai_log(
-                state,
-                Some(novel_id),
-                &profile.id,
-                "批次审查复判",
-                Some(shard_label),
-                "error",
-                &error,
-                None,
-                None,
-            )?;
-            Err(format!("审查复判失败：{}", error))
-        }
-    }
+    .await
 }
 
 fn append_review_warning_file(
@@ -1901,14 +2786,14 @@ fn append_text_file(path: &Path, content: &str) -> Result<(), String> {
     file.write_all(content.as_bytes()).map_err(to_string)
 }
 
-fn format_review_issues(issues: &[String]) -> String {
+fn format_review_issues(issues: &[ReviewIssue]) -> String {
     if issues.is_empty() {
         "未提供具体问题。".to_string()
     } else {
         issues
             .iter()
             .enumerate()
-            .map(|(idx, issue)| format!("{}. {}", idx + 1, issue))
+            .map(|(idx, issue)| format!("{}. {}", idx + 1, review_issue_text(issue)))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -3163,28 +4048,34 @@ fn prepare_auto_run(
     state: &State<'_, AppState>,
     novel_id: &str,
     profile_ids: HashSet<String>,
-) -> Result<i64, String> {
+    requested_start_batch_index: i64,
+) -> Result<(i64, i64), String> {
     let mut runs = state.auto_runs.lock().map_err(to_string)?;
-    let resume_from = runs
-        .get(novel_id)
-        .filter(|control| control.status == "paused")
-        .map(|control| control.completed_batches)
-        .unwrap_or(0);
     if let Some(control) = runs.get(novel_id) {
         if control.status == "running" || control.status == "pause_requested" {
             return Err("一键分析改写正在运行，请先暂停或终止当前任务。".to_string());
         }
     }
+    let paused_control = runs
+        .get(novel_id)
+        .filter(|control| control.status == "paused");
+    let start_batch_index = paused_control
+        .map(|control| control.start_batch_index)
+        .unwrap_or(requested_start_batch_index);
+    let resume_from = paused_control
+        .map(|control| control.completed_batches)
+        .unwrap_or(start_batch_index);
     runs.insert(
         novel_id.to_string(),
         AutoRunControl {
             status: "running".to_string(),
+            start_batch_index,
             completed_batches: resume_from,
             job_id: None,
             profile_ids,
         },
     );
-    Ok(resume_from)
+    Ok((resume_from, start_batch_index))
 }
 
 fn register_auto_run_job(
@@ -3192,17 +4083,20 @@ fn register_auto_run_job(
     novel_id: &str,
     job_id: &str,
     completed_batches: i64,
+    start_batch_index: i64,
 ) -> Result<(), String> {
     let mut runs = state.auto_runs.lock().map_err(to_string)?;
     let control = runs
         .entry(novel_id.to_string())
         .or_insert_with(|| AutoRunControl {
             status: "running".to_string(),
+            start_batch_index,
             completed_batches,
             job_id: None,
             profile_ids: HashSet::new(),
         });
     control.status = "running".to_string();
+    control.start_batch_index = start_batch_index;
     control.completed_batches = completed_batches;
     control.job_id = Some(job_id.to_string());
     Ok(())
@@ -3241,7 +4135,7 @@ fn request_auto_run_stop(
     novel_id: &str,
     status: &str,
 ) -> Result<Job, String> {
-    let (job_id, completed_batches, message, job_status, terminate_paused_run) = {
+    let (job_id, completed_batches, start_batch_index, message, job_status, terminate_paused_run) = {
         let mut runs = state.auto_runs.lock().map_err(to_string)?;
         let control = runs
             .get_mut(novel_id)
@@ -3265,6 +4159,7 @@ fn request_auto_run_stop(
         (
             job_id,
             control.completed_batches,
+            control.start_batch_index,
             message.to_string(),
             job_status.to_string(),
             terminate_paused_run,
@@ -3272,11 +4167,23 @@ fn request_auto_run_stop(
     };
     if terminate_paused_run {
         let message = "一键分析改写已终止。下次点击将从头开始新的执行。";
-        update_job(state, &job_id, "terminated", completed_batches, message)?;
+        update_job(
+            state,
+            &job_id,
+            "terminated",
+            completed_batches.saturating_sub(start_batch_index),
+            message,
+        )?;
         clear_auto_run(state, novel_id)?;
         return load_job(state, &job_id);
     }
-    update_job(state, &job_id, &job_status, completed_batches, &message)?;
+    update_job(
+        state,
+        &job_id,
+        &job_status,
+        completed_batches.saturating_sub(start_batch_index),
+        &message,
+    )?;
     load_job(state, &job_id)
 }
 
@@ -3285,20 +4192,22 @@ fn finish_stopped_auto_run(
     app: &AppHandle,
     job: Job,
     completed_batches: i64,
+    start_batch_index: i64,
     status_marker: &str,
 ) -> Result<Job, String> {
+    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     if status_marker == AUTO_RUN_TERMINATED {
         let message = "一键分析改写已终止。下次点击将从头开始新的执行。";
-        update_job(state, &job.id, "terminated", completed_batches, message)?;
-        emit_job_progress(app, &job, "terminated", completed_batches, message);
+        update_job(state, &job.id, "terminated", completed_in_range, message)?;
+        emit_job_progress(app, &job, "terminated", completed_in_range, message);
         clear_auto_run(state, &job.novel_id)?;
     } else {
         let message = format!(
             "一键分析改写已暂停。继续后将从第 {} 批重新开始。",
             completed_batches + 1
         );
-        update_job(state, &job.id, "paused", completed_batches, &message)?;
-        emit_job_progress(app, &job, "paused", completed_batches, &message);
+        update_job(state, &job.id, "paused", completed_in_range, &message)?;
+        emit_job_progress(app, &job, "paused", completed_in_range, &message);
         let mut runs = state.auto_runs.lock().map_err(to_string)?;
         if let Some(control) = runs.get_mut(&job.novel_id) {
             control.status = "paused".to_string();
@@ -3764,9 +4673,10 @@ fn redact_sensitive_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::FutureExt;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     fn sample_chapter(index: i64, title: &str, original_text: &str) -> Chapter {
@@ -3780,6 +4690,36 @@ mod tests {
             rewrite_text: None,
             analysis_status: "completed".to_string(),
             rewrite_status: "pending".to_string(),
+        }
+    }
+
+    fn sample_novel_settings() -> NovelSettings {
+        NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            rewritten_protagonist_name: "萧妍".to_string(),
+            additional_feminize_names: "".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: "".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    fn sample_review_issue(
+        chapter_indexes: Vec<i64>,
+        scope: &str,
+        category: &str,
+        problem: &str,
+    ) -> ReviewIssue {
+        ReviewIssue {
+            chapter_indexes,
+            scope: scope.to_string(),
+            category: category.to_string(),
+            severity: "blocking".to_string(),
+            problem: problem.to_string(),
+            required_fix: "按要求修复。".to_string(),
         }
     }
 
@@ -3805,6 +4745,71 @@ mod tests {
 
         assert!(tasks.is_empty());
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn dropping_pipeline_futures_cancels_in_flight_shards() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_flag = dropped.clone();
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(
+            async move {
+                let _flag = DropFlag(task_flag);
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            .boxed(),
+        );
+        tokio::select! {
+            _ = tasks.next() => panic!("pipeline task unexpectedly completed"),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+
+        drop(tasks);
+
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn completed_shard_enters_review_before_slowest_draft_finishes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut tasks = FuturesUnordered::new();
+        let fast_events = events.clone();
+        tasks.push(
+            async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                fast_events
+                    .lock()
+                    .expect("lock fast events")
+                    .push("fast-review-start");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            .boxed(),
+        );
+        let slow_events = events.clone();
+        tasks.push(
+            async move {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                slow_events
+                    .lock()
+                    .expect("lock slow events")
+                    .push("slow-draft-finished");
+            }
+            .boxed(),
+        );
+
+        while tasks.next().await.is_some() {}
+
+        assert_eq!(
+            *events.lock().expect("lock final events"),
+            vec!["fast-review-start", "slow-draft-finished"]
+        );
     }
 
     #[test]
@@ -4277,11 +5282,21 @@ mod tests {
         let data_dir = temp_dir.join("data");
         let second_decision = ReviewDecision {
             approved: false,
-            issues: vec!["第二次仍缺少外貌描写".to_string()],
+            issues: vec![sample_review_issue(
+                vec![1],
+                "chapter",
+                "appearance",
+                "第二次仍缺少外貌描写",
+            )],
         };
         let third_decision = ReviewDecision {
             approved: false,
-            issues: vec!["第三次仍未满足核心设定".to_string()],
+            issues: vec![sample_review_issue(
+                vec![1],
+                "chapter",
+                "core_prompt",
+                "第三次仍未满足核心设定",
+            )],
         };
 
         let first_path = append_review_warning_file_for_title(
@@ -4536,7 +5551,8 @@ mod tests {
         assert!(strict_prompt.contains("严谨模式"));
         assert!(strict_prompt.contains("更加忠于原文"));
         assert!(strict_prompt.contains("不对主角添加过多额外女性化描写"));
-        assert!(strict_prompt.contains("章节标题和正文都必须检查主角姓名"));
+        assert!(strict_prompt.contains("章节标题原则上保留原标题和原编号"));
+        assert!(strict_prompt.contains("只有标题明确出现主角原名"));
         assert!(strict_prompt.contains("看不出主角改写前曾是男性"));
         assert!(strict_prompt.contains("男性化姓名、代词、称谓、身份、身体特征"));
         assert!(strict_prompt.contains("人物外貌特征必须前后一致"));
@@ -4700,11 +5716,24 @@ mod tests {
             title: chapter.title.clone(),
             text: "萧妍走进大厅。".to_string(),
         };
-        let prompt = build_batch_review_prompt_with_settings(&[chapter], &[rewrite], &settings);
+        let prompt = build_batch_review_prompt_with_settings(
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &settings,
+        );
+        let decision_prompt = build_batch_review_decision_prompt_with_context(
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &settings,
+            "",
+            "姓名映射表：萧炎 -> 萧妍",
+            "",
+        );
 
         assert!(prompt.contains("如果当前为创意模式"));
         assert!(prompt.contains("只是替换姓名/代词"));
-        assert!(prompt.contains("每章标题是否也完成女性化"));
+        assert!(prompt.contains("章节标题原则上必须保留原标题和原编号"));
+        assert!(prompt.contains("无法确认指向主角的男性词语都不是标题问题"));
         assert!(prompt.contains("女性外貌、神态、互动距离、称谓变化、百合向情绪张力"));
         assert!(prompt.contains("看不出主角原本是男性"));
         assert!(prompt.contains("人物外貌特征是否前后一致"));
@@ -4714,6 +5743,360 @@ mod tests {
             prompt.contains("未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者是否被误改性别")
         );
         assert!(prompt.contains("同一人物在不同章节中的他/她"));
+        assert!(decision_prompt.contains("此规则对严谨模式和创意模式都相同"));
+        assert!(decision_prompt.contains("标题编号与 marker index 不一致不是问题"));
+        assert!(decision_prompt.contains("通过的审查项、优点、确认事项"));
+        assert!(decision_prompt.contains("仅用于定位，不代表标题中的章节编号"));
+    }
+
+    #[test]
+    fn review_decision_ignores_title_number_and_marker_index_mismatch() {
+        let output = r#"{
+          "approved": false,
+          "summary": "标题编号与分片索引不一致",
+          "issues": [
+            {
+              "chapter_index": 22,
+              "severity": "blocking",
+              "problem": "章节标题仍保留原章节号‘第0021章’，与当前分片索引22不对应。",
+              "required_fix": "标题应改为第0022章或按分片索引统一。"
+            }
+          ]
+        }"#;
+
+        let decision = parse_review_decision_output(output, &sample_novel_settings())
+            .expect("parse review decision");
+
+        assert!(decision.approved);
+        assert!(decision.issues.is_empty());
+    }
+
+    #[test]
+    fn review_decision_discards_compliant_blocking_items_but_keeps_real_defects() {
+        let output = r#"{
+          "approved": false,
+          "summary": "存在一处未指定角色性别误改",
+          "issues": [
+            {
+              "chapter_index": 14,
+              "severity": "blocking",
+              "problem": "原文‘少年’描述未指定性转的男性敌人，改写稿正确保留，符合规则。",
+              "required_fix": "确认保留，无需修改。"
+            },
+            {
+              "chapter_index": 13,
+              "severity": "blocking",
+              "problem": "尽管整体表现良好，但将男性配角代词‘他们’误改为‘她们’，违反未指定角色性别保持规则。",
+              "required_fix": "必须修正为‘他们’。"
+            },
+            {
+              "chapter_index": 15,
+              "severity": "blocking",
+              "problem": "章节边界清晰，无缺句、重复或串章，章节完整。",
+              "required_fix": "各项通过。"
+            }
+          ]
+        }"#;
+
+        let decision = parse_review_decision_output(output, &sample_novel_settings())
+            .expect("parse review decision");
+
+        assert!(!decision.approved);
+        assert_eq!(decision.issues.len(), 1);
+        assert_eq!(decision.issues[0].chapter_indexes, vec![13]);
+        assert!(review_issue_text(&decision.issues[0]).contains("误改为‘她们’"));
+    }
+
+    #[test]
+    fn review_decision_ignores_unnecessary_title_feminization_but_keeps_target_name() {
+        let output = r#"{
+          "approved": false,
+          "issues": [
+            {
+              "chapter_index": 7,
+              "severity": "blocking",
+              "problem": "标题‘斗之力，三段！’没有增加女性化意象。",
+              "required_fix": "创意模式下应修改标题。"
+            },
+            {
+              "chapter_index": 8,
+              "severity": "blocking",
+              "problem": "标题仍保留主角原名‘萧炎’。",
+              "required_fix": "必须修改为设定姓名‘萧妍’。"
+            }
+          ]
+        }"#;
+
+        let decision = parse_review_decision_output(output, &sample_novel_settings())
+            .expect("parse review decision");
+
+        assert!(!decision.approved);
+        assert_eq!(decision.issues.len(), 1);
+        assert!(review_issue_text(&decision.issues[0]).contains("萧炎"));
+    }
+
+    #[test]
+    fn review_decision_supports_structured_and_legacy_issue_indexes() {
+        let output = r#"{
+          "approved": false,
+          "issues": [
+            {
+              "chapter_indexes": [3, 2, 3],
+              "scope": "chapter",
+              "category": "gender_residue",
+              "severity": "blocking",
+              "problem": "两章仍有主角男性称谓。",
+              "required_fix": "移除男性称谓。"
+            },
+            {
+              "chapter_index": 4,
+              "problem": "主角原名仍有残留。",
+              "required_fix": "替换为设定姓名。"
+            },
+            "分片索引 5：主角仍被称为少爷，必须修改。"
+          ]
+        }"#;
+
+        let decision = parse_review_decision_output(output, &sample_novel_settings())
+            .expect("parse mixed review formats");
+
+        assert!(!decision.approved);
+        assert_eq!(decision.issues.len(), 3);
+        assert_eq!(decision.issues[0].chapter_indexes, vec![2, 3]);
+        assert_eq!(decision.issues[0].scope, "chapter");
+        assert_eq!(decision.issues[0].category, "gender_residue");
+        assert_eq!(decision.issues[1].chapter_indexes, vec![4]);
+        assert_eq!(decision.issues[2].chapter_indexes, vec![5]);
+    }
+
+    #[test]
+    fn review_decision_filters_hallucinated_source_name_residue() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![27],
+                "chapter",
+                "gender_residue",
+                "第27章中，原文‘石昊眼神清亮’未改写，残留主角男性姓名‘石昊’。",
+            )],
+        };
+        let rewrites = vec![ParsedChapterRewrite {
+            id: "chapter-27".to_string(),
+            index: 27,
+            title: "第27章".to_string(),
+            text: "石林虎将石念昔抛上高空，石念昔眼神清亮。".to_string(),
+        }];
+
+        let mut settings = sample_novel_settings();
+        settings.protagonist_name = "石昊".to_string();
+        settings.rewritten_protagonist_name = "石念昔".to_string();
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &settings);
+
+        assert!(filtered_decision.approved);
+        assert!(filtered_decision.issues.is_empty());
+        assert_eq!(filtered_issues.len(), 1);
+    }
+
+    #[test]
+    fn review_decision_keeps_verified_source_name_residue() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![27],
+                "chapter",
+                "gender_residue",
+                "第27章仍残留主角男性姓名‘萧炎’，必须修改。",
+            )],
+        };
+        let rewrites = vec![ParsedChapterRewrite {
+            id: "chapter-27".to_string(),
+            index: 27,
+            title: "第27章".to_string(),
+            text: "萧炎抬起头。".to_string(),
+        }];
+
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+
+        assert!(!filtered_decision.approved);
+        assert_eq!(filtered_decision.issues.len(), 1);
+        assert!(filtered_issues.is_empty());
+    }
+
+    #[test]
+    fn legacy_issue_does_not_treat_original_title_number_as_marker_index() {
+        let output = r#"{
+          "approved": false,
+          "issues": ["第21章正文仍有主角男性称谓，需要修改。"]
+        }"#;
+
+        let decision = parse_review_decision_output(output, &sample_novel_settings())
+            .expect("parse legacy issue");
+
+        assert_eq!(decision.issues.len(), 1);
+        assert!(decision.issues[0].chapter_indexes.is_empty());
+        assert_eq!(decision.issues[0].scope, "shard");
+    }
+
+    #[test]
+    fn review_revision_targets_only_valid_local_chapters() {
+        let chapters = (1..=6)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
+            .collect::<Vec<_>>();
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![
+                sample_review_issue(vec![2], "chapter", "gender_residue", "第二章有残留。"),
+                sample_review_issue(vec![4], "chapter", "name", "第四章姓名错误。"),
+            ],
+        };
+
+        assert_eq!(
+            plan_review_revision(&chapters, &decision),
+            RevisionPlan::Targeted(vec![2, 4])
+        );
+    }
+
+    #[test]
+    fn review_revision_falls_back_for_unscoped_cross_chapter_or_excessive_targets() {
+        let chapters = (1..=6)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
+            .collect::<Vec<_>>();
+        let cases = [
+            ReviewDecision {
+                approved: false,
+                issues: vec![sample_review_issue(
+                    vec![],
+                    "shard",
+                    "legacy",
+                    "问题无法定位。",
+                )],
+            },
+            ReviewDecision {
+                approved: false,
+                issues: vec![sample_review_issue(
+                    vec![2, 3],
+                    "cross_chapter",
+                    "continuity",
+                    "跨章连续性断裂。",
+                )],
+            },
+            ReviewDecision {
+                approved: false,
+                issues: vec![sample_review_issue(
+                    vec![1, 2, 3, 4],
+                    "chapter",
+                    "gender_residue",
+                    "多个章节有残留。",
+                )],
+            },
+            ReviewDecision {
+                approved: false,
+                issues: vec![sample_review_issue(
+                    vec![99],
+                    "chapter",
+                    "name",
+                    "索引越界。",
+                )],
+            },
+        ];
+
+        for decision in cases {
+            assert!(matches!(
+                plan_review_revision(&chapters, &decision),
+                RevisionPlan::Full(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn targeted_merge_preserves_unaffected_chapters_byte_for_byte() {
+        let originals = (1..=4)
+            .map(|index| ParsedChapterRewrite {
+                id: format!("chapter-{index}"),
+                index,
+                title: format!("第{index}章"),
+                text: format!("  原样正文 {index}\n第二行  "),
+            })
+            .collect::<Vec<_>>();
+        let replacement = ParsedChapterRewrite {
+            id: "chapter-2".to_string(),
+            index: 2,
+            title: "第二章修复".to_string(),
+            text: "修复正文".to_string(),
+        };
+
+        let merged = merge_targeted_rewrites(&originals, vec![replacement.clone()], &[2])
+            .expect("merge targeted rewrite");
+
+        assert_eq!(merged[1].text, replacement.text);
+        assert_eq!(merged[0].text.as_bytes(), originals[0].text.as_bytes());
+        assert_eq!(merged[2].text.as_bytes(), originals[2].text.as_bytes());
+        assert_eq!(merged[3].text.as_bytes(), originals[3].text.as_bytes());
+    }
+
+    #[test]
+    fn targeted_marker_validation_rejects_missing_extra_and_wrong_id_markers() {
+        let target = sample_chapter(2, "第二章", "原文");
+        let extra = sample_chapter(3, "第三章", "原文");
+        let valid = format!(
+            "{}\n标题：第二章\n正文：\n修复正文\n{}",
+            chapter_start_marker(&target),
+            chapter_end_marker(&target)
+        );
+        assert!(validate_targeted_rewrite_markers(&valid, std::slice::from_ref(&target)).is_ok());
+
+        let missing_end = format!(
+            "{}\n标题：第二章\n正文：\n修复正文",
+            chapter_start_marker(&target)
+        );
+        assert!(
+            validate_targeted_rewrite_markers(&missing_end, std::slice::from_ref(&target)).is_err()
+        );
+
+        let with_extra = format!(
+            "{}\n{}\n{}\n{}",
+            chapter_start_marker(&target),
+            chapter_end_marker(&target),
+            chapter_start_marker(&extra),
+            chapter_end_marker(&extra)
+        );
+        assert!(
+            validate_targeted_rewrite_markers(&with_extra, std::slice::from_ref(&target)).is_err()
+        );
+
+        let wrong_id = valid.replace(&target.id, "wrong-id");
+        assert!(
+            validate_targeted_rewrite_markers(&wrong_id, std::slice::from_ref(&target)).is_err()
+        );
+    }
+
+    #[test]
+    fn targeted_revision_context_contains_read_only_original_and_rewrite_neighbors() {
+        let chapters = (1..=4)
+            .map(|index| {
+                sample_chapter(index, &format!("第{index}章"), &format!("原文内容 {index}"))
+            })
+            .collect::<Vec<_>>();
+        let rewrites = chapters
+            .iter()
+            .map(|chapter| ParsedChapterRewrite {
+                id: chapter.id.clone(),
+                index: chapter.index,
+                title: chapter.title.clone(),
+                text: format!("改写内容 {}", chapter.index),
+            })
+            .collect::<Vec<_>>();
+
+        let context =
+            build_targeted_revision_context(&chapters, &rewrites, &HashSet::from([2_i64]));
+
+        assert!(context.contains("原文内容 1"));
+        assert!(context.contains("改写内容 1"));
+        assert!(context.contains("原文内容 3"));
+        assert!(context.contains("改写内容 3"));
+        assert!(!context.contains("改写内容 2"));
     }
 
     #[test]

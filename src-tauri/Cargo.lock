@@ -5290,10 +5290,11 @@ dependencies = [
 
 [[package]]
 name = "yuri-rewrite"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "encoding_rs",
+ "futures-util",
  "keyring",
  "regex",
  "reqwest 0.12.28",

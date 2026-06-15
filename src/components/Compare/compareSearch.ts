@@ -1,6 +1,7 @@
 import type { Chapter } from "../../types";
 
 export type SearchSide = "original" | "rewrite";
+export type SearchScope = "both" | SearchSide;
 
 export type SearchMatch = {
   id: string;
@@ -25,12 +26,20 @@ export function findTextMatches(text: string, query: string, caseSensitive: bool
   return matches;
 }
 
-export function buildSearchMatches(chapters: Chapter[], query: string, caseSensitive: boolean): SearchMatch[] {
+export function buildSearchMatches(
+  chapters: Chapter[],
+  query: string,
+  caseSensitive: boolean,
+  scope: SearchScope = "both"
+): SearchMatch[] {
   if (!query) return [];
   const matches: SearchMatch[] = [];
   for (const chapter of chapters) {
-    const sides: Array<[SearchSide, string]> = [["original", chapter.original_text]];
-    if (chapter.rewrite_text?.trim()) sides.push(["rewrite", chapter.rewrite_text]);
+    const sides: Array<[SearchSide, string]> = [];
+    if (scope !== "rewrite") sides.push(["original", chapter.original_text]);
+    if (scope !== "original" && chapter.rewrite_text?.trim()) {
+      sides.push(["rewrite", chapter.rewrite_text]);
+    }
     for (const [side, text] of sides) {
       for (const match of findTextMatches(text, query, caseSensitive)) {
         matches.push({

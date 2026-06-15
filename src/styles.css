@@ -641,6 +641,43 @@ pre {
   max-width: 920px;
 }
 
+.split-button {
+  display: inline-flex;
+  position: relative;
+}
+
+.split-button > .split-button-main {
+  border-bottom-right-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.split-button > .split-button-toggle {
+  border-bottom-left-radius: 0;
+  border-left: 0;
+  border-top-left-radius: 0;
+  min-width: 34px;
+  padding-left: 7px;
+  padding-right: 7px;
+}
+
+.split-button-menu {
+  background: #fffdf8;
+  border: 1px solid #d8d1c5;
+  border-radius: 7px;
+  box-shadow: 0 8px 24px rgb(57 48 37 / 14%);
+  min-width: 240px;
+  padding: 5px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+}
+
+.split-button-menu button {
+  justify-content: flex-start;
+  width: 100%;
+}
+
 .settings-section-heading {
   align-items: center;
   display: flex;
@@ -1584,6 +1621,12 @@ label {
 .compare-search-bar input {
   flex: 1;
   min-width: 160px;
+}
+
+.compare-search-scope {
+  flex: 0 0 auto;
+  min-width: 126px;
+  width: auto;
 }
 
 .compare-search-bar .icon-button {

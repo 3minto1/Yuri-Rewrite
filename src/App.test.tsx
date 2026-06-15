@@ -100,6 +100,9 @@ function installDefaultCommands() {
     if (command === "start_analysis") {
       return { id: "job-1", novel_id: "novel-1", job_type: "analysis", status: "completed", current_chapter: 1, total_chapters: 1, message: "完成" };
     }
+    if (command === "start_analyze_rewrite_all") {
+      return { id: "job-auto", novel_id: "novel-1", job_type: "auto", status: "paused", current_chapter: 0, total_chapters: 1, message: "已暂停" };
+    }
     if (command === "save_model_profile") return profile;
     if (command === "export_novel") return { path: "C:/exports/test.txt" };
     return undefined;
@@ -132,6 +135,23 @@ describe("App feature behavior", () => {
     fireEvent.click(analysisButton as HTMLElement);
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("start_analysis", expect.objectContaining({ batchId: "batch-2" })));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-2"));
+  });
+
+  it("starts the full auto workflow from the selected batch through the end", async () => {
+    render(<App />);
+    const batchSelect = await screen.findByRole("combobox", { name: "当前批次" });
+    fireEvent.change(batchSelect, { target: { value: "batch-2" } });
+    fireEvent.click(screen.getByRole("button", { name: "一键分析改写选项" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "从当前批次开始一键分析改写" }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_analyze_rewrite_all", {
+        novelId: "novel-1",
+        profileId: "profile-1",
+        startBatchId: "batch-2"
+      })
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeEnabled());
   });
 
   it("saves a replacement API key and restores the mask", async () => {
