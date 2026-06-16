@@ -798,7 +798,7 @@ async fn rewrite_chapters_for_auto(
         let conn = state.conn.lock().map_err(to_string)?;
         load_canon_assets(&conn, novel_id)?
     };
-    let canon_text = build_compact_canon_text(&canon_assets);
+    let canon_text = build_relevant_canon_text(&canon_assets, &chapters, &settings);
     for chapter in &chapters {
         set_chapter_status(state, &chapter.id, "rewrite_status", "running")?;
     }
@@ -968,9 +968,10 @@ async fn generate_single_rewrite_shard(
     shard_label: &str,
     review_enabled: bool,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let shard_canon_text = build_relevant_canon_text_from_text(canon_text, shard, settings);
     let prompt = build_batch_rewrite_prompt_with_context(
         shard,
-        canon_text,
+        &shard_canon_text,
         settings,
         core_prompt,
         shard_context,
@@ -1018,7 +1019,7 @@ async fn generate_single_rewrite_shard(
                         profile,
                         api_key,
                         shard,
-                        canon_text,
+                        &shard_canon_text,
                         settings,
                         core_prompt,
                         shard_context,
@@ -1037,7 +1038,7 @@ async fn generate_single_rewrite_shard(
                                 profile,
                                 api_key,
                                 shard,
-                                canon_text,
+                                &shard_canon_text,
                                 settings,
                                 core_prompt,
                                 shard_label,
@@ -1116,9 +1117,11 @@ async fn recover_rewrite_shard_by_subdivision(
             "{}\n\n自动细分重试：较大的改写分片无法稳定解析，当前只处理这个更小分片。必须完整输出当前分片内的全部章节，不要输出原大分片中的其他章节。",
             format_shard_context(0, 1, 1, &batch_label, &subshard)
         );
+        let subshard_canon_text =
+            build_relevant_canon_text_from_text(canon_text, &subshard, settings);
         let prompt = build_batch_rewrite_prompt_with_context(
             &subshard,
-            canon_text,
+            &subshard_canon_text,
             settings,
             core_prompt,
             &context,
@@ -1169,7 +1172,7 @@ async fn recover_rewrite_shard_by_subdivision(
                             profile,
                             api_key,
                             &subshard,
-                            canon_text,
+                            &subshard_canon_text,
                             settings,
                             core_prompt,
                             &context,
@@ -1587,36 +1590,23 @@ fn build_batch_review_decision_prompt_with_context(
     };
     let review_constraints = build_compact_review_constraints(settings, core_prompt, canon_text);
     format!(
-        r#"请以“审查专家”身份判断改写稿是否合格。你只做判定和列问题，不直接改写正文。
+        r#"请以“审查专家”身份判断改写稿是否合格。只列会导致打回的 blocking 问题，不直接改写正文。
 
 {}
 
-审查目标：
-1. 改写稿是否保持原文事件顺序、因果、战力、伏笔、人物动机和章节内逻辑。
-2. 主角是否已按设置完成女性化，正文不能残留主角男性姓名、男性身份、男性代词、男性称谓、男性身体特征或男性社会角色。
-3. 用户指定要女性化的其他姓名是否在出现处完成女性化，并保持前后一致。
-4. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别、身份、称谓和人称代词，不能因为百合改写目标被误改。
-5. 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，保留原文人称代词和称谓时应视为合格，不要当作主角男性残留或未女性化问题。
-6. 身材、体型、外貌、发色、瞳色、年龄感、能力状态、标志性服饰和伤痕是否前后一致。
-7. 百合向关系推进是否承接前文，不能突然重置、跳跃或破坏原文人物性格。
-8. 改写是否自然合理，不能只机械替换姓名/代词，也不能为了强调女性化而破坏剧情逻辑。
-9. 改写稿是否遵守最高优先级核心设定中的文风、描写方式、节奏、语气和其他全局写作要求。
-10. 章节边界、标题、正文是否完整，没有缺句、重复、串章、空正文或额外章节。
-11. 章节标题原则上保留原标题和原编号。只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才需要修改；普通意象、事件概括、其他角色描述或无法确认指向主角的男性词语均不属于标题问题。此规则对严谨模式和创意模式都相同。
-12. marker 中的 index 是内部顺序标识，不是原标题中的章节编号。序章、楔子、番外等会使两者不同；标题编号与 marker index 不一致不是问题，禁止要求按 index 重编号、补零或消除所谓数字矛盾。
+Blocking 清单：
+- 主角或指定性转角色在改写稿中仍有明确男性姓名、代词、身份、称谓、身体特征或社会角色残留。
+- 未指定性转的角色被误改性别、亲属关系、称谓或代词。
+- 当前改写稿缺句、重复、串章、空正文、额外章节、marker/章节边界错误，或破坏原文事件顺序、因果、战力、伏笔、人物动机。
+- 外貌、能力状态、关系推进、核心设定或高级设定出现实质矛盾。
+- 标题只有在明确出现主角原名，或明确描述主角男性身份、男性称谓、男性身体状态时才算问题；标题编号与 marker index 不一致不是问题。
 
-判定规则：
-- 只有不存在必须修改的问题时，approved 才能为 true。
-- 如果存在任何主角男性残留、指定角色未女性化、未指定角色被误改性别、逻辑断裂、章节边界错误、正文缺失或明显不自然，approved 必须为 false。
-- 问题必须具体到章节、角色、原文逻辑或需要修改的称谓/特征，方便写作专家重写。
-- 每个问题必须以“待审查改写稿”中的实际文字为证据；禁止把“原文章节”中的姓名、代词、称谓或句子误报为改写稿残留。声称任何男性残留时，problem 必须引用改写稿中仍存在的原词或原句；如果该原词或原句只在原文中出现、当前改写稿已经替换，则不得列入 issues。
-- “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性口语昵称本身不是男性残留，不得仅因它们不够女性化、风格不统一或建议强化女性身份而列为 blocking。只有同一句或同一处证据中明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代，且该指代确实指向主角时，才属于必须修改的问题。
-- 动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物在原文未明确性别或性别模糊时，改写稿保留原文人称代词和称谓不是问题；不得仅因它们没有被女性化而列为 blocking。
-- issues 只能列出会导致 approved=false、且必须实际修改正文或符合上述条件的标题才能解决的阻断问题。
-- 已正确保留的原文、符合规则的男性配角描述、正确的姓名/代词替换、通过的审查项、优点、确认事项和“无需修改”的内容禁止写入 issues，也不得标记为 blocking。
-- 不要为了展示审查过程而逐项汇报通过情况；这些内容既不能出现在 issues，也不能成为打回理由。
+排除项：
+- 每个问题必须引用“待审查改写稿”中仍存在的实际文字；只出现在原文中的证据不得列入 issues。
+- “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性昵称本身不是男性残留。只有同处证据明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代且确实指向主角，才是 blocking。
+- 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，改写稿保留原文人称代词和称谓不是问题。
+- 不要输出通过项、优点、确认事项、建议性润色或“无需修改”的内容。
 
-输出要求：
 只输出合法 JSON，不要 Markdown，不要解释。格式：
 {{
   "approved": false,
@@ -1640,7 +1630,7 @@ fn build_batch_review_decision_prompt_with_context(
   "issues": []
 }}
 
-`chapter_indexes` 必须列出问题涉及的全部 marker 内部 index，仅用于定位，不代表标题中的章节编号。`scope` 只能是 `chapter` 或 `cross_chapter`；跨章连续性、章节边界、缺失、重复或串章问题使用 `cross_chapter`。`category` 使用简短英文分类。兼容旧格式时可使用单个 `chapter_index`。所有 issues 的 severity 必须为 `blocking`；没有实际阻断问题时必须返回 approved=true 和空 issues。
+`chapter_indexes` 使用 marker 内部 index 定位，不代表标题章节编号。`scope` 只能是 `chapter` 或 `cross_chapter`；跨章连续性、边界、缺失、重复或串章问题使用 `cross_chapter`。兼容旧格式时可使用单个 `chapter_index`。所有 issues 的 severity 必须为 `blocking`；没有实际阻断问题时必须返回 approved=true 和空 issues。
 
 并发分片上下文：
 {}
@@ -1684,7 +1674,7 @@ fn build_compact_review_constraints(
     };
     let canon_summary = compact_review_canon(canon_text);
     format!(
-        "严格复检约束摘要：\n- 主角原姓名：{}\n- 主角改写后姓名：{}\n- 其他指定女性化姓名：{}\n- 身材 / 体型：{} / {}\n- 改写模式：{}\n- 高级设定：{}\n- 最高优先级核心设定：{}\n\n关键一致性资料：\n{}\n\n必须检查主角女性化、未指定角色原性别保持、姓名/代词/称谓、原文逻辑、外貌与关系连续性、文风要求及章节完整性。标题默认保留，仅在明确涉及主角原名或主角男性状态时修改。原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，保留原文人称代词和称谓应通过审查。",
+        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、未指定角色误改性别、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。性别不明的动物、灵兽等非人生物保留原文代词可通过。",
         settings.protagonist_name.trim(),
         rewritten_name,
         additional_names,
@@ -1706,7 +1696,7 @@ fn compact_review_canon(canon_text: &str) -> String {
             output.push(format!(
                 "## {}\n{}",
                 name,
-                truncate_text(&lines.join("\n"), 2_000)
+                truncate_text(&lines.join("\n"), 1_200)
             ));
         }
         lines.clear();
@@ -1721,7 +1711,7 @@ fn compact_review_canon(canon_text: &str) -> String {
     }
     flush(current_name, &mut current_lines, &mut selected);
     if selected.is_empty() {
-        truncate_text(canon_text, 4_000)
+        truncate_text(canon_text, 2_500)
     } else {
         selected.join("\n\n")
     }
@@ -1773,6 +1763,99 @@ fn build_batch_revision_prompt_with_context(
         base_prompt,
         issue_text,
         build_batch_rewrite_text(chapters, rewrites)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_targeted_revision_prompt(
+    target_chapters: &[Chapter],
+    target_rewrites: &[ParsedChapterRewrite],
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    shard_context: &str,
+    decision: &ReviewDecision,
+    adjacent_context: &str,
+) -> String {
+    let issue_text = if decision.issues.is_empty() {
+        "审查专家未给出具体问题；请只复查目标章节中的主角女性化、姓名映射、未指定角色性别保持、逻辑和章节边界。".to_string()
+    } else {
+        decision
+            .issues
+            .iter()
+            .enumerate()
+            .map(|(idx, issue)| format!("{}. {}", idx + 1, review_issue_text(issue)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
+        "按姓名映射表或同音近音规则生成，并保持一致"
+    } else {
+        settings.rewritten_protagonist_name.trim()
+    };
+    let core_prompt = if core_prompt.trim().is_empty() {
+        "无".to_string()
+    } else {
+        truncate_text(core_prompt.trim(), 1_200)
+    };
+    let advanced_settings = if settings.advanced_settings.trim().is_empty() {
+        "无".to_string()
+    } else {
+        truncate_text(settings.advanced_settings.trim(), 1_200)
+    };
+    let shard_context = if shard_context.trim().is_empty() {
+        "无".to_string()
+    } else {
+        shard_context.trim().to_string()
+    };
+    format!(
+        r#"请定向修复审查打回的目标章节。只输出目标章节，禁止输出相邻只读章节或其他章节。
+
+必须遵守：
+- 主角原名：{}；主角改写名：{}；其他指定女性化姓名：{}。
+- 身材/体型：{} / {}；改写模式：{}。
+- 核心设定：{}
+- 高级设定：{}
+- 保留原章节顺序、原文主线、因果、战力、伏笔、人物动机和目标章节 marker。
+- 只修复 blocking 问题，不改动已合格内容；未指定性转角色保持原文性别；性别不明的动物、灵兽等非人生物保留原文代词可通过。
+- 每个目标章节必须完整输出原 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 和 `<<<YURI_REWRITE_CHAPTER_END ...>>>`，marker 的 index 和 id 逐字复制。
+- 只输出目标章节的 marker、标题、正文；不要解释、不要 Markdown。
+
+分片约束：
+{}
+
+审查打回问题：
+{}
+
+相关一致性资料：
+{}
+
+相邻章节只读上下文（不得输出）：
+{}
+
+目标章节原文：
+{}
+
+目标章节当前改写稿：
+{}"#,
+        settings.protagonist_name.trim(),
+        rewritten_name,
+        if settings.additional_feminize_names.trim().is_empty() {
+            "无"
+        } else {
+            settings.additional_feminize_names.trim()
+        },
+        settings.bust,
+        settings.body_type,
+        rewrite_mode_label(&settings.rewrite_mode),
+        core_prompt,
+        advanced_settings,
+        shard_context,
+        issue_text,
+        canon_text,
+        adjacent_context,
+        build_batch_chapter_text(target_chapters, false),
+        build_batch_rewrite_text(target_chapters, target_rewrites)
     )
 }
 
@@ -2590,8 +2673,8 @@ fn build_targeted_revision_context(
                     "分片索引 {} · 标题：{}\n原文摘要：{}\n当前改写摘要：{}",
                     neighbor_chapter.index,
                     rewrite.title,
-                    truncate_text(neighbor_chapter.original_text.trim(), 600),
-                    truncate_text(rewrite.text.trim(), 800)
+                    truncate_text(neighbor_chapter.original_text.trim(), 80),
+                    truncate_text(rewrite.text.trim(), 100)
                 ));
             }
         }
@@ -2767,18 +2850,17 @@ async fn revise_rewrite_shard_after_review(
             .collect(),
     };
     let adjacent_context = build_targeted_revision_context(shard, rewrites, &target_set);
-    let prompt = format!(
-        "{}\n\n定向修复规则：只重写下列目标章节，禁止输出其他章节。未列出的章节已经通过，将由程序原样合并。每个目标章节必须完整输出原 marker、标题和正文。\n\n相邻章节只读上下文（不得输出）：\n{}",
-        build_batch_revision_prompt_with_context(
-            &target_chapters,
-            &target_rewrites,
-            canon_text,
-            settings,
-            core_prompt,
-            shard_context,
-            &target_issues,
-        ),
-        adjacent_context
+    let targeted_canon_text =
+        build_relevant_canon_text_from_text(canon_text, &target_chapters, settings);
+    let prompt = build_targeted_revision_prompt(
+        &target_chapters,
+        &target_rewrites,
+        &targeted_canon_text,
+        settings,
+        core_prompt,
+        shard_context,
+        &target_issues,
+        &adjacent_context,
     );
     append_ai_log(
         state,
@@ -4070,40 +4152,46 @@ fn merge_analysis_into_canon_assets(conn: &Connection, novel_id: &str) -> rusqli
         .collect::<Vec<_>>()
         .join("\n\n");
     let now = Utc::now().to_rfc3339();
-    upsert_canon_asset(conn, novel_id, "AI分析汇总", &analyses, &now)?;
+    upsert_canon_asset(
+        conn,
+        novel_id,
+        "AI分析汇总",
+        &compact_analysis_asset("AI分析汇总", &analyses),
+        &now,
+    )?;
     upsert_canon_asset(
         conn,
         novel_id,
         "人物卡",
-        &collect_analysis_field(&rows, "characters"),
+        &compact_analysis_asset("人物卡", &collect_analysis_field(&rows, "characters")),
         &now,
     )?;
     upsert_canon_asset(
         conn,
         novel_id,
         "人物关系",
-        &collect_analysis_field(&rows, "relationships"),
+        &compact_analysis_asset("人物关系", &collect_analysis_field(&rows, "relationships")),
         &now,
     )?;
     upsert_canon_asset(
         conn,
         novel_id,
         "地点",
-        &collect_analysis_field(&rows, "locations"),
+        &compact_analysis_asset("地点", &collect_analysis_field(&rows, "locations")),
         &now,
     )?;
     upsert_canon_asset(
         conn,
         novel_id,
         "伏笔",
-        &collect_analysis_field(&rows, "foreshadowing"),
+        &compact_analysis_asset("伏笔", &collect_analysis_field(&rows, "foreshadowing")),
         &now,
     )?;
     upsert_canon_asset(
         conn,
         novel_id,
         "术语表",
-        &collect_analysis_terms(&rows),
+        &compact_analysis_asset("术语表", &collect_analysis_terms(&rows)),
         &now,
     )?;
     Ok(())
@@ -4140,6 +4228,77 @@ fn collect_analysis_field(rows: &[(String, String)], field: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn compact_analysis_asset(kind: &str, content: &str) -> String {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let mut seen = HashSet::new();
+    let mut lines = Vec::new();
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("## ") {
+            lines.push(trimmed.to_string());
+            continue;
+        }
+        let key = normalize_analysis_entry(trimmed);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        lines.push(trimmed.to_string());
+    }
+    truncate_analysis_asset_at_line(kind, &lines.join("\n"))
+}
+
+fn normalize_analysis_entry(text: &str) -> String {
+    text.chars()
+        .filter(|ch| {
+            !ch.is_whitespace()
+                && !matches!(
+                    ch,
+                    '-' | '，' | ',' | '。' | '.' | '；' | ';' | '：' | ':' | '、'
+                )
+        })
+        .collect()
+}
+
+fn analysis_asset_char_limit(kind: &str) -> usize {
+    match kind {
+        "AI分析汇总" => 6_000,
+        "人物卡" => 7_000,
+        "人物关系" => 5_000,
+        "术语表" => 4_000,
+        "伏笔" => 5_000,
+        "地点" => 3_000,
+        _ => 3_000,
+    }
+}
+
+fn truncate_analysis_asset_at_line(kind: &str, content: &str) -> String {
+    let limit = analysis_asset_char_limit(kind);
+    if content.chars().count() <= limit {
+        return content.to_string();
+    }
+
+    let note = format!("[{}已去重并达到长度上限，后续低相关条目已省略]", kind);
+    let mut output = String::new();
+    for line in content.lines() {
+        let projected = output.chars().count() + line.chars().count() + 1 + note.chars().count();
+        if projected > limit {
+            break;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(line);
+    }
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&note);
+    output
 }
 
 fn collect_analysis_terms(rows: &[(String, String)]) -> String {
@@ -4225,40 +4384,46 @@ fn fill_empty_canon_assets_from_analysis(
         .collect::<Vec<_>>()
         .join("\n\n");
     let now = Utc::now().to_rfc3339();
-    upsert_empty_canon_asset(conn, novel_id, "AI分析汇总", &analyses, &now)?;
+    upsert_empty_canon_asset(
+        conn,
+        novel_id,
+        "AI分析汇总",
+        &compact_analysis_asset("AI分析汇总", &analyses),
+        &now,
+    )?;
     upsert_empty_canon_asset(
         conn,
         novel_id,
         "人物卡",
-        &collect_analysis_field(&rows, "characters"),
+        &compact_analysis_asset("人物卡", &collect_analysis_field(&rows, "characters")),
         &now,
     )?;
     upsert_empty_canon_asset(
         conn,
         novel_id,
         "人物关系",
-        &collect_analysis_field(&rows, "relationships"),
+        &compact_analysis_asset("人物关系", &collect_analysis_field(&rows, "relationships")),
         &now,
     )?;
     upsert_empty_canon_asset(
         conn,
         novel_id,
         "地点",
-        &collect_analysis_field(&rows, "locations"),
+        &compact_analysis_asset("地点", &collect_analysis_field(&rows, "locations")),
         &now,
     )?;
     upsert_empty_canon_asset(
         conn,
         novel_id,
         "伏笔",
-        &collect_analysis_field(&rows, "foreshadowing"),
+        &compact_analysis_asset("伏笔", &collect_analysis_field(&rows, "foreshadowing")),
         &now,
     )?;
     upsert_empty_canon_asset(
         conn,
         novel_id,
         "术语表",
-        &collect_analysis_terms(&rows),
+        &compact_analysis_asset("术语表", &collect_analysis_terms(&rows)),
         &now,
     )?;
     Ok(())
@@ -5868,6 +6033,64 @@ mod tests {
     }
 
     #[test]
+    fn relevant_canon_selection_keeps_mapping_and_excludes_unrelated_sections() {
+        let settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            rewritten_protagonist_name: "萧妍".to_string(),
+            additional_feminize_names: "小医仙".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: "".to_string(),
+            updated_at: "now".to_string(),
+        };
+        let chapter = sample_chapter(1, "第一章", "萧炎与小医仙进入青山镇。");
+        let assets = vec![
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "姓名映射表".to_string(),
+                content: "萧炎 -> 萧妍\n小医仙 -> 小医仙".to_string(),
+                updated_at: "now".to_string(),
+            },
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "人物关系".to_string(),
+                content:
+                    "## 萧炎与小医仙\n二人在青山镇同行。\n\n## 无关路人\n这个角色只在很后面出现。"
+                        .to_string(),
+                updated_at: "now".to_string(),
+            },
+        ];
+
+        let canon = build_relevant_canon_text(&assets, &[chapter], &settings);
+
+        assert!(canon.contains("萧炎 -> 萧妍"));
+        assert!(canon.contains("二人在青山镇同行"));
+        assert!(!canon.contains("无关路人"));
+    }
+
+    #[test]
+    fn compact_analysis_asset_deduplicates_and_limits_length_at_line_boundary() {
+        let content = (0..300)
+            .map(|index| {
+                if index % 2 == 0 {
+                    "- 萧炎与小医仙同行。".to_string()
+                } else {
+                    format!("- 低相关条目{index}：很长的历史分析内容。")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let compact = compact_analysis_asset("地点", &content);
+
+        assert_eq!(compact.matches("萧炎与小医仙同行").count(), 1);
+        assert!(compact.contains("已去重并达到长度上限"));
+        assert!(compact.chars().count() <= analysis_asset_char_limit("地点"));
+    }
+
+    #[test]
     fn rewrite_settings_prompt_includes_selected_rewrite_mode() {
         let strict_settings = NovelSettings {
             novel_id: "novel-1".to_string(),
@@ -6084,10 +6307,10 @@ mod tests {
             prompt.contains("未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者是否被误改性别")
         );
         assert!(prompt.contains("同一人物在不同章节中的他/她"));
-        assert!(decision_prompt.contains("此规则对严谨模式和创意模式都相同"));
+        assert!(decision_prompt.contains("Blocking 清单"));
         assert!(decision_prompt.contains("标题编号与 marker index 不一致不是问题"));
-        assert!(decision_prompt.contains("通过的审查项、优点、确认事项"));
-        assert!(decision_prompt.contains("仅用于定位，不代表标题中的章节编号"));
+        assert!(decision_prompt.contains("不要输出通过项、优点、确认事项"));
+        assert!(decision_prompt.contains("不代表标题章节编号"));
         assert!(decision_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
         assert!(decision_prompt.contains("保留原文人称代词和称谓"));
     }
@@ -6628,6 +6851,60 @@ mod tests {
         assert!(context.contains("原文内容 3"));
         assert!(context.contains("改写内容 3"));
         assert!(!context.contains("改写内容 2"));
+    }
+
+    #[test]
+    fn targeted_revision_prompt_contains_only_full_target_chapter_body() {
+        let chapters = (1..=3)
+            .map(|index| {
+                sample_chapter(
+                    index,
+                    &format!("第{index}章"),
+                    &format!("原文内容 {index} {}", "很长正文".repeat(20)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let rewrites = chapters
+            .iter()
+            .map(|chapter| ParsedChapterRewrite {
+                id: chapter.id.clone(),
+                index: chapter.index,
+                title: chapter.title.clone(),
+                text: format!("改写内容 {} {}", chapter.index, "很长改写".repeat(20)),
+            })
+            .collect::<Vec<_>>();
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![2],
+                "chapter",
+                "gender_residue",
+                "第二章仍有主角男性称谓。",
+            )],
+        };
+        let adjacent =
+            build_targeted_revision_context(&chapters, &rewrites, &HashSet::from([2_i64]));
+
+        let prompt = build_targeted_revision_prompt(
+            &chapters[1..2],
+            &rewrites[1..2],
+            "姓名映射表：萧炎 -> 萧妍",
+            &sample_novel_settings(),
+            "",
+            "",
+            &decision,
+            &adjacent,
+        );
+
+        assert!(prompt.contains("目标章节原文"));
+        assert!(prompt.contains("原文内容 2"));
+        assert!(prompt.contains("目标章节当前改写稿"));
+        assert!(prompt.contains("改写内容 2"));
+        assert!(prompt.contains("相邻章节只读上下文"));
+        assert!(!prompt.contains(&format!("原文内容 1 {}", "很长正文".repeat(20))));
+        assert!(!prompt.contains(&format!("原文内容 3 {}", "很长正文".repeat(20))));
+        assert!(!prompt.contains(&chapter_start_marker(&chapters[0])));
+        assert!(!prompt.contains(&chapter_start_marker(&chapters[2])));
     }
 
     #[test]

@@ -73,6 +73,58 @@ pub(crate) fn build_compact_canon_text(assets: &[CanonAsset]) -> String {
     }
 }
 
+pub(crate) fn build_relevant_canon_text(
+    assets: &[CanonAsset],
+    chapters: &[Chapter],
+    settings: &NovelSettings,
+) -> String {
+    if assets.is_empty() {
+        return "无".to_string();
+    }
+
+    let mut keywords = relevant_canon_keywords(chapters, settings);
+    for asset in assets {
+        if asset.kind == "姓名映射表" {
+            collect_mapping_keywords(&asset.content, &mut keywords);
+        }
+    }
+
+    let selected = assets
+        .iter()
+        .filter_map(|asset| {
+            let content = select_relevant_canon_content(asset, &keywords, settings);
+            if content.trim().is_empty() {
+                None
+            } else {
+                Some(format!("## {}\n{}", asset.kind, content))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if selected.trim().is_empty() {
+        build_compact_canon_text(assets)
+    } else {
+        selected
+    }
+}
+
+pub(crate) fn build_relevant_canon_text_from_text(
+    canon_text: &str,
+    chapters: &[Chapter],
+    settings: &NovelSettings,
+) -> String {
+    if canon_text.trim().is_empty() || canon_text.trim() == "无" {
+        return "无".to_string();
+    }
+    let assets = parse_compact_canon_assets(canon_text);
+    if assets.is_empty() {
+        truncate_text(canon_text, 8_000)
+    } else {
+        build_relevant_canon_text(&assets, chapters, settings)
+    }
+}
+
 pub(crate) fn compact_canon_asset_content(kind: &str, content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let mut seen = HashSet::new();
@@ -97,6 +149,171 @@ pub(crate) fn compact_canon_asset_content(kind: &str, content: &str) -> String {
         take_chars(&deduped, head_limit),
         take_last_chars(&deduped, tail_limit)
     )
+}
+
+fn parse_compact_canon_assets(canon_text: &str) -> Vec<CanonAsset> {
+    let mut assets = Vec::new();
+    let mut current_kind: Option<String> = None;
+    let mut current_lines = Vec::new();
+    let flush =
+        |kind: &mut Option<String>, lines: &mut Vec<String>, assets: &mut Vec<CanonAsset>| {
+            if let Some(kind) = kind.take() {
+                let content = lines.join("\n");
+                if !content.trim().is_empty() {
+                    assets.push(CanonAsset {
+                        novel_id: String::new(),
+                        kind,
+                        content,
+                        updated_at: String::new(),
+                    });
+                }
+            }
+            lines.clear();
+        };
+
+    for line in canon_text.lines() {
+        if let Some(kind) = line.trim().strip_prefix("## ") {
+            flush(&mut current_kind, &mut current_lines, &mut assets);
+            current_kind = Some(kind.trim().to_string());
+        } else {
+            current_lines.push(line.to_string());
+        }
+    }
+    flush(&mut current_kind, &mut current_lines, &mut assets);
+    assets
+}
+
+fn relevant_canon_keywords(chapters: &[Chapter], settings: &NovelSettings) -> HashSet<String> {
+    let mut keywords = HashSet::new();
+    for value in [
+        settings.protagonist_name.as_str(),
+        settings.rewritten_protagonist_name.as_str(),
+    ] {
+        insert_keyword(&mut keywords, value);
+    }
+    for value in settings
+        .additional_feminize_names
+        .split(['\n', ',', '，', ';', '；'])
+    {
+        insert_keyword(&mut keywords, value);
+    }
+    for chapter in chapters {
+        collect_text_keywords(&chapter.title, &mut keywords);
+        collect_text_keywords(&chapter.original_text, &mut keywords);
+        if let Some(rewrite_text) = chapter.rewrite_text.as_deref() {
+            collect_text_keywords(rewrite_text, &mut keywords);
+        }
+    }
+    keywords
+}
+
+fn collect_mapping_keywords(content: &str, keywords: &mut HashSet<String>) {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        for separator in ["->", "=>", "→", "：", ":", "\"source\"", "\"target\""] {
+            if trimmed.contains(separator) {
+                collect_text_keywords(trimmed, keywords);
+                break;
+            }
+        }
+    }
+}
+
+fn collect_text_keywords(text: &str, keywords: &mut HashSet<String>) {
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            current.push(ch);
+        } else {
+            insert_keyword(keywords, &current);
+            current.clear();
+        }
+    }
+    insert_keyword(keywords, &current);
+}
+
+fn insert_keyword(keywords: &mut HashSet<String>, value: &str) {
+    let trimmed = value.trim();
+    let len = trimmed.chars().count();
+    if (2..=20).contains(&len) {
+        keywords.insert(trimmed.to_string());
+    }
+}
+
+fn select_relevant_canon_content(
+    asset: &CanonAsset,
+    keywords: &HashSet<String>,
+    settings: &NovelSettings,
+) -> String {
+    let kind = asset.kind.as_str();
+    if matches!(kind, "姓名映射表" | "AI分析汇总") {
+        return compact_canon_asset_content(kind, &asset.content);
+    }
+
+    let normalized = asset.content.replace("\r\n", "\n").replace('\r', "\n");
+    let has_section_headers = normalized
+        .lines()
+        .any(|line| line.trim_start().starts_with("## "));
+    let sections = split_canon_sections(&normalized);
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for section in sections {
+        if is_core_canon_section(&section, settings) || section_matches_keywords(&section, keywords)
+        {
+            let compact = compact_canon_asset_content(kind, &section);
+            let key = normalize_for_dedup(&compact);
+            if !compact.trim().is_empty() && seen.insert(key) {
+                selected.push(compact);
+            }
+        }
+    }
+
+    if selected.is_empty() && !has_section_headers {
+        compact_canon_asset_content(kind, &asset.content)
+    } else if selected.is_empty() {
+        String::new()
+    } else {
+        compact_canon_asset_content(kind, &selected.join("\n\n"))
+    }
+}
+
+fn split_canon_sections(content: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut current = Vec::new();
+    for line in content.lines() {
+        if line.trim_start().starts_with("## ") && !current.is_empty() {
+            sections.push(current.join("\n"));
+            current.clear();
+        }
+        current.push(line.to_string());
+    }
+    if !current.is_empty() {
+        sections.push(current.join("\n"));
+    }
+    if sections.is_empty() && !content.trim().is_empty() {
+        sections.push(content.trim().to_string());
+    }
+    sections
+}
+
+fn is_core_canon_section(section: &str, settings: &NovelSettings) -> bool {
+    let protagonist = settings.protagonist_name.trim();
+    let rewritten = settings.rewritten_protagonist_name.trim();
+    (!protagonist.is_empty() && section.contains(protagonist))
+        || (!rewritten.is_empty() && section.contains(rewritten))
+}
+
+fn section_matches_keywords(section: &str, keywords: &HashSet<String>) -> bool {
+    keywords
+        .iter()
+        .filter(|keyword| keyword.chars().count() >= 2)
+        .any(|keyword| section.contains(keyword))
+}
+
+fn normalize_for_dedup(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_whitespace() && !matches!(ch, '，' | ',' | '。' | '.' | '；' | ';'))
+        .collect()
 }
 
 pub(crate) fn canon_asset_char_limit(kind: &str) -> usize {

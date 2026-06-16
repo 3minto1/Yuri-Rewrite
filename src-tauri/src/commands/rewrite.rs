@@ -1,6 +1,6 @@
 use crate::domain::{AppState, Job};
 use crate::{
-    build_compact_canon_text, create_job, ensure_name_mapping_asset, format_batch_label,
+    build_relevant_canon_text, create_job, ensure_name_mapping_asset, format_batch_label,
     load_canon_assets, load_chapters_for_batch, load_core_prompt, load_job, load_model_profile,
     load_review_enabled, load_review_profile_for_run, load_review_profile_id,
     load_rewrite_parallelism, mark_chapters_rewrite_failed, read_stored_api_key,
@@ -60,7 +60,7 @@ pub(crate) async fn start_rewrite(
         let conn = state.conn.lock().map_err(to_string)?;
         load_canon_assets(&conn, &novel_id)?
     };
-    let canon_text = build_compact_canon_text(&canon_assets);
+    let canon_text = build_relevant_canon_text(&canon_assets, &chapters, &settings);
     let batch_label = format_batch_label(&chapters);
 
     for chapter in &chapters {
