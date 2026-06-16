@@ -1841,14 +1841,19 @@ export default function App() {
             <div className="quickstart-content">
               <h2 id="quickstart-title">快速上手</h2>
               <ol>
-                <li>点击导入 TXT，软件会自动识别章节并按批次整理。</li>
-                <li>填写模型配置，保存后点击诊断模型，确认 API Key、JSON 输出和思考模式可用。</li>
-                <li>进入设定，填写主角姓名、改写后姓名、身材体型、改写模式和额外要求。</li>
-                <li>如需更严格质量控制，可在设置里开启改写复检，并选择审查专家模型。</li>
-                <li>回到工作台，先看任务预估，确认请求数、历史耗时和预计等待时间。</li>
-                <li>点击一键分析改写当前批次或全文；全文任务运行中可暂停、继续或终止。</li>
-                <li>改写完成后进入对比页面，检查原文和改写稿，只导出已完成章节的 TXT。</li>
+                <li>点击导入 TXT，软件会自动识别章节，并按批次整理。</li>
+                <li>先配置模型，填写 Base URL、模型 ID 和 API Key，保存后点击诊断模型。</li>
+                <li>进入设定，填写主角原名、改写后姓名、身材体型、改写模式和额外要求。</li>
+                <li>建议先处理一个批次：点击分析，再点击改写，确认效果稳定后再使用一键分析改写。</li>
+                <li>如需更严格检查，可在设置中开启改写复检；复检会增加请求数、等待时间和 token 消耗。</li>
+                <li>一键分析改写会按批次连续处理；运行中可暂停、继续或终止，限流/网络中断后也可调整设置再继续。</li>
+                <li>改写完成后进入对比页面，可搜索、查看差异并导出 TXT；导出只包含已完成改写的章节。</li>
               </ol>
+              <p className="quickstart-tip">
+                温馨提示：如果发现 API 调用异常缓慢，可以尝试删除{" "}
+                <code>C:\Users\你的用户名\AppData\Roaming\com.local.yurirewrite</code>{" "}
+                文件夹后重试。
+              </p>
               <button className="dialog-primary quickstart-confirm" onClick={closeQuickStart}>
                 确定
               </button>

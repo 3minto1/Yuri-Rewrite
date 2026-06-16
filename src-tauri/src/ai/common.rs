@@ -62,6 +62,32 @@ pub(crate) fn apply_openai_compatible_output_limit(
     false
 }
 
+pub(crate) fn openai_compatible_json_response_format(
+    profile: &ModelProfile,
+    base_url: &str,
+    model: &str,
+) -> Option<serde_json::Value> {
+    if is_doubao_profile(profile, base_url, model) {
+        return Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "yuri_rewrite_json_response",
+                "schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                }
+            }
+        }));
+    }
+
+    if is_deepseek_profile(profile, base_url, model) {
+        return Some(json!({ "type": "json_object" }));
+    }
+
+    None
+}
+
 pub(crate) fn load_review_profile_for_run(
     state: &State<'_, AppState>,
     rewrite_profile: &ModelProfile,
@@ -535,5 +561,48 @@ mod tests {
             false
         ));
         assert_eq!(payload, json!({}));
+    }
+
+    #[test]
+    fn json_response_format_uses_schema_for_doubao() {
+        let profile = profile(
+            "OpenAI 兼容",
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "doubao-seed-2-0-lite-260428",
+        );
+        let response_format =
+            openai_compatible_json_response_format(&profile, &profile.base_url, &profile.model)
+                .expect("doubao supports structured json output");
+
+        assert_eq!(response_format["type"], json!("json_schema"));
+        assert_eq!(
+            response_format["json_schema"]["name"],
+            json!("yuri_rewrite_json_response")
+        );
+        assert_eq!(
+            response_format["json_schema"]["schema"]["type"],
+            json!("object")
+        );
+    }
+
+    #[test]
+    fn json_response_format_keeps_deepseek_json_object() {
+        let profile = profile("DeepSeek", "https://api.deepseek.com", "deepseek-v4-pro");
+        let response_format =
+            openai_compatible_json_response_format(&profile, &profile.base_url, &profile.model)
+                .expect("deepseek json object response format");
+
+        assert_eq!(response_format, json!({ "type": "json_object" }));
+    }
+
+    #[test]
+    fn json_response_format_is_not_added_for_unknown_provider() {
+        let profile = profile("OpenAI 兼容", "https://example.com/v1", "some-model");
+        assert!(openai_compatible_json_response_format(
+            &profile,
+            &profile.base_url,
+            &profile.model
+        )
+        .is_none());
     }
 }

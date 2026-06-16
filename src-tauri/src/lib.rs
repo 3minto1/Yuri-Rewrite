@@ -1574,7 +1574,7 @@ async fn review_shard_decision(
                         output.reasoning.as_deref(),
                         Some(&output.raw_response),
                     )?;
-                    Err(format!("{}：审查决策无法解析：{}", shard_label, error))
+                    Err(review_decision_parse_error_message(shard_label, &error))
                 }
             }
         }
@@ -1593,6 +1593,13 @@ async fn review_shard_decision(
             Err(format!("{}：{}", shard_label, error))
         }
     }
+}
+
+fn review_decision_parse_error_message(shard_label: &str, error: &str) -> String {
+    format!(
+        "{}：审查决策无法解析：{}。可以手动重试当前任务；如果频繁出现，请为复检选择 JSON 输出更稳定的模型，或降低并发后再试。",
+        shard_label, error
+    )
 }
 
 fn build_batch_review_decision_prompt_with_context(
@@ -6823,6 +6830,18 @@ mod tests {
         assert_eq!(decision.issues[0].category, "gender_residue");
         assert_eq!(decision.issues[1].chapter_indexes, vec![4]);
         assert_eq!(decision.issues[2].chapter_indexes, vec![5]);
+    }
+
+    #[test]
+    fn review_decision_parse_error_message_suggests_manual_retry() {
+        let message = review_decision_parse_error_message(
+            "第1-30章 · 分片 1/3",
+            "expected value at line 11 column 23",
+        );
+
+        assert!(message.contains("审查决策无法解析"));
+        assert!(message.contains("可以手动重试当前任务"));
+        assert!(message.contains("JSON 输出更稳定的模型"));
     }
 
     #[test]

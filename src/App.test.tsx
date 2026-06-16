@@ -137,6 +137,16 @@ describe("App feature behavior", () => {
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
   });
 
+  it("shows the updated quick start help text", async () => {
+    window.localStorage.removeItem("yuri-rewrite.quick-start-seen");
+    render(<App />);
+
+    const dialog = await screen.findByRole("dialog", { name: "快速上手" });
+    expect(within(dialog).getByText(/建议先处理一个批次/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/限流\/网络中断后也可调整设置再继续/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/com\.local\.yurirewrite/)).toBeInTheDocument();
+  });
+
   it("restores the last selected rewrite model from app settings", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "list_novels") return novels;

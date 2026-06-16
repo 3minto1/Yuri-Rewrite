@@ -1503,6 +1503,25 @@ label {
   text-shadow: 0 1px 10px rgba(255, 255, 255, 0.7);
 }
 
+.quickstart-tip {
+  background: rgba(255, 250, 244, 0.62);
+  border: 1px solid rgba(143, 111, 83, 0.22);
+  border-radius: 8px;
+  color: #5f4a3a;
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+.quickstart-tip code {
+  background: rgba(255, 255, 255, 0.68);
+  border-radius: 4px;
+  font-family: "Consolas", "Courier New", monospace;
+  overflow-wrap: anywhere;
+  padding: 1px 4px;
+}
+
 .quickstart-confirm {
   align-self: flex-end;
   min-width: 108px;

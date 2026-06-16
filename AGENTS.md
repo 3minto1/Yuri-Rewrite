@@ -117,11 +117,13 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 - Review is disabled by default because it substantially increases request count and wait time.
 - When enabled, the rewrite model produces a full shard and the review model returns JSON approval/issues.
+- Review decision JSON requests should use provider-supported structured output where available. DeepSeek keeps `response_format: {"type":"json_object"}`; Doubao / Volcengine Ark uses `response_format.type = "json_schema"` with a permissive object schema.
 - Each shard enters review immediately after its draft is parsed while other shards continue drafting. The total number of active model requests must not exceed the configured rewrite concurrency.
 - Review issues use stable marker indexes internally. When all actionable issues resolve to no more than half of the shard, rewrite only those chapters and merge them by chapter ID without changing untouched drafts.
 - Fall back to full-shard regeneration for missing or invalid indexes, cross-chapter continuity or boundary defects, excessive target counts, or unreliable targeted output. Every post-repair review still checks the complete merged shard.
 - Rejected drafts may be repaired twice. Targeted repairs return only the requested chapter markers; full-shard fallbacks return every shard marker. The merged complete shard must be reviewed again after either path.
 - If the third decision still fails, append a per-novel warning containing only the third decision's blocking issues, save the second regenerated draft, and continue later shards instead of failing the whole batch.
+- If a review decision cannot be parsed as valid JSON after cleanup, the user-facing error must explicitly say the user can manually retry, and should suggest using a review model with more stable JSON output or lowering concurrency.
 - Logs must distinguish draft generation, review decisions, rejection rewrites, final review, and fallback warning paths.
 - Review `issues` contain only actionable blocking defects. Never log compliant passages, passed checks, correctly preserved non-target male descriptions, positive observations, or confirmation-only notes as blocking issues.
 - A claimed protagonist-name or pronoun residue must quote text that still exists in the current rewrite draft. Original-text evidence alone is not actionable and must not survive deterministic post-validation.
@@ -144,6 +146,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 - HTTP clients use a connection timeout and a bounded request timeout. Timeout errors must be explicit.
 - Remove unsupported thinking parameters and retry only for HTTP 400/422 responses that clearly identify parameter incompatibility. Do not duplicate 401, 403, 429, or 5xx requests.
+- For OpenAI-compatible JSON requests, add structured `response_format` only for providers known to support it. Keep unknown compatible services unchanged to avoid parameter compatibility regressions.
 - Gemini reasoning consists of all `thought: true` text parts; final content consists of all other text parts. Do not assume `parts[0]` is the answer.
 - Preserve provider response bodies in user-facing errors where practical.
 - Successful AI logs store extracted content, reasoning, raw provider JSON, input/output character counts, duration, review state, and thinking mode.
@@ -190,8 +193,9 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 ## Documentation Rules
 
-- Keep `README.md` beginner-oriented: installation, prerequisites, first successful workflow, troubleshooting, privacy, and developer commands should be easy to find.
+- Keep `README.md` beginner-oriented: installation, prerequisites, first successful workflow, troubleshooting, privacy, and safety notes should be easy to find.
 - Do not put a fixed application version number in `README.md`; releases change independently and stale version text creates unnecessary maintenance.
+- Do not add developer guide or distribution sections back to `README.md` unless explicitly requested.
 - Document user-visible behavior accurately. Do not promise provider availability, fixed model IDs, or pricing.
 
 ## Editing and Git Safety
