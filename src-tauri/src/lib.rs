@@ -1524,6 +1524,10 @@ async fn review_shard_decision(
                 Ok(decision) => {
                     let (decision, filtered_issues) =
                         filter_review_decision_against_rewrites(decision, rewrites, settings);
+                    let (decision, deterministic_issues) =
+                        merge_deterministic_protagonist_residue_issues(
+                            decision, shard, rewrites, settings,
+                        );
                     if !filtered_issues.is_empty() {
                         append_ai_log(
                             state,
@@ -1535,6 +1539,22 @@ async fn review_shard_decision(
                             &format!(
                                 "以下问题声称当前改写稿仍含男性残留，但程序在对应改写章节中未找到被引用的残留证据，已忽略：\n{}",
                                 review_issues_text(&filtered_issues)
+                            ),
+                            None,
+                            None,
+                        )?;
+                    }
+                    if !deterministic_issues.is_empty() {
+                        append_ai_log(
+                            state,
+                            Some(novel_id),
+                            &profile.id,
+                            "本地主角残留扫描",
+                            Some(shard_label),
+                            "warning",
+                            &format!(
+                                "本地扫描发现改写稿仍包含主角原名或派生称呼残留，将作为 blocking 问题进入修复流程：\n{}",
+                                review_issues_text(&deterministic_issues)
                             ),
                             None,
                             None,
@@ -1599,10 +1619,12 @@ Blocking 清单：
 - 未指定性转的角色被误改性别、亲属关系、称谓或代词。
 - 当前改写稿缺句、重复、串章、空正文、额外章节、marker/章节边界错误，或破坏原文事件顺序、因果、战力、伏笔、人物动机。
 - 外貌、能力状态、关系推进、核心设定或高级设定出现实质矛盾。
+- 主角改名后，改写稿仍保留“同名、原名、旧名、以旧名某字为名、名字含义”等暴露旧主角姓名或与新姓名矛盾的表达。
 - 标题只有在明确出现主角原名，或明确描述主角男性身份、男性称谓、男性身体状态时才算问题；标题编号与 marker index 不一致不是问题。
 
 排除项：
 - 每个问题必须引用“待审查改写稿”中仍存在的实际文字；只出现在原文中的证据不得列入 issues。
+- 不要把仅与主角原名共享单字的未指定 NPC 当成主角残留。例如主角“石昊”改为“石念昔”时，未被指定或映射的 NPC“秦昊”仍应保留，不是 blocking。
 - “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性昵称本身不是男性残留。只有同处证据明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代且确实指向主角，才是 blocking。
 - 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，改写稿保留原文人称代词和称谓不是问题。
 - 不要输出通过项、优点、确认事项、建议性润色或“无需修改”的内容。
@@ -1674,7 +1696,7 @@ fn build_compact_review_constraints(
     };
     let canon_summary = compact_review_canon(canon_text);
     format!(
-        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、未指定角色误改性别、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。性别不明的动物、灵兽等非人生物保留原文代词可通过。",
+        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、主角改名后的同名/旧名/以旧名某字为名等姓名逻辑矛盾、未指定角色误改性别、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。仅与主角原名共享单字的未指定 NPC 不得当作主角残留。性别不明的动物、灵兽等非人生物保留原文代词可通过。",
         settings.protagonist_name.trim(),
         rewritten_name,
         additional_names,
@@ -1975,6 +1997,303 @@ fn filter_review_decision_against_rewrites(
         },
         filtered,
     )
+}
+
+fn merge_deterministic_protagonist_residue_issues(
+    decision: ReviewDecision,
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> (ReviewDecision, Vec<ReviewIssue>) {
+    let mut deterministic_issues =
+        detect_protagonist_derived_name_residue(chapters, rewrites, settings);
+    deterministic_issues.extend(detect_protagonist_name_logic_inconsistency(
+        chapters, rewrites, settings,
+    ));
+    if deterministic_issues.is_empty() {
+        return (decision, Vec::new());
+    }
+
+    let mut issues = decision.issues;
+    let mut existing_keys = issues.iter().map(review_issue_text).collect::<HashSet<_>>();
+    let mut added = Vec::new();
+    for issue in deterministic_issues {
+        let key = review_issue_text(&issue);
+        if existing_keys.contains(&key) {
+            continue;
+        }
+        existing_keys.insert(key);
+        added.push(issue.clone());
+        issues.push(issue);
+    }
+    (
+        ReviewDecision {
+            approved: issues.is_empty(),
+            issues,
+        },
+        added,
+    )
+}
+
+fn detect_protagonist_derived_name_residue(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> Vec<ReviewIssue> {
+    let source_name = settings.protagonist_name.trim();
+    if source_name.is_empty() {
+        return Vec::new();
+    }
+    let rewrite_by_id = rewrites
+        .iter()
+        .map(|rewrite| (rewrite.id.as_str(), rewrite))
+        .collect::<HashMap<_, _>>();
+    let mut issues = Vec::new();
+    for chapter in chapters {
+        let Some(rewrite) = rewrite_by_id.get(chapter.id.as_str()) else {
+            continue;
+        };
+        let candidates = protagonist_residue_candidates_from_original(chapter, source_name);
+        if candidates.is_empty() {
+            continue;
+        }
+        let rewrite_text = format!("{}\n{}", rewrite.title, rewrite.text);
+        let mut residues = candidates
+            .into_iter()
+            .filter(|candidate| rewrite_text.contains(candidate.as_str()))
+            .collect::<Vec<_>>();
+        residues.sort_by_key(|candidate| (candidate.chars().count(), candidate.clone()));
+        residues.dedup();
+        if residues.is_empty() {
+            continue;
+        }
+        issues.push(ReviewIssue {
+            chapter_indexes: vec![chapter.index],
+            scope: "chapter".to_string(),
+            category: "source_name_residue".to_string(),
+            severity: "blocking".to_string(),
+            problem: format!(
+                "分片索引 {} 的改写稿仍残留主角原名或派生称呼：{}。",
+                chapter.index,
+                residues.join("、")
+            ),
+            required_fix: format!(
+                "这些称呼来自原文主角“{}”，必须按姓名映射或改写名统一女性化；不要保留完整原名、原名派生昵称或男性化称谓。",
+                source_name
+            ),
+        });
+    }
+    issues
+}
+
+fn detect_protagonist_name_logic_inconsistency(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> Vec<ReviewIssue> {
+    let source_name = settings.protagonist_name.trim();
+    let rewritten_name = settings.rewritten_protagonist_name.trim();
+    if source_name.is_empty() || rewritten_name.is_empty() {
+        return Vec::new();
+    }
+    let rewrite_by_id = rewrites
+        .iter()
+        .map(|rewrite| (rewrite.id.as_str(), rewrite))
+        .collect::<HashMap<_, _>>();
+    let mut issues = Vec::new();
+    for chapter in chapters {
+        let Some(rewrite) = rewrite_by_id.get(chapter.id.as_str()) else {
+            continue;
+        };
+        let rewrite_text = format!("{}\n{}", rewrite.title, rewrite.text);
+        let evidence =
+            protagonist_name_logic_conflict_evidence(&rewrite_text, source_name, rewritten_name);
+        if evidence.is_empty() {
+            continue;
+        }
+        issues.push(ReviewIssue {
+            chapter_indexes: vec![chapter.index],
+            scope: "chapter".to_string(),
+            category: "name_logic_inconsistency".to_string(),
+            severity: "blocking".to_string(),
+            problem: format!(
+                "分片索引 {} 的改写稿存在主角改名后的姓名逻辑矛盾：{}。",
+                chapter.index,
+                evidence.join(" / ")
+            ),
+            required_fix: format!(
+                "主角已从“{}”改写为“{}”，涉及同名、旧名、姓名来源、以旧名某字为名等句子必须同步改写为与新姓名一致的逻辑；不得把仅共享单字的未指定 NPC 当作主角改名。",
+                source_name, rewritten_name
+            ),
+        });
+    }
+    issues
+}
+
+fn protagonist_name_logic_conflict_evidence(
+    text: &str,
+    source_name: &str,
+    rewritten_name: &str,
+) -> Vec<String> {
+    let legacy_parts = protagonist_legacy_name_parts(source_name);
+    if legacy_parts.is_empty() {
+        return Vec::new();
+    }
+    let mut evidence = Vec::new();
+    for sentence in split_review_sentences(text) {
+        let trimmed = sentence.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !legacy_name_sentence_points_to_protagonist(trimmed, rewritten_name) {
+            continue;
+        }
+        if legacy_parts
+            .iter()
+            .any(|part| contains_legacy_name_semantic_pattern(trimmed, part.as_str()))
+        {
+            evidence.push(truncate_text(trimmed, 180));
+        }
+    }
+    evidence.sort();
+    evidence.dedup();
+    evidence
+}
+
+fn split_review_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        current.push(ch);
+        if matches!(ch, '。' | '！' | '？' | '!' | '?' | '\n') {
+            if !current.trim().is_empty() {
+                sentences.push(current.trim().to_string());
+            }
+            current.clear();
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+    sentences
+}
+
+fn legacy_name_sentence_points_to_protagonist(sentence: &str, rewritten_name: &str) -> bool {
+    (!rewritten_name.is_empty() && sentence.contains(rewritten_name))
+        || contains_any(
+            sentence,
+            &[
+                "她原本",
+                "她原来",
+                "她本来",
+                "她曾",
+                "她旧",
+                "她的原名",
+                "她的旧名",
+                "主角",
+                "女主",
+                "原名",
+                "旧名",
+                "同名",
+            ],
+        )
+}
+
+fn contains_legacy_name_semantic_pattern(sentence: &str, legacy_part: &str) -> bool {
+    if legacy_part.is_empty() {
+        return false;
+    }
+    [
+        format!("以{legacy_part}为名"),
+        format!("以“{legacy_part}”为名"),
+        format!("以‘{legacy_part}’为名"),
+        format!("{legacy_part}为名"),
+        format!("名中带{legacy_part}"),
+        format!("名字里有{legacy_part}"),
+        format!("名字中有{legacy_part}"),
+        format!("名里有{legacy_part}"),
+        format!("名叫{legacy_part}"),
+    ]
+    .iter()
+    .any(|pattern| sentence.contains(pattern))
+        || ((sentence.contains("同名")
+            || sentence.contains("原名")
+            || sentence.contains("旧名")
+            || sentence.contains("本名"))
+            && sentence.contains(legacy_part))
+}
+
+fn protagonist_residue_candidates_from_original(
+    chapter: &Chapter,
+    source_name: &str,
+) -> Vec<String> {
+    let original_text = format!("{}\n{}", chapter.title, chapter.original_text);
+    let mut candidates = protagonist_derived_name_candidates(source_name)
+        .into_iter()
+        .filter(|candidate| original_text.contains(candidate.as_str()))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| (candidate.chars().count(), candidate.clone()));
+    candidates.dedup();
+    candidates
+}
+
+fn protagonist_legacy_name_parts(source_name: &str) -> Vec<String> {
+    let source_name = source_name.trim();
+    let chars = source_name.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let mut parts = vec![source_name.to_string()];
+    if chars.len() >= 2 {
+        let given = chars[1..].iter().collect::<String>();
+        let last = chars[chars.len() - 1].to_string();
+        parts.push(given);
+        parts.push(last);
+    }
+    parts.sort_by_key(|part| (part.chars().count(), part.clone()));
+    parts.dedup();
+    parts
+}
+
+fn protagonist_derived_name_candidates(source_name: &str) -> Vec<String> {
+    let source_name = source_name.trim();
+    let chars = source_name.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = vec![source_name.to_string()];
+    if chars.len() < 2 {
+        return candidates;
+    }
+
+    let given = chars[1..].iter().collect::<String>();
+    let last = chars[chars.len() - 1].to_string();
+    let name_parts = if given == last {
+        vec![given]
+    } else {
+        vec![given, last]
+    };
+    let prefixes = ["小", "老", "大", "阿"];
+    let suffixes = [
+        "哥", "哥哥", "兄", "兄弟", "弟", "弟弟", "叔", "伯", "爷", "少", "少爷", "公子", "兄台",
+        "老弟", "贤弟", "道兄", "道友",
+    ];
+
+    for part in &name_parts {
+        for prefix in prefixes {
+            candidates.push(format!("{prefix}{part}"));
+        }
+        for suffix in suffixes {
+            candidates.push(format!("{part}{suffix}"));
+        }
+    }
+    for suffix in suffixes {
+        candidates.push(format!("{source_name}{suffix}"));
+    }
+
+    candidates.sort_by_key(|candidate| (candidate.chars().count(), candidate.clone()));
+    candidates.dedup();
+    candidates
 }
 
 fn gender_residue_claim_targets_ambiguous_non_human(
@@ -6178,6 +6497,8 @@ mod tests {
         assert!(strict_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
         assert!(strict_prompt.contains("保留原文中的人称代词和称谓"));
         assert!(strict_prompt.contains("不得因为百合改写目标而把所有重要配角"));
+        assert!(strict_prompt.contains("不要因为 NPC 名字与主角原名共享某个字"));
+        assert!(strict_prompt.contains("涉及主角姓名来源、同名关系、名字含义、旧名对比"));
         assert!(creative_prompt.contains("创意模式"));
         assert!(creative_prompt.contains("优先级高于普通的“中度再创作”约束"));
         assert!(creative_prompt.contains("每章都能明确感知主角已经从男性变为女性"));
@@ -6380,6 +6701,8 @@ mod tests {
         assert!(decision_prompt.contains("不代表标题章节编号"));
         assert!(decision_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
         assert!(decision_prompt.contains("保留原文人称代词和称谓"));
+        assert!(decision_prompt.contains("仅与主角原名共享单字的未指定 NPC"));
+        assert!(decision_prompt.contains("同名/旧名/以旧名某字为名"));
     }
 
     #[test]
@@ -6500,6 +6823,171 @@ mod tests {
         assert_eq!(decision.issues[0].category, "gender_residue");
         assert_eq!(decision.issues[1].chapter_indexes, vec![4]);
         assert_eq!(decision.issues[2].chapter_indexes, vec![5]);
+    }
+
+    #[test]
+    fn protagonist_residue_scan_detects_original_derived_nicknames() {
+        let chapter = sample_chapter(
+            368,
+            "第0368章 童趣",
+            "石昊挥了挥手。小昊，三日后你要进去。小昊姑娘，赶紧闭关吧。昊叔，我们从村后走。",
+        );
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text:
+                "石念昔挥了挥手。小昊，三日后你要进去。小昊姑娘，赶紧闭关吧。昊叔，我们从村后走。"
+                    .to_string(),
+        };
+        let mut settings = sample_novel_settings();
+        settings.protagonist_name = "石昊".to_string();
+        settings.rewritten_protagonist_name = "石念昔".to_string();
+
+        let issues = detect_protagonist_derived_name_residue(
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &settings,
+        );
+
+        assert_eq!(issues.len(), 1);
+        let text = review_issue_text(&issues[0]);
+        assert!(text.contains("小昊"));
+        assert!(text.contains("昊叔"));
+        let candidates = protagonist_residue_candidates_from_original(&chapter, "石昊");
+        assert!(!candidates.iter().any(|candidate| candidate == "昊"));
+    }
+
+    #[test]
+    fn protagonist_residue_scan_handles_multi_character_given_names() {
+        let chapter = sample_chapter(12, "第十二章", "李火旺回头。小火旺别闹。旺哥今日出门。");
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "李火婉回头。小火旺别闹。旺哥今日出门。".to_string(),
+        };
+        let mut settings = sample_novel_settings();
+        settings.protagonist_name = "李火旺".to_string();
+        settings.rewritten_protagonist_name = "李火婉".to_string();
+
+        let issues = detect_protagonist_derived_name_residue(
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &settings,
+        );
+
+        assert_eq!(issues.len(), 1);
+        let text = review_issue_text(&issues[0]);
+        assert!(text.contains("小火旺"));
+        assert!(text.contains("旺哥"));
+    }
+
+    #[test]
+    fn protagonist_residue_scan_ignores_bare_last_character_and_unseen_candidates() {
+        let chapter = sample_chapter(9, "第九章", "石昊进入昊天塔。");
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "石念昔进入昊天塔。昊哥没有出现在原文，不能凭空当残留。".to_string(),
+        };
+        let mut settings = sample_novel_settings();
+        settings.protagonist_name = "石昊".to_string();
+        settings.rewritten_protagonist_name = "石念昔".to_string();
+
+        let issues = detect_protagonist_derived_name_residue(
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &settings,
+        );
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn protagonist_residue_scan_preserves_npc_with_shared_name_character() {
+        let chapter = sample_chapter(
+            370,
+            "第0370章 双昊",
+            "石昊脸上平静。秦昊走来，与石昊一样，以昊为名，只是姓氏不同。",
+        );
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "石念昔脸上平静。秦昊走来，与她相似，只是姓氏不同。".to_string(),
+        };
+        let mut settings = sample_novel_settings();
+        settings.protagonist_name = "石昊".to_string();
+        settings.rewritten_protagonist_name = "石念昔".to_string();
+
+        let issues = detect_protagonist_derived_name_residue(
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &settings,
+        );
+
+        assert!(issues.is_empty());
+        let candidates = protagonist_residue_candidates_from_original(&chapter, "石昊");
+        assert!(!candidates.iter().any(|candidate| candidate == "秦昊"));
+    }
+
+    #[test]
+    fn protagonist_name_logic_scan_flags_old_name_semantic_conflict() {
+        let chapter = sample_chapter(
+            370,
+            "第0370章 双昊",
+            "石昊脸上平静。秦昊走来，与石昊一样，以昊为名，只是姓氏不同。",
+        );
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "石念昔脸上平静。秦昊走来，与她原本同名，都曾以昊为名，只是姓氏不同。"
+                .to_string(),
+        };
+        let mut settings = sample_novel_settings();
+        settings.protagonist_name = "石昊".to_string();
+        settings.rewritten_protagonist_name = "石念昔".to_string();
+
+        let issues = detect_protagonist_name_logic_inconsistency(
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &settings,
+        );
+
+        assert_eq!(issues.len(), 1);
+        let text = review_issue_text(&issues[0]);
+        assert!(text.contains("姓名逻辑矛盾"));
+        assert!(text.contains("以昊为名"));
+    }
+
+    #[test]
+    fn protagonist_residue_scan_merges_with_ai_review_decision() {
+        let chapter = sample_chapter(1, "第一章", "萧炎来了。小炎也来了。");
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "萧妍来了。小炎也来了。".to_string(),
+        };
+        let decision = ReviewDecision {
+            approved: true,
+            issues: Vec::new(),
+        };
+
+        let (decision, added) = merge_deterministic_protagonist_residue_issues(
+            decision,
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &sample_novel_settings(),
+        );
+
+        assert!(!decision.approved);
+        assert_eq!(added.len(), 1);
+        assert_eq!(decision.issues[0].chapter_indexes, vec![1]);
+        assert!(review_issue_text(&decision.issues[0]).contains("小炎"));
     }
 
     #[test]

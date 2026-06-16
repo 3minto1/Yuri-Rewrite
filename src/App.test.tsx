@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
-import type { AppSettings, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
+import type { AiLog, AppSettings, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -90,6 +90,7 @@ const estimate: JobEstimate = {
   review_enabled: false,
   current_batch_requests: 2,
   full_run_requests: 4,
+  estimated_full_run_seconds: 120,
   recent_success_calls: 0,
   recent_failed_calls: 0
 };
@@ -240,12 +241,13 @@ describe("App feature behavior", () => {
 
   it("refreshes rewritten chapters after an auto batch finishes without changing pages", async () => {
     let currentDetail = detail;
+    let currentLogs: AiLog[] = [];
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "get_novel_detail") return currentDetail;
       if (command === "list_novels") return novels;
       if (command === "list_model_profiles") return [profile];
       if (command === "get_app_settings") return settings;
-      if (command === "list_ai_logs") return [];
+      if (command === "list_ai_logs") return currentLogs;
       if (command === "estimate_job_cost") return estimate;
       if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
       return undefined;
@@ -265,6 +267,18 @@ describe("App feature behavior", () => {
         }
       ]
     };
+    currentLogs = [{
+      id: "log-1",
+      novel_id: "novel-1",
+      profile_id: "profile-1",
+      action: "批次改写",
+      chapter_title: "第一批",
+      status: "success",
+      content: "第一批日志内容",
+      reasoning: "",
+      raw_response: "",
+      created_at: "2026-06-16T00:00:00Z"
+    }];
     act(() => {
       mocks.progressCallback?.({
         id: "auto-1",
@@ -279,6 +293,27 @@ describe("App feature behavior", () => {
 
     await waitFor(() => expect(screen.getByText("第一批更新后的改写内容")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    await waitFor(() => expect(screen.getAllByText("第一批日志内容").length).toBeGreaterThan(0));
+  });
+
+  it("updates auto run remaining time as batches complete", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-1",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 2,
+        message: "已更新合并导出至第 1 批"
+      });
+    });
+
+    await waitFor(() => expect(screen.getByText(/预计剩余 1 分 0 秒/)).toBeInTheDocument());
   });
 
   it("opens novel settings and exports from the compare view", async () => {

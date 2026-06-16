@@ -549,6 +549,7 @@ export default function App() {
           advanced_settings: next.settings.advanced_settings
         });
       }
+      await refreshLogs(novelId);
     } catch {
       // Progress refresh is best-effort. The final task result still performs a full refresh.
     } finally {
@@ -1218,6 +1219,16 @@ export default function App() {
     return `${hours} 小时 ${restMinutes} 分`;
   }, []);
 
+  const autoRemainingSeconds = useMemo(() => {
+    if (!job || job.job_type !== "auto" || job.total_chapters <= 0) return null;
+    if (!jobEstimate?.estimated_full_run_seconds) return null;
+    const remainingBatches = Math.max(0, job.total_chapters - job.current_chapter);
+    if (remainingBatches <= 0) return 0;
+    const estimatedBatchCount = jobEstimate.novel_batches > 0 ? jobEstimate.novel_batches : job.total_chapters;
+    const estimatedSecondsPerBatch = jobEstimate.estimated_full_run_seconds / estimatedBatchCount;
+    return estimatedSecondsPerBatch * remainingBatches;
+  }, [job, jobEstimate]);
+
   const handleCompareBack = useCallback(() => setActiveView("workspace"), []);
   const handleCompareExport = useCallback(() => {
     void exportNovel("txt");
@@ -1537,6 +1548,9 @@ export default function App() {
               <span>
                 {job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/{job.total_chapters} ·{" "}
                 {job.message}
+                {job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running"
+                  ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}`
+                  : ""}
               </span>
               {job.job_type === "auto" && (
                 <div className="job-progress-row" aria-label={`一键分析改写进度 ${autoProgressPercent}%`}>
