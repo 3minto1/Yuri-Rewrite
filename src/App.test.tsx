@@ -95,7 +95,7 @@ function installDefaultCommands() {
     if (command === "list_ai_logs") return [];
     if (command === "estimate_job_cost") return estimate;
     if (command === "check_for_updates") {
-      return { current_version: "0.2.1", latest_version: "0.2.1", latest_tag: "v0.2.1", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
     }
     if (command === "start_analysis") {
       return { id: "job-1", novel_id: "novel-1", job_type: "analysis", status: "completed", current_chapter: 1, total_chapters: 1, message: "完成" };
@@ -174,6 +174,49 @@ describe("App feature behavior", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /导入 TXT/ })).toBeDisabled());
     expect(screen.getByRole("button", { name: "第二本" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "当前批次" })).toBeEnabled();
+  });
+
+  it("refreshes rewritten chapters after an auto batch finishes without changing pages", async () => {
+    let currentDetail = detail;
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_novel_detail") return currentDetail;
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    expect(screen.getByText("改写内容")).toBeInTheDocument();
+
+    currentDetail = {
+      ...detail,
+      chapters: [
+        {
+          ...detail.chapters[0],
+          rewrite_text: "第一批更新后的改写内容"
+        }
+      ]
+    };
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-1",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 2,
+        message: "已更新合并导出至第 1 批"
+      });
+    });
+
+    await waitFor(() => expect(screen.getByText("第一批更新后的改写内容")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
   });
 
   it("opens novel settings and exports from the compare view", async () => {

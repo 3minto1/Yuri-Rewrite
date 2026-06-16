@@ -244,6 +244,11 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLDivElement | null>(null);
   const rewriteCompareRef = useRef<HTMLDivElement | null>(null);
+  const detailRef = useRef<NovelDetail | null>(null);
+  const selectedBatchIdRef = useRef("");
+  const selectedChapterIdRef = useRef("");
+  const lastAutoExportedBatchRef = useRef(0);
+  const silentNovelRefreshInFlightRef = useRef(false);
   const busyRef = useRef("");
   const importInProgressRef = useRef(false);
   const processingTaskActiveRef = useRef(processingTaskActive);
@@ -277,6 +282,18 @@ export default function App() {
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
+
+  useEffect(() => {
+    detailRef.current = detail;
+  }, [detail]);
+
+  useEffect(() => {
+    selectedBatchIdRef.current = selectedBatchId;
+  }, [selectedBatchId]);
+
+  useEffect(() => {
+    selectedChapterIdRef.current = selectedChapterId;
+  }, [selectedChapterId]);
 
   useEffect(() => {
     processingTaskActiveRef.current = processingTaskActive;
@@ -341,12 +358,17 @@ export default function App() {
       setJob(progress);
       if (progress.status === "running") {
         setAutoRunState("running");
+        if (progress.current_chapter > lastAutoExportedBatchRef.current) {
+          lastAutoExportedBatchRef.current = progress.current_chapter;
+          void refreshCurrentNovelSilently(progress.novel_id);
+        }
       } else if (progress.status === "paused") {
         setAutoRunState("paused");
       } else if (progress.status === "pausing" || progress.status === "terminating") {
         setAutoRunState("stopping");
       } else if (["completed", "failed", "terminated"].includes(progress.status)) {
         setAutoRunState("idle");
+        lastAutoExportedBatchRef.current = 0;
       }
   });
 
@@ -491,6 +513,40 @@ export default function App() {
     setOpenNovelMenuId("");
     setActiveView("workspace");
     await refreshLogs(next.novel.id);
+  }
+
+  async function refreshCurrentNovelSilently(novelId: string) {
+    if (silentNovelRefreshInFlightRef.current) return;
+    if (detailRef.current?.novel.id !== novelId) return;
+    silentNovelRefreshInFlightRef.current = true;
+    try {
+      const next = await invoke("get_novel_detail", { novelId });
+      if (detailRef.current?.novel.id !== novelId) return;
+      setDetail(next);
+      const preservedChapterId = selectedChapterIdRef.current;
+      const preservedBatchId = selectedBatchIdRef.current;
+      if (!next.chapters.some((chapter) => chapter.id === preservedChapterId)) {
+        setSelectedChapterId(next.chapters[0]?.id ?? "");
+      }
+      if (!next.batches.some((batch) => batch.id === preservedBatchId)) {
+        setSelectedBatchId(next.batches[0]?.id ?? "");
+      }
+      if (next.settings) {
+        setNovelSettingsDraft({
+          protagonist_name: next.settings.protagonist_name,
+          rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
+          additional_feminize_names: next.settings.additional_feminize_names,
+          bust: next.settings.bust,
+          body_type: next.settings.body_type,
+          rewrite_mode: next.settings.rewrite_mode === "creative" ? "creative" : "strict",
+          advanced_settings: next.settings.advanced_settings
+        });
+      }
+    } catch {
+      // Progress refresh is best-effort. The final task result still performs a full refresh.
+    } finally {
+      silentNovelRefreshInFlightRef.current = false;
+    }
   }
 
   async function refreshLogs(novelId = detail?.novel.id) {

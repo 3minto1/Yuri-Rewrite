@@ -1430,13 +1430,8 @@ async fn review_rewrite_shard_strict(
     if third_decision.approved {
         return Ok(second_revised);
     }
-    let warning_log_result = append_review_warning_file(
-        state,
-        novel_id,
-        shard_label,
-        &second_decision,
-        &third_decision,
-    );
+    let warning_log_result =
+        append_review_warning_file(state, novel_id, shard_label, &third_decision);
     append_ai_log(
         state,
         Some(novel_id),
@@ -1445,9 +1440,8 @@ async fn review_rewrite_shard_strict(
         Some(shard_label),
         "warning",
         &format!(
-            "第三次审查仍未通过，已保存第二次修复后的完整分片并继续处理后续分片。\n警告日志：{}\n\n第二次审查问题：\n{}\n\n第三次审查问题：\n{}",
+            "第三次审查仍未通过，已保存第二次修复后的完整分片并继续处理后续分片。\n警告日志：{}\n\n第三次审查问题：\n{}",
             warning_log_result,
-            review_issues_text(&second_decision.issues),
             review_issues_text(&third_decision.issues)
         ),
         None,
@@ -1515,7 +1509,7 @@ async fn review_shard_decision(
                             Some(shard_label),
                             "warning",
                             &format!(
-                                "以下问题声称当前改写稿仍含主角原名，但程序在对应改写章节中未找到该原名，已忽略：\n{}",
+                                "以下问题声称当前改写稿仍含男性残留，但程序在对应改写章节中未找到被引用的残留证据，已忽略：\n{}",
                                 review_issues_text(&filtered_issues)
                             ),
                             None,
@@ -1593,7 +1587,8 @@ fn build_batch_review_decision_prompt_with_context(
 - 只有不存在必须修改的问题时，approved 才能为 true。
 - 如果存在任何主角男性残留、指定角色未女性化、未指定角色被误改性别、逻辑断裂、章节边界错误、正文缺失或明显不自然，approved 必须为 false。
 - 问题必须具体到章节、角色、原文逻辑或需要修改的称谓/特征，方便写作专家重写。
-- 每个问题必须以“待审查改写稿”中的实际文字为证据；禁止把“原文章节”中的姓名、代词或句子误报为改写稿残留。声称姓名或代词残留时，problem 必须引用改写稿中仍存在的原词。
+- 每个问题必须以“待审查改写稿”中的实际文字为证据；禁止把“原文章节”中的姓名、代词、称谓或句子误报为改写稿残留。声称任何男性残留时，problem 必须引用改写稿中仍存在的原词或原句；如果该原词或原句只在原文中出现、当前改写稿已经替换，则不得列入 issues。
+- “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性口语昵称本身不是男性残留，不得仅因它们不够女性化、风格不统一或建议强化女性身份而列为 blocking。只有同一句或同一处证据中明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代，且该指代确实指向主角时，才属于必须修改的问题。
 - issues 只能列出会导致 approved=false、且必须实际修改正文或符合上述条件的标题才能解决的阻断问题。
 - 已正确保留的原文、符合规则的男性配角描述、正确的姓名/代词替换、通过的审查项、优点、确认事项和“无需修改”的内容禁止写入 issues，也不得标记为 blocking。
 - 不要为了展示审查过程而逐项汇报通过情况；这些内容既不能出现在 issues，也不能成为打回理由。
@@ -1841,7 +1836,15 @@ fn filter_review_decision_against_rewrites(
         let source_name_is_present = relevant_rewrites.iter().any(|rewrite| {
             rewrite.title.contains(source_name) || rewrite.text.contains(source_name)
         });
-        if claims_source_name_residue && !relevant_rewrites.is_empty() && !source_name_is_present {
+        let quoted_evidence_is_absent =
+            gender_residue_evidence_is_absent_from_rewrites(&issue, &relevant_rewrites);
+        let neutral_nickname_false_positive =
+            gender_residue_claim_only_targets_neutral_nickname(&issue, &relevant_rewrites);
+        if !relevant_rewrites.is_empty()
+            && ((claims_source_name_residue && !source_name_is_present)
+                || quoted_evidence_is_absent
+                || neutral_nickname_false_positive)
+        {
             filtered.push(issue);
         } else {
             retained.push(issue);
@@ -1853,6 +1856,181 @@ fn filter_review_decision_against_rewrites(
             issues: retained,
         },
         filtered,
+    )
+}
+
+fn gender_residue_claim_only_targets_neutral_nickname(
+    issue: &ReviewIssue,
+    rewrites: &[&ParsedChapterRewrite],
+) -> bool {
+    let issue_text = format!("{} {}", issue.problem, issue.required_fix);
+    if !is_gender_residue_claim(&issue_text, &issue.category) {
+        return false;
+    }
+    let evidence = extract_review_quoted_evidence(&issue.problem);
+    if evidence.is_empty() {
+        return false;
+    }
+    let rewrite_text = rewrites
+        .iter()
+        .map(|rewrite| format!("{}\n{}", rewrite.title, rewrite.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let present_evidence = evidence
+        .iter()
+        .filter(|fragment| rewrite_text.contains(fragment.as_str()))
+        .collect::<Vec<_>>();
+    if present_evidence.is_empty() {
+        return false;
+    }
+    let mentions_neutral_nickname = present_evidence
+        .iter()
+        .any(|fragment| contains_neutral_protagonist_nickname(fragment))
+        || contains_neutral_protagonist_nickname(&issue_text);
+    mentions_neutral_nickname
+        && !present_evidence
+            .iter()
+            .any(|fragment| contains_explicit_male_protagonist_reference(fragment))
+}
+
+fn gender_residue_evidence_is_absent_from_rewrites(
+    issue: &ReviewIssue,
+    rewrites: &[&ParsedChapterRewrite],
+) -> bool {
+    let issue_text = format!("{} {}", issue.problem, issue.required_fix);
+    if !is_gender_residue_claim(&issue_text, &issue.category) {
+        return false;
+    }
+    let evidence = extract_review_quoted_evidence(&issue.problem);
+    if evidence.is_empty() {
+        return false;
+    }
+    let rewrite_text = rewrites
+        .iter()
+        .map(|rewrite| format!("{}\n{}", rewrite.title, rewrite.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    !evidence
+        .iter()
+        .any(|fragment| rewrite_text.contains(fragment))
+}
+
+fn is_gender_residue_claim(text: &str, category: &str) -> bool {
+    category.contains("gender")
+        || contains_any(
+            text,
+            &[
+                "男性残留",
+                "男性化",
+                "男性姓名",
+                "男性代词",
+                "男性称谓",
+                "男性身份",
+                "男孩",
+                "少年",
+                "小子",
+                "他",
+                "残留",
+                "未改写",
+                "未修改",
+                "没有修改",
+                "没有被修改",
+                "没有被替换",
+                "仍为",
+                "仍是",
+                "仍然是",
+            ],
+        )
+}
+
+fn contains_neutral_protagonist_nickname(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "这个家伙",
+            "这家伙",
+            "那个家伙",
+            "那家伙",
+            "家伙",
+            "熊孩子",
+            "孩子",
+            "吃货",
+            "小鬼",
+        ],
+    )
+}
+
+fn contains_explicit_male_protagonist_reference(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "少年",
+            "男孩",
+            "男子",
+            "男人",
+            "男性",
+            "男儿",
+            "男主",
+            "公子",
+            "少爷",
+            "少主",
+            "父亲",
+            "兄弟",
+            "哥哥",
+            "弟弟",
+            "小子",
+            "汉子",
+            "爷们",
+            "郎君",
+            "少年郎",
+            "他",
+            "他的",
+            "他是",
+        ],
+    )
+}
+
+fn extract_review_quoted_evidence(text: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
+    let quote_pairs = [('‘', '’'), ('“', '”'), ('\'', '\''), ('"', '"')];
+    for (open, close) in quote_pairs {
+        let mut start = None;
+        for (idx, ch) in text.char_indices() {
+            if ch == open && start.is_none() {
+                start = Some(idx + ch.len_utf8());
+            } else if ch == close {
+                if let Some(start_idx) = start.take() {
+                    if start_idx <= idx {
+                        let fragment = text[start_idx..idx].trim();
+                        if is_meaningful_review_evidence(fragment) {
+                            fragments.push(fragment.to_string());
+                        }
+                    }
+                } else if open == close {
+                    start = Some(idx + ch.len_utf8());
+                }
+            }
+        }
+    }
+    fragments.sort();
+    fragments.dedup();
+    fragments
+}
+
+fn is_meaningful_review_evidence(fragment: &str) -> bool {
+    if fragment.chars().count() < 2 {
+        return false;
+    }
+    !matches!(
+        fragment,
+        "blocking"
+            | "chapter"
+            | "gender_residue"
+            | "scope"
+            | "category"
+            | "severity"
+            | "problem"
+            | "required_fix"
     )
 }
 
@@ -2703,7 +2881,6 @@ fn append_review_warning_file(
     state: &AppState,
     novel_id: &str,
     shard_label: &str,
-    second_decision: &ReviewDecision,
     third_decision: &ReviewDecision,
 ) -> String {
     let novel_title = state
@@ -2725,7 +2902,6 @@ fn append_review_warning_file(
         &state.data_dir,
         &novel_title,
         shard_label,
-        second_decision,
         third_decision,
     )
 }
@@ -2735,16 +2911,14 @@ fn append_review_warning_file_for_title(
     data_dir: &Path,
     novel_title: &str,
     shard_label: &str,
-    second_decision: &ReviewDecision,
     third_decision: &ReviewDecision,
 ) -> String {
     let [root_path, fallback_path] = review_warning_file_paths(app_dir, data_dir, novel_title);
     let content = format!(
-        "\n===== {} =====\n小说：{}\n分片：{}\n结果：第三次审查仍未通过，程序已保存第二次重写稿并继续处理后续分片。\n\n第二次审查问题：\n{}\n\n第三次审查问题：\n{}\n",
+        "\n===== {} =====\n小说：{}\n分片：{}\n结果：第三次审查仍未通过，程序已保存第二次重写稿并继续处理后续分片。\n\n第三次审查问题：\n{}\n",
         Utc::now().to_rfc3339(),
         novel_title,
         shard_label,
-        format_review_issues(&second_decision.issues),
         format_review_issues(&third_decision.issues)
     );
 
@@ -5280,15 +5454,6 @@ mod tests {
         let temp_dir = env::temp_dir().join(format!("yuri-rewrite-warning-{}", Uuid::new_v4()));
         let app_dir = temp_dir.join("app");
         let data_dir = temp_dir.join("data");
-        let second_decision = ReviewDecision {
-            approved: false,
-            issues: vec![sample_review_issue(
-                vec![1],
-                "chapter",
-                "appearance",
-                "第二次仍缺少外貌描写",
-            )],
-        };
         let third_decision = ReviewDecision {
             approved: false,
             issues: vec![sample_review_issue(
@@ -5304,7 +5469,6 @@ mod tests {
             &data_dir,
             "测试:小说",
             "第1-3章",
-            &second_decision,
             &third_decision,
         );
         let second_path = append_review_warning_file_for_title(
@@ -5312,7 +5476,6 @@ mod tests {
             &data_dir,
             "测试:小说",
             "第4-6章",
-            &second_decision,
             &third_decision,
         );
 
@@ -5322,6 +5485,10 @@ mod tests {
         assert!(content.contains("第1-3章"));
         assert!(content.contains("第4-6章"));
         assert!(content.contains("已保存第二次重写稿并继续处理后续分片"));
+        assert!(content.contains("第三次审查问题"));
+        assert!(content.contains("第三次仍未满足核心设定"));
+        assert!(!content.contains("第二次审查问题"));
+        assert!(!content.contains("第二次仍缺少外貌描写"));
 
         let _ = fs::remove_dir_all(temp_dir);
     }
@@ -5921,6 +6088,142 @@ mod tests {
 
         assert!(!filtered_decision.approved);
         assert_eq!(filtered_decision.issues.len(), 1);
+        assert!(filtered_issues.is_empty());
+    }
+
+    #[test]
+    fn review_decision_filters_hallucinated_quoted_gender_residue() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![255],
+                "chapter",
+                "gender_residue",
+                "第255章正文中，存在一处指代主角的男性化称谓残留：‘在场中防御的少年也很逆天’。此处少年明显指代正在防御的主角，必须修改为少女。",
+            )],
+        };
+        let rewrites = vec![ParsedChapterRewrite {
+            id: "chapter-255".to_string(),
+            index: 255,
+            title: "第255章".to_string(),
+            text: "每一个人都震惊，在场中防御的少女也很逆天，居然以十大洞天挡住了。".to_string(),
+        }];
+
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+
+        assert!(filtered_decision.approved);
+        assert!(filtered_decision.issues.is_empty());
+        assert_eq!(filtered_issues.len(), 1);
+    }
+
+    #[test]
+    fn review_decision_keeps_quoted_gender_residue_present_in_rewrite() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![255],
+                "chapter",
+                "gender_residue",
+                "第255章正文中，存在一处指代主角的男性化称谓残留：‘在场中防御的少年也很逆天’。必须修改为少女。",
+            )],
+        };
+        let rewrites = vec![ParsedChapterRewrite {
+            id: "chapter-255".to_string(),
+            index: 255,
+            title: "第255章".to_string(),
+            text: "每一个人都震惊，在场中防御的少年也很逆天，居然以十大洞天挡住了。".to_string(),
+        }];
+
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+
+        assert!(!filtered_decision.approved);
+        assert_eq!(filtered_decision.issues.len(), 1);
+        assert!(filtered_issues.is_empty());
+    }
+
+    #[test]
+    fn review_decision_filters_neutral_nickname_style_complaints() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![
+                sample_review_issue(
+                    vec![254],
+                    "chapter",
+                    "gender_residue",
+                    "第254章中，旁白已有‘这凶残的少女开创了一个又一个另类的纪录’，但前文仍有感叹‘我就知道，这个家伙又要凶残到底了’，其中‘这个家伙’指代主角，保留了中性/偏男性泛指，与整体称为少女的风格不一致。",
+                ),
+                sample_review_issue(
+                    vec![244],
+                    "chapter",
+                    "gender_residue",
+                    "第244章中，‘熊孩子不时与人激战’仍保留中性昵称‘熊孩子’，建议改为石念昔。",
+                ),
+            ],
+        };
+        let rewrites = vec![
+            ParsedChapterRewrite {
+                id: "chapter-254".to_string(),
+                index: 254,
+                title: "第254章".to_string(),
+                text: "旁白写道，这凶残的少女开创了一个又一个另类的纪录。陆地生灵感叹：我就知道，这个家伙又要凶残到底了。".to_string(),
+            },
+            ParsedChapterRewrite {
+                id: "chapter-244".to_string(),
+                index: 244,
+                title: "第244章".to_string(),
+                text: "在前行的路上，熊孩子不时与人激战，笑得很开心。".to_string(),
+            },
+        ];
+
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+
+        assert!(filtered_decision.approved);
+        assert!(filtered_decision.issues.is_empty());
+        assert_eq!(filtered_issues.len(), 2);
+    }
+
+    #[test]
+    fn review_decision_keeps_explicit_male_reference_even_near_neutral_nickname() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![
+                sample_review_issue(
+                    vec![244],
+                    "chapter",
+                    "gender_residue",
+                    "第244章中，‘这个家伙还是少年模样’明确将主角称为少年，必须修改。",
+                ),
+                sample_review_issue(
+                    vec![245],
+                    "chapter",
+                    "gender_residue",
+                    "第245章中，‘他抬头看向众人’仍使用男性代词指代主角，必须修改。",
+                ),
+            ],
+        };
+        let rewrites = vec![
+            ParsedChapterRewrite {
+                id: "chapter-244".to_string(),
+                index: 244,
+                title: "第244章".to_string(),
+                text: "这个家伙还是少年模样，却挡住了众人。".to_string(),
+            },
+            ParsedChapterRewrite {
+                id: "chapter-245".to_string(),
+                index: 245,
+                title: "第245章".to_string(),
+                text: "他抬头看向众人，神情平静。".to_string(),
+            },
+        ];
+
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+
+        assert!(!filtered_decision.approved);
+        assert_eq!(filtered_decision.issues.len(), 2);
         assert!(filtered_issues.is_empty());
     }
 

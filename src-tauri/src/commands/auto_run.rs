@@ -1,4 +1,4 @@
-use crate::domain::{AppState, Job};
+use crate::domain::{AppState, Chapter, ChapterBatch, Job};
 use crate::task_control::AutoRunCleanup;
 use crate::{
     analyze_chapters_for_auto, build_rewritten_export_body, chinese_batch_label, clear_auto_run,
@@ -9,9 +9,14 @@ use crate::{
     resolve_rewrite_export_dir, rewrite_chapters_for_auto, row_to_novel, sanitize_file_name,
     set_auto_run_completed, to_string, update_job, AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
 };
-use rusqlite::params;
-use std::{collections::HashSet, fs};
+use rusqlite::{params, Connection};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[tauri::command]
 pub(crate) async fn start_analyze_rewrite_all(
@@ -79,6 +84,10 @@ pub(crate) async fn start_analyze_rewrite_all(
         requested_start_batch_index,
     )?;
     let _auto_run_cleanup = AutoRunCleanup::new(&state.auto_runs, &novel_id);
+    let export_suffix = auto_run_export_suffix(&batches, start_batch_index);
+    let cumulative_export_path = auto_run_export_path(&output_dir, &novel.title, &export_suffix);
+    remove_legacy_auto_batch_exports(&output_dir, &novel.title, &batches)?;
+
     let range_total = batches.len() as i64 - start_batch_index;
     let mut job = create_job(&state, &novel_id, "auto", range_total)?;
     register_auto_run_job(&state, &novel_id, &job.id, resume_from, start_batch_index)?;
@@ -190,18 +199,30 @@ pub(crate) async fn start_analyze_rewrite_all(
             return Ok(job);
         }
 
-        let rewritten_batch = {
+        let export_chapters = {
             let conn = state.conn.lock().map_err(to_string)?;
-            load_chapters_for_batch(&conn, &novel_id, &batch.id)?
+            load_auto_run_export_chapters(
+                &conn,
+                &novel_id,
+                &batches,
+                start_batch_index,
+                idx as i64,
+            )?
         };
-        let body = build_rewritten_export_body(&rewritten_batch)?;
-        let batch_path = output_dir.join(format!(
-            "{}_{}.txt",
-            sanitize_file_name(&novel.title),
-            chinese_batch_label(batch.batch_index)
-        ));
-        fs::write(&batch_path, body).map_err(to_string)?;
-        let exported_message = format!("已输出第 {} 批：{}", current, batch_path.to_string_lossy());
+        if let Err(error) =
+            write_auto_run_cumulative_export(&app, &cumulative_export_path, &export_chapters).await
+        {
+            update_job(&state, &job.id, "failed", completed_in_range, &error)?;
+            emit_job_progress(&app, &job, "failed", completed_in_range, &error);
+            clear_auto_run(&state, &novel_id)?;
+            job = load_job(&state, &job.id)?;
+            return Ok(job);
+        }
+        let exported_message = format!(
+            "已更新合并导出至第 {} 批：{}",
+            current,
+            cumulative_export_path.to_string_lossy()
+        );
         let completed_range_batches = current.saturating_sub(start_batch_index);
         update_job(
             &state,
@@ -220,34 +241,25 @@ pub(crate) async fn start_analyze_rewrite_all(
         );
     }
 
-    let export_batches = &batches[start_batch_index as usize..];
-    let mut export_chapters = Vec::new();
-    for batch in export_batches {
-        let conn = state.conn.lock().map_err(to_string)?;
-        export_chapters.extend(load_chapters_for_batch(&conn, &novel_id, &batch.id)?);
-    }
-    let full_body = build_rewritten_export_body(&export_chapters)?;
-    let export_suffix = auto_run_export_suffix(&batches, start_batch_index);
-    let full_path = output_dir.join(format!(
-        "{}_{}.txt",
-        sanitize_file_name(&novel.title),
-        export_suffix
-    ));
-    fs::write(&full_path, full_body).map_err(to_string)?;
-
     update_job(
         &state,
         &job.id,
         "completed",
         range_total,
-        &format!("一键分析改写完成，已输出：{}", full_path.to_string_lossy()),
+        &format!(
+            "一键分析改写完成，已输出：{}",
+            cumulative_export_path.to_string_lossy()
+        ),
     )?;
     emit_job_progress(
         &app,
         &job,
         "completed",
         range_total,
-        &format!("一键分析改写完成，已输出：{}", full_path.to_string_lossy()),
+        &format!(
+            "一键分析改写完成，已输出：{}",
+            cumulative_export_path.to_string_lossy()
+        ),
     );
     clear_auto_run(&state, &novel_id)?;
     load_job(&state, &job.id)
@@ -267,10 +279,7 @@ fn resolve_auto_run_start_batch_index(
     }
 }
 
-fn auto_run_export_suffix(
-    batches: &[crate::domain::ChapterBatch],
-    start_batch_index: i64,
-) -> String {
+fn auto_run_export_suffix(batches: &[ChapterBatch], start_batch_index: i64) -> String {
     if start_batch_index == 0 {
         "全文".to_string()
     } else {
@@ -279,6 +288,115 @@ fn auto_run_export_suffix(
             chinese_batch_label(batches[start_batch_index as usize].batch_index)
         )
     }
+}
+
+fn auto_run_export_path(output_dir: &Path, novel_title: &str, export_suffix: &str) -> PathBuf {
+    output_dir.join(format!(
+        "{}_{}.txt",
+        sanitize_file_name(novel_title),
+        export_suffix
+    ))
+}
+
+fn legacy_auto_batch_export_path(
+    output_dir: &Path,
+    novel_title: &str,
+    batch: &ChapterBatch,
+) -> PathBuf {
+    output_dir.join(format!(
+        "{}_{}.txt",
+        sanitize_file_name(novel_title),
+        chinese_batch_label(batch.batch_index)
+    ))
+}
+
+fn remove_legacy_auto_batch_exports(
+    output_dir: &Path,
+    novel_title: &str,
+    batches: &[ChapterBatch],
+) -> Result<(), String> {
+    for batch in batches {
+        let path = legacy_auto_batch_export_path(output_dir, novel_title, batch);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|error| {
+                format!(
+                    "无法清理旧批次导出文件：{}。请关闭正在占用该 TXT 的阅读器或编辑器后重试。系统错误：{}",
+                    path.to_string_lossy(),
+                    to_string(error)
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn load_auto_run_export_chapters(
+    conn: &Connection,
+    novel_id: &str,
+    batches: &[ChapterBatch],
+    start_batch_index: i64,
+    end_batch_index: i64,
+) -> Result<Vec<Chapter>, String> {
+    let mut chapters = Vec::new();
+    for batch in &batches[start_batch_index as usize..=end_batch_index as usize] {
+        chapters.extend(load_chapters_for_batch(conn, novel_id, &batch.id)?);
+    }
+    Ok(chapters)
+}
+
+async fn write_auto_run_cumulative_export(
+    app: &AppHandle,
+    path: &Path,
+    chapters: &[Chapter],
+) -> Result<(), String> {
+    let body = build_rewritten_export_body(chapters)?;
+    loop {
+        match fs::write(path, &body) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let error_message = to_string(error);
+                let retry = prompt_user_to_close_locked_export(app, path, &error_message).await?;
+                if !retry {
+                    return Err(format!(
+                        "用户取消更新合并导出文件：{}。系统错误：{}",
+                        path.to_string_lossy(),
+                        error_message
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn locked_export_dialog_message(path: &Path, error_message: &str) -> String {
+    format!(
+        "无法更新累计 TXT：{}\n\n该文件可能正在被阅读器或编辑器打开，导致程序暂时无法写入。\n\n请手动关闭正在打开这个 TXT 的阅读器/编辑器窗口，确认文件已不再被占用后，再点击“已关闭，继续更新”。\n\n程序不会尝试关闭任何外部程序。\n\n系统错误：{}",
+        path.to_string_lossy(),
+        error_message
+    )
+}
+
+async fn prompt_user_to_close_locked_export(
+    app: &AppHandle,
+    path: &Path,
+    error_message: &str,
+) -> Result<bool, String> {
+    let message = locked_export_dialog_message(path, error_message);
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .dialog()
+            .message(message)
+            .title("累计 TXT 被占用")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "已关闭，继续更新".to_string(),
+                "取消任务".to_string(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -330,5 +448,48 @@ mod tests {
         assert!(resolve_auto_run_start_batch_index(&batches, Some("missing")).is_err());
         assert_eq!(auto_run_export_suffix(&batches, 0), "全文");
         assert_eq!(auto_run_export_suffix(&batches, 1), "第二批起");
+    }
+
+    #[test]
+    fn auto_run_uses_one_cumulative_export_path_for_a_range() {
+        let batches = vec![sample_batch(1), sample_batch(2), sample_batch(3)];
+        let output_dir = PathBuf::from("C:/exports");
+
+        let first_path = auto_run_export_path(
+            &output_dir,
+            "测试小说",
+            &auto_run_export_suffix(&batches, 0),
+        );
+        let second_path = auto_run_export_path(
+            &output_dir,
+            "测试小说",
+            &auto_run_export_suffix(&batches, 0),
+        );
+        let range_path = auto_run_export_path(
+            &output_dir,
+            "测试小说",
+            &auto_run_export_suffix(&batches, 1),
+        );
+
+        assert_eq!(first_path, second_path);
+        assert!(first_path.ends_with("测试小说_全文.txt"));
+        assert!(range_path.ends_with("测试小说_第二批起.txt"));
+        assert_ne!(
+            first_path,
+            legacy_auto_batch_export_path(&output_dir, "测试小说", &batches[0])
+        );
+    }
+
+    #[test]
+    fn locked_export_dialog_message_asks_for_manual_close_only() {
+        let message = locked_export_dialog_message(
+            Path::new("C:/exports/测试小说_全文.txt"),
+            "另一个程序正在使用此文件。",
+        );
+
+        assert!(message.contains("请手动关闭"));
+        assert!(message.contains("已关闭，继续更新"));
+        assert!(message.contains("程序不会尝试关闭任何外部程序"));
+        assert!(message.contains("C:/exports/测试小说_全文.txt"));
     }
 }

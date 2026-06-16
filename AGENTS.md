@@ -120,10 +120,11 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Review issues use stable marker indexes internally. When all actionable issues resolve to no more than half of the shard, rewrite only those chapters and merge them by chapter ID without changing untouched drafts.
 - Fall back to full-shard regeneration for missing or invalid indexes, cross-chapter continuity or boundary defects, excessive target counts, or unreliable targeted output. Every post-repair review still checks the complete merged shard.
 - Rejected drafts may be repaired twice. Targeted repairs return only the requested chapter markers; full-shard fallbacks return every shard marker. The merged complete shard must be reviewed again after either path.
-- If the third decision still fails, append a per-novel warning, save the second regenerated draft, and continue later shards instead of failing the whole batch.
+- If the third decision still fails, append a per-novel warning containing only the third decision's blocking issues, save the second regenerated draft, and continue later shards instead of failing the whole batch.
 - Logs must distinguish draft generation, review decisions, rejection rewrites, final review, and fallback warning paths.
 - Review `issues` contain only actionable blocking defects. Never log compliant passages, passed checks, correctly preserved non-target male descriptions, positive observations, or confirmation-only notes as blocking issues.
 - A claimed protagonist-name or pronoun residue must quote text that still exists in the current rewrite draft. Original-text evidence alone is not actionable and must not survive deterministic post-validation.
+- Neutral colloquial nicknames such as `这家伙`, `这个家伙`, `家伙`, `熊孩子`, `孩子`, `吃货`, and `小鬼` are not blocking gender residue by themselves. Keep blocking only when the current rewrite evidence contains an explicit male reference to the protagonist such as `少年`, `男孩`, `男子`, `公子`, `少爷`, `小子`, or male pronoun `他`.
 
 ### Task Lifecycle
 
@@ -134,7 +135,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Progress events remain `job-progress` and must be filtered by `novel_id` and the current task ID in the frontend.
 - Disable novel/model switching, import, deletion, and relevant settings changes while the active task makes those operations unsafe.
 - Parallel shard failure must cancel and await sibling requests so quota is not consumed in the background.
-- Full one-click runs batches in order: analyze, rewrite, export the batch, then continue. It supports pause, continue, and terminate. Continue restarts from the first unfinished batch and reruns that batch's analysis.
+- Full one-click runs batches in order: analyze, rewrite, update the cumulative export TXT, then continue. It supports pause, continue, and terminate. Continue restarts from the first unfinished batch and reruns that batch's analysis.
 - Full one-click may start from the currently selected batch. In that mode, progress and the final combined TXT cover only the selected batch through the end; earlier batches are not included in that combined export.
 
 ### Provider Calls and Logs
@@ -153,6 +154,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Application settings include export directory, global core prompt, review configuration, and shared analysis/rewrite concurrency.
 - Allowed concurrency values remain `10`, `6`, `3`, and `1`, with `6` as the default unless the product behavior is intentionally changed.
 - Export TXT only. Include only chapters with completed rewrite status and non-empty rewrite text. Never fall back to the original text.
+- Full one-click must keep a single cumulative TXT for the selected run range. After each completed batch, rewrite that same file so it contains all completed batches from the run start through the latest completed batch; do not create one TXT per batch.
+- If the cumulative TXT cannot be updated because it is open or otherwise locked, do not fail the one-click task immediately. Show a confirmation dialog asking the user to manually close the reader/editor that occupies the file, wait for confirmation, then retry the same cumulative TXT update. Do not attempt to close external programs automatically.
 - After normal rewrite completion, navigate to Compare. Preserve the selected batch after refreshes.
 
 ## Credentials and Destructive Operations
@@ -173,6 +176,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - First launch shows quick-start once; Help reopens the same content.
 - Keep model configuration, chapters, canon assets, and other long content in independent, stable scroll regions.
 - Use the Compare page for full original/rewrite text. Do not place large text panes in workspace cards.
+- During full one-click runs, completed batch rewrites should refresh the in-memory compare data when progress advances, but must not automatically navigate to Compare until the full selected run range finishes.
 - Compare search is plain-text, cross-chapter, supports original-only, rewrite-only, or original-then-rewrite scope, supports next/previous navigation, and excludes empty rewrite placeholders.
 - Compare diff is current-chapter-only and defaults on. Search highlighting has higher visual priority than diff highlighting.
 - Compare diff ignores differences that consist only of line-leading indentation, including ASCII spaces, tabs, and full-width spaces. Whitespace changes inside a sentence remain visible.

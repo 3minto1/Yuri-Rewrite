@@ -1,6 +1,6 @@
 [package]
 name = "yuri-rewrite"
-version = "0.2.2"
+version = "0.2.3"
 description = "Local Windows desktop tool for novel analysis and yuri rewriting"
 authors = ["Yuri Rewrite"]
 edition = "2021"
