@@ -135,7 +135,7 @@ pub(crate) async fn response_json_or_error(
 
 pub(crate) fn format_request_error(error: reqwest::Error) -> String {
     if error.is_timeout() {
-        "模型请求超时（最长等待 15 分钟），请检查网络或降低单次处理量。".to_string()
+        "模型请求超时（最长等待 20 分钟），请检查网络或降低单次处理量。".to_string()
     } else if error.is_connect() {
         format!("无法连接模型服务：{}", to_string(error))
     } else {

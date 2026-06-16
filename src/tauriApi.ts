@@ -31,6 +31,7 @@ type CommandMap = {
   clear_ai_logs: { args: { novelId: string | null }; result: void };
   get_app_settings: { args?: undefined; result: AppSettings };
   save_app_settings: { args: { settings: AppSettings }; result: AppSettings };
+  save_selected_profile_id: { args: { profileId: string | null }; result: AppSettings };
   save_novel_settings: {
     args: {
       novelId: string;

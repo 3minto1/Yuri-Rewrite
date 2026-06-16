@@ -1513,6 +1513,26 @@ label {
   overflow: hidden;
 }
 
+.chapter-list-heading {
+  align-items: center;
+  gap: 8px;
+}
+
+.chapter-list-heading h2 {
+  margin-right: auto;
+}
+
+.chapter-jump-input {
+  flex: 0 1 118px;
+  min-width: 0;
+  padding: 7px 9px;
+}
+
+.small-button {
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
 .chapter-list {
   flex: 1;
   min-height: 0;

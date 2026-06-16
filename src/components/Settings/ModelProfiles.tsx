@@ -16,7 +16,7 @@ export function ModelProfiles(props: ModelProfilesProps) {
   const { profiles, selectedProfileId, menuOpen, processing, busy, onSelect, onMenuOpenChange, onDelete } = props;
   return (
     <div className="model-row">
-      <select value={selectedProfileId} onChange={(event) => onSelect(event.target.value)} disabled={processing}>
+      <select aria-label="改写模型" value={selectedProfileId} onChange={(event) => onSelect(event.target.value)} disabled={processing}>
         <option value="">未选择</option>
         {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.model}</option>)}
       </select>

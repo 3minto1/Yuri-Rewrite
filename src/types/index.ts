@@ -111,6 +111,7 @@ export type AppSettings = {
   core_prompt?: string;
   review_enabled?: boolean;
   review_profile_id?: string | null;
+  selected_profile_id?: string | null;
   rewrite_parallelism?: 1 | 3 | 6 | 10;
 };
 

@@ -8,6 +8,11 @@ type BatchPanelProps = {
   onSelect: (batchId: string) => void;
 };
 
+function batchOptionLabel(batch: ChapterBatch) {
+  const label = batch.label.trim();
+  return label.startsWith(`第${batch.batch_index}批`) ? label : `第${batch.batch_index}批：${label}`;
+}
+
 export const BatchPanel = memo(function BatchPanel({ batches, selectedBatch, selectedBatchId, onSelect }: BatchPanelProps) {
   return (
     <div className="batch-strip">
@@ -16,7 +21,7 @@ export const BatchPanel = memo(function BatchPanel({ batches, selectedBatch, sel
         <select value={selectedBatchId} onChange={(event) => onSelect(event.target.value)}>
           {batches.map((batch) => (
             <option key={batch.id} value={batch.id}>
-              {batch.label}
+              {batchOptionLabel(batch)}
             </option>
           ))}
         </select>

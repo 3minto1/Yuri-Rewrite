@@ -18,6 +18,7 @@ pub(crate) fn get_app_settings(state: State<AppState>) -> Result<AppSettings, St
         .filter(|value| !value.trim().is_empty());
     let review_enabled = load_review_enabled(&conn)?;
     let review_profile_id = load_review_profile_id(&conn)?;
+    let selected_profile_id = load_selected_profile_id(&conn)?;
     let rewrite_parallelism = load_rewrite_parallelism(&conn)?;
     let core_prompt = load_core_prompt(&conn)?;
     Ok(AppSettings {
@@ -25,6 +26,7 @@ pub(crate) fn get_app_settings(state: State<AppState>) -> Result<AppSettings, St
         core_prompt,
         review_enabled,
         review_profile_id,
+        selected_profile_id,
         rewrite_parallelism,
     })
 }
@@ -54,12 +56,14 @@ pub(crate) fn save_app_settings(
         save_review_enabled(&conn, settings.review_enabled)?;
         save_rewrite_parallelism(&conn, rewrite_parallelism)?;
         save_review_profile_id(&conn, settings.review_profile_id.as_deref())?;
+        save_selected_profile_id_value(&conn, settings.selected_profile_id.as_deref())?;
         save_core_prompt(&conn, &settings.core_prompt)?;
         Ok(AppSettings {
             export_dir: Some(export_dir.to_string()),
             core_prompt: settings.core_prompt.trim().to_string(),
             review_enabled: settings.review_enabled,
             review_profile_id: normalize_review_profile_id(settings.review_profile_id.as_deref()),
+            selected_profile_id: normalize_profile_id(settings.selected_profile_id.as_deref()),
             rewrite_parallelism,
         })
     } else {
@@ -68,12 +72,14 @@ pub(crate) fn save_app_settings(
         save_review_enabled(&conn, settings.review_enabled)?;
         save_rewrite_parallelism(&conn, rewrite_parallelism)?;
         save_review_profile_id(&conn, settings.review_profile_id.as_deref())?;
+        save_selected_profile_id_value(&conn, settings.selected_profile_id.as_deref())?;
         save_core_prompt(&conn, &settings.core_prompt)?;
         Ok(AppSettings {
             export_dir: None,
             core_prompt: settings.core_prompt.trim().to_string(),
             review_enabled: settings.review_enabled,
             review_profile_id: normalize_review_profile_id(settings.review_profile_id.as_deref()),
+            selected_profile_id: normalize_profile_id(settings.selected_profile_id.as_deref()),
             rewrite_parallelism,
         })
     }
@@ -131,6 +137,10 @@ pub(crate) fn save_review_enabled(conn: &Connection, enabled: bool) -> Result<()
 }
 
 pub(crate) fn normalize_review_profile_id(value: Option<&str>) -> Option<String> {
+    normalize_profile_id(value)
+}
+
+fn normalize_profile_id(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -167,6 +177,49 @@ pub(crate) fn save_review_profile_id(
         .map_err(to_string)?;
     }
     Ok(())
+}
+
+pub(crate) fn load_selected_profile_id(conn: &Connection) -> Result<Option<String>, String> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'selected_profile_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(normalize_profile_id(value.as_deref()))
+}
+
+fn save_selected_profile_id_value(
+    conn: &Connection,
+    profile_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(profile_id) = normalize_profile_id(profile_id) {
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('selected_profile_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![profile_id],
+        )
+        .map_err(to_string)?;
+    } else {
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = 'selected_profile_id'",
+            [],
+        )
+        .map_err(to_string)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn save_selected_profile_id(
+    profile_id: Option<String>,
+    state: State<AppState>,
+) -> Result<AppSettings, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    save_selected_profile_id_value(&conn, profile_id.as_deref())?;
+    drop(conn);
+    get_app_settings(state)
 }
 
 pub(crate) fn default_rewrite_parallelism() -> usize {

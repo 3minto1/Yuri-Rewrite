@@ -39,6 +39,14 @@ const profile: ModelProfile = {
   updated_at: "now"
 };
 
+const secondProfile: ModelProfile = {
+  ...profile,
+  id: "profile-2",
+  name: "备用模型",
+  model: "second-model",
+  updated_at: "later"
+};
+
 const detail: NovelDetail = {
   novel: novels[0],
   chapters: [
@@ -104,6 +112,7 @@ function installDefaultCommands() {
       return { id: "job-auto", novel_id: "novel-1", job_type: "auto", status: "paused", current_chapter: 0, total_chapters: 1, message: "已暂停" };
     }
     if (command === "save_model_profile") return profile;
+    if (command === "save_selected_profile_id") return settings;
     if (command === "export_novel") return { path: "C:/exports/test.txt" };
     return undefined;
   });
@@ -125,6 +134,26 @@ describe("App feature behavior", () => {
     expect(await screen.findByRole("heading", { name: "测试小说" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-1");
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+  });
+
+  it("restores the last selected rewrite model from app settings", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile, secondProfile];
+      if (command === "get_app_settings") return { ...settings, selected_profile_id: "profile-2" };
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "check_for_updates") {
+        return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "改写模型" })).toHaveValue("profile-2"));
+    expect(screen.getAllByDisplayValue("second-model")).not.toHaveLength(0);
   });
 
   it("preserves the selected batch after an analysis refresh", async () => {

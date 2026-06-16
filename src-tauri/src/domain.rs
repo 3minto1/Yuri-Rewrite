@@ -170,6 +170,8 @@ pub(crate) struct AppSettings {
     pub(crate) review_enabled: bool,
     #[serde(default)]
     pub(crate) review_profile_id: Option<String>,
+    #[serde(default)]
+    pub(crate) selected_profile_id: Option<String>,
     #[serde(default = "crate::default_rewrite_parallelism")]
     pub(crate) rewrite_parallelism: usize,
 }

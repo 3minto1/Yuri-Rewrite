@@ -475,7 +475,12 @@ export default function App() {
     setNovels(novelRows);
     setProfiles(profileRows);
     setSettings(appSettings);
-    if (!selectedProfileId && profileRows[0]) setSelectedProfileId(profileRows[0].id);
+    const currentProfileIsValid = selectedProfileId && profileRows.some((profile) => profile.id === selectedProfileId);
+    const savedProfileId = appSettings.selected_profile_id ?? "";
+    const savedProfileIsValid = savedProfileId && profileRows.some((profile) => profile.id === savedProfileId);
+    if (!currentProfileIsValid) {
+      setSelectedProfileId(savedProfileIsValid ? savedProfileId : profileRows[0]?.id ?? "");
+    }
     if (!detail && novelRows[0]) await loadNovel(novelRows[0].id);
     await refreshLogs();
   }
@@ -552,6 +557,21 @@ export default function App() {
   async function refreshLogs(novelId = detail?.novel.id) {
     const rows = await invoke("list_ai_logs", { novelId: novelId ?? null });
     setLogs(rows);
+  }
+
+  async function persistSelectedProfileId(profileId: string) {
+    try {
+      const saved = await invoke("save_selected_profile_id", { profileId: profileId || null });
+      setSettings(saved);
+    } catch (error) {
+      console.error("Failed to persist selected model profile", error);
+    }
+  }
+
+  function selectModelProfile(profileId: string) {
+    setSelectedProfileId(profileId);
+    setOpenModelMenu(false);
+    void persistSelectedProfileId(profileId);
   }
 
   async function clearLogs() {
@@ -733,6 +753,7 @@ export default function App() {
       const saved = await invoke("save_model_profile", { input });
       setSelectedProfileId(saved.id);
       setProfileDraft({ ...profileDraft, id: saved.id, api_key: saved.has_api_key ? savedApiKeyMask : "" });
+      await persistSelectedProfileId(saved.id);
       await refreshAll();
       showNotice(saved.has_api_key ? "模型配置和 API Key 已保存。" : "模型配置已保存，尚未保存 API Key。");
     } catch (error) {
@@ -746,6 +767,7 @@ export default function App() {
     setSelectedProfileId("");
     setProfileDraft(emptyProfile);
     setOpenModelMenu(false);
+    void persistSelectedProfileId("");
     showNotice("已切换为新建模型配置，填写后点击保存。");
   }
 
@@ -769,6 +791,7 @@ export default function App() {
       const nextSelected = nextProfiles[0]?.id ?? "";
       setSelectedProfileId(nextSelected);
       setOpenModelMenu(false);
+      await persistSelectedProfileId(nextSelected);
       if (!nextSelected) setProfileDraft(emptyProfile);
       await refreshLogs();
       showNotice(`已删除模型配置「${profile.model}」。`);
@@ -1005,6 +1028,7 @@ export default function App() {
       core_prompt: settings.core_prompt ?? "",
       review_enabled: settings.review_enabled ?? false,
       review_profile_id: settings.review_profile_id ?? null,
+      selected_profile_id: selectedProfileId || null,
       rewrite_parallelism: settings.rewrite_parallelism ?? 6,
       ...overrides
     };
@@ -1321,7 +1345,7 @@ export default function App() {
             menuOpen={openModelMenu}
             processing={processingTaskActive}
             busy={busy}
-            onSelect={setSelectedProfileId}
+            onSelect={selectModelProfile}
             onMenuOpenChange={setOpenModelMenu}
             onDelete={deleteSelectedModelProfile}
           />

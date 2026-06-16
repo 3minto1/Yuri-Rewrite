@@ -24,7 +24,7 @@ describe("ChapterList", () => {
   it("keeps the normal DOM list below the threshold", () => {
     const rows = chapters(CHAPTER_VIRTUALIZATION_THRESHOLD - 1);
     render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={vi.fn()} displayTitle={displayTitle} statusText={statusText} />);
-    expect(screen.getAllByRole("button")).toHaveLength(rows.length);
+    expect(screen.getAllByRole("button").filter((button) => button.className.includes("chapter-item"))).toHaveLength(rows.length);
   });
 
   it("virtualizes at the threshold and for very large novels", () => {
@@ -42,5 +42,17 @@ describe("ChapterList", () => {
     expect(onSelect).toHaveBeenCalledWith("chapter-1");
     view.rerender(<ChapterList chapters={rows} selectedChapterId="chapter-3000" onSelect={onSelect} displayTitle={displayTitle} statusText={statusText} />);
     await waitFor(() => expect(screen.getByText("3000. 第3000章")).toBeInTheDocument());
+  });
+
+  it("jumps to a chapter by number without rendering the full list", () => {
+    const onSelect = vi.fn();
+    const rows = chapters(3_000);
+    render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={onSelect} displayTitle={displayTitle} statusText={statusText} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "跳转章节" }), { target: { value: "250" } });
+    expect(screen.getByText((_, node) => node?.textContent === "250. 第250章")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "跳转" }));
+
+    expect(onSelect).toHaveBeenCalledWith("chapter-250");
   });
 });

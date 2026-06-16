@@ -56,7 +56,7 @@ pub fn run() {
             init_db(&conn)?;
             let client = Client::builder()
                 .connect_timeout(Duration::from_secs(20))
-                .timeout(Duration::from_secs(15 * 60))
+                .timeout(Duration::from_secs(20 * 60))
                 .build()?;
             app.manage(AppState {
                 conn: Mutex::new(conn),
@@ -83,6 +83,7 @@ pub fn run() {
             clear_ai_logs,
             get_app_settings,
             save_app_settings,
+            save_selected_profile_id,
             get_novel_settings,
             save_novel_settings,
             list_chapter_batches,
