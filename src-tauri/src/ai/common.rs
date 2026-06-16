@@ -24,6 +24,44 @@ pub(crate) fn is_mimo_profile(profile: &ModelProfile) -> bool {
         || model.contains("mimo-")
 }
 
+pub(crate) fn is_doubao_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    provider.contains("doubao")
+        || provider.contains("volcengine")
+        || provider.contains("volces")
+        || provider.contains("bytedance")
+        || provider.contains("火山")
+        || base.contains("volcengine")
+        || base.contains("volces")
+        || base.contains("ark.cn-")
+        || model.contains("doubao")
+        || model.contains("seed-")
+}
+
+pub(crate) fn apply_openai_compatible_output_limit(
+    payload: &mut serde_json::Value,
+    profile: &ModelProfile,
+    base_url: &str,
+    model: &str,
+    prefer_json_output: bool,
+) -> bool {
+    let output_limit = if prefer_json_output { 16_384 } else { 65_536 };
+
+    if is_deepseek_profile(profile, base_url, model) {
+        payload["max_tokens"] = json!(output_limit);
+        return true;
+    }
+
+    if is_mimo_profile(profile) || is_doubao_profile(profile, base_url, model) {
+        payload["max_completion_tokens"] = json!(output_limit);
+        return true;
+    }
+
+    false
+}
+
 pub(crate) fn load_review_profile_for_run(
     state: &State<'_, AppState>,
     rewrite_profile: &ModelProfile,
@@ -209,6 +247,34 @@ pub(crate) fn format_request_error(error: reqwest::Error) -> String {
     }
 }
 
+pub(crate) fn is_recoverable_network_error(message: &str) -> bool {
+    let trimmed = message.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("HTTP ")
+        || trimmed.contains("模型请求超时")
+        || trimmed.to_ascii_lowercase().contains("timeout")
+        || trimmed.to_ascii_lowercase().contains("timed out")
+    {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("无法连接模型服务")
+        || lower.contains("error sending request")
+        || lower.contains("connection closed")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("dns error")
+        || lower.contains("failed to lookup address")
+        || lower.contains("tcp connect error")
+        || lower.contains("network error")
+        || lower.contains("operation was aborted")
+        || trimmed.contains("远程主机强迫关闭")
+        || trimmed.contains("连接被重置")
+        || trimmed.contains("连接已关闭")
+        || trimmed.contains("连接失败")
+}
+
 pub(crate) fn openai_content_filter_error(
     value: &serde_json::Value,
     model: &str,
@@ -383,4 +449,91 @@ pub(crate) fn apply_gemini_thinking_control(
 
     payload["generationConfig"]["thinkingConfig"] = thinking_config;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn profile(provider: &str, base_url: &str, model: &str) -> ModelProfile {
+        ModelProfile {
+            id: "profile-1".to_string(),
+            name: "测试模型".to_string(),
+            provider: provider.to_string(),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            temperature: 0.7,
+            thinking_mode: "auto".to_string(),
+            has_api_key: true,
+            api_key_storage: "system".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn output_limit_uses_deepseek_max_tokens() {
+        let profile = profile("DeepSeek", "https://api.deepseek.com", "deepseek-v4-flash");
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_output_limit(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model,
+            false
+        ));
+        assert_eq!(payload["max_tokens"], json!(65_536));
+        assert!(payload.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn output_limit_uses_completion_tokens_for_mimo_and_doubao() {
+        for profile in [
+            profile("MiMo", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro"),
+            profile(
+                "OpenAI 兼容",
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "doubao-seed-2-0-lite-260428",
+            ),
+        ] {
+            let mut payload = json!({});
+            assert!(apply_openai_compatible_output_limit(
+                &mut payload,
+                &profile,
+                &profile.base_url,
+                &profile.model,
+                false
+            ));
+            assert_eq!(payload["max_completion_tokens"], json!(65_536));
+            assert!(payload.get("max_tokens").is_none());
+        }
+    }
+
+    #[test]
+    fn json_output_limit_is_smaller() {
+        let profile = profile("DeepSeek", "https://api.deepseek.com", "deepseek-v4-pro");
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_output_limit(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model,
+            true
+        ));
+        assert_eq!(payload["max_tokens"], json!(16_384));
+    }
+
+    #[test]
+    fn output_limit_does_not_affect_unknown_openai_compatible_provider() {
+        let profile = profile("OpenAI 兼容", "https://example.com/v1", "some-model");
+        let mut payload = json!({});
+        assert!(!apply_openai_compatible_output_limit(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model,
+            false
+        ));
+        assert_eq!(payload, json!({}));
+    }
 }

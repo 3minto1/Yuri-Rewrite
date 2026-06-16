@@ -38,7 +38,7 @@ export function useAutoRunProgress(
       if (activeJobIdRef.current && activeJobIdRef.current !== progress.id) return;
       activeJobIdRef.current = progress.id;
       callbackRef.current(progress);
-      if (["completed", "failed", "terminated"].includes(progress.status)) {
+      if (["completed", "failed", "terminated", "paused"].includes(progress.status)) {
         terminalJobIdRef.current = progress.id;
         activeJobIdRef.current = "";
       }

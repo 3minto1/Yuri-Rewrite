@@ -1759,10 +1759,13 @@ fn build_batch_revision_prompt_with_context(
 {}
 
 上一版改写稿：
+{}
+
 {}"#,
         base_prompt,
         issue_text,
-        build_batch_rewrite_text(chapters, rewrites)
+        build_batch_rewrite_text(chapters, rewrites),
+        rewrite_marker_final_reminder("当前分片章节")
     )
 }
 
@@ -1811,6 +1814,8 @@ fn build_targeted_revision_prompt(
     format!(
         r#"请定向修复审查打回的目标章节。只输出目标章节，禁止输出相邻只读章节或其他章节。
 
+{}
+
 必须遵守：
 - 主角原名：{}；主角改写名：{}；其他指定女性化姓名：{}。
 - 身材/体型：{} / {}；改写模式：{}。
@@ -1837,7 +1842,10 @@ fn build_targeted_revision_prompt(
 {}
 
 目标章节当前改写稿：
+{}
+
 {}"#,
+        rewrite_marker_format_guard("目标章节"),
         settings.protagonist_name.trim(),
         rewritten_name,
         if settings.additional_feminize_names.trim().is_empty() {
@@ -1855,7 +1863,8 @@ fn build_targeted_revision_prompt(
         canon_text,
         adjacent_context,
         build_batch_chapter_text(target_chapters, false),
-        build_batch_rewrite_text(target_chapters, target_rewrites)
+        build_batch_rewrite_text(target_chapters, target_rewrites),
+        rewrite_marker_final_reminder("目标章节")
     )
 }
 
@@ -4728,6 +4737,32 @@ fn pause_auto_run_after_rate_limit(
     load_job(state, &job.id)
 }
 
+fn pause_auto_run_after_network_error(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    start_batch_index: i64,
+    error: &str,
+) -> Result<Job, String> {
+    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
+    let message = format!(
+        "网络连接异常，任务已暂停。请检查网络、代理或服务商连接状态后点击继续；继续后将从第 {} 批重新开始。\n\n{}",
+        completed_batches + 1,
+        error
+    );
+    update_job(state, &job.id, "paused", completed_in_range, &message)?;
+    emit_job_progress(app, &job, "paused", completed_in_range, &message);
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    if let Some(control) = runs.get_mut(&job.novel_id) {
+        control.status = "paused".to_string();
+        control.completed_batches = completed_batches;
+        control.job_id = Some(job.id.clone());
+    }
+    drop(runs);
+    load_job(state, &job.id)
+}
+
 fn clear_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
     let mut runs = state.auto_runs.lock().map_err(to_string)?;
     runs.remove(novel_id);
@@ -5231,6 +5266,25 @@ mod tests {
             problem: problem.to_string(),
             required_fix: "按要求修复。".to_string(),
         }
+    }
+
+    #[test]
+    fn network_disconnect_errors_are_recoverable_but_timeouts_are_not() {
+        assert!(is_recoverable_network_error(
+            "error sending request for url (https://example.invalid): connection closed before message completed"
+        ));
+        assert!(is_recoverable_network_error(
+            "无法连接模型服务：error trying to connect: tcp connect error"
+        ));
+        assert!(is_recoverable_network_error(
+            "远程主机强迫关闭了一个现有的连接。"
+        ));
+        assert!(!is_recoverable_network_error(
+            "模型请求超时（最长等待 20 分钟），请检查网络或降低单次处理量。"
+        ));
+        assert!(!is_recoverable_network_error(
+            "HTTP 500: {\"error\":\"server overloaded\"}"
+        ));
     }
 
     #[tokio::test]
@@ -6160,6 +6214,19 @@ mod tests {
         assert!(core_pos < rewrite_pos);
         assert!(prompt.contains("文风克制，动作描写细腻"));
         assert!(prompt.contains("优先级高于本次改写中的其他风格"));
+        assert!(prompt.contains("【输出格式硬性要求】"));
+        assert!(prompt.contains("每章必须完整复制输入中的 START marker 和 END marker"));
+        assert!(prompt.contains("再次确认：只输出当前输入章节的结果"));
+        assert!(
+            prompt.find("【输出格式硬性要求】").expect("format guard")
+                < prompt.find("改写要求").expect("rewrite rules")
+        );
+        assert!(
+            prompt
+                .rfind("再次确认：只输出当前输入章节的结果")
+                .expect("final marker reminder")
+                > prompt.find("当前输入章节").expect("input chapters")
+        );
     }
 
     #[test]
@@ -6900,6 +6967,8 @@ mod tests {
         assert!(prompt.contains("原文内容 2"));
         assert!(prompt.contains("目标章节当前改写稿"));
         assert!(prompt.contains("改写内容 2"));
+        assert!(prompt.contains("【输出格式硬性要求】"));
+        assert!(prompt.contains("再次确认：只输出目标章节的结果"));
         assert!(prompt.contains("相邻章节只读上下文"));
         assert!(!prompt.contains(&format!("原文内容 1 {}", "很长正文".repeat(20))));
         assert!(!prompt.contains(&format!("原文内容 3 {}", "很长正文".repeat(20))));

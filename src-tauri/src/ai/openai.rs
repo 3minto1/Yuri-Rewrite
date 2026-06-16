@@ -30,6 +30,7 @@ pub(crate) async fn generate_openai_compatible(
     if prefer_json_output && is_deepseek_profile(profile, base, &model) {
         payload["response_format"] = json!({ "type": "json_object" });
     }
+    apply_openai_compatible_output_limit(&mut payload, profile, base, &model, prefer_json_output);
     let added_thinking_control =
         apply_openai_compatible_thinking_control(&mut payload, profile, base, &model);
     let response = client

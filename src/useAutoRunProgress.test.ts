@@ -57,6 +57,20 @@ describe("useAutoRunProgress", () => {
     expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ id: "job-2" }));
   });
 
+  it("accepts a resumed job after a paused auto run", async () => {
+    const onProgress = vi.fn();
+    renderHook(() => useAutoRunProgress("novel-1", onProgress));
+    await waitFor(() => expect(progressHandler).toBeDefined());
+
+    act(() => progressHandler?.({ payload: progress({ id: "job-1", status: "paused", message: "限流暂停" }) }));
+    act(() => progressHandler?.({ payload: progress({ id: "job-2", status: "running", message: "继续一键分析改写" }) }));
+
+    expect(onProgress).toHaveBeenCalledTimes(2);
+    expect(onProgress).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "job-2", status: "running", message: "继续一键分析改写" })
+    );
+  });
+
   it("unsubscribes when the component unmounts", async () => {
     const hook = renderHook(() => useAutoRunProgress("novel-1", vi.fn()));
     await waitFor(() => expect(progressHandler).toBeDefined());

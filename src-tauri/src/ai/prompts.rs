@@ -579,6 +579,27 @@ pub(crate) fn build_core_prompt_section(core_prompt: &str) -> String {
     )
 }
 
+pub(crate) fn rewrite_marker_format_guard(scope: &str) -> String {
+    format!(
+        r#"【输出格式硬性要求】
+- 只输出{scope}的改写结果，不要输出解释、总结、Markdown、代码块、审查意见或额外章节。
+- 每章必须完整复制输入中的 START marker 和 END marker。
+- 不得修改 marker 中的 index 和 id，不得省略 START/END，不得自行生成新 marker。
+- 每章输出结构必须是：
+<<<YURI_REWRITE_CHAPTER_START index=原样复制 id=原样复制>>>
+标题：改写后标题
+正文：
+改写后正文
+<<<YURI_REWRITE_CHAPTER_END index=原样复制 id=原样复制>>>"#
+    )
+}
+
+pub(crate) fn rewrite_marker_final_reminder(scope: &str) -> String {
+    format!(
+        "再次确认：只输出{scope}的结果；每章 START/END marker 必须逐字复制；不要输出任何解释、Markdown、额外章节或缺失章节。"
+    )
+}
+
 pub(crate) fn build_batch_rewrite_prompt_with_context(
     chapters: &[Chapter],
     canon_text: &str,
@@ -593,6 +614,8 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
     };
     format!(
         r#"{}
+
+{}
 
 改写要求：
 1. 将原本男女性别叙事自然改写为双女主百合叙事。
@@ -621,12 +644,16 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
 {}
 
 当前输入章节：
+{}
+
 {}"#,
+        rewrite_marker_format_guard("当前输入章节"),
         build_core_prompt_section(core_prompt),
         build_rewrite_settings_prompt(settings),
         shard_context,
         canon_text,
-        build_batch_chapter_text(chapters, false)
+        build_batch_chapter_text(chapters, false),
+        rewrite_marker_final_reminder("当前输入章节")
     )
 }
 
@@ -652,6 +679,8 @@ pub(crate) fn build_batch_review_prompt_with_context(
     };
     format!(
         r#"请复检并自动修正以下批次改写稿。
+
+{}
 
 重点检查：
 1. 主角姓名是否已按规则女性化，且全批次一致。
@@ -681,10 +710,14 @@ pub(crate) fn build_batch_review_prompt_with_context(
 {}
 
 待复检改写稿：
+{}
+
 {}"#,
+        rewrite_marker_format_guard("当前待复检章节"),
         build_rewrite_settings_prompt(settings),
         shard_context,
-        build_batch_rewrite_text(chapters, rewrites)
+        build_batch_rewrite_text(chapters, rewrites),
+        rewrite_marker_final_reminder("当前待复检章节")
     )
 }
 
