@@ -1,13 +1,15 @@
 use crate::domain::{AppState, Chapter, ChapterBatch, Job};
+use crate::rate_limit::is_rate_limit_retry_exhausted;
 use crate::task_control::AutoRunCleanup;
 use crate::{
     analyze_chapters_for_auto, build_rewritten_export_body, chinese_batch_label, clear_auto_run,
     create_job, emit_job_progress, finish_stopped_auto_run, load_chapter_batches,
     load_chapters_for_batch, load_job, load_model_profile, load_review_enabled,
-    load_review_profile_for_run, load_review_profile_id, prepare_auto_run, read_stored_api_key,
-    register_auto_run_job, request_auto_run_stop, requested_auto_run_stop, require_novel_settings,
-    resolve_rewrite_export_dir, rewrite_chapters_for_auto, row_to_novel, sanitize_file_name,
-    set_auto_run_completed, to_string, update_job, AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
+    load_review_profile_for_run, load_review_profile_id, pause_auto_run_after_rate_limit,
+    prepare_auto_run, read_stored_api_key, register_auto_run_job, request_auto_run_stop,
+    requested_auto_run_stop, require_novel_settings, resolve_rewrite_export_dir,
+    rewrite_chapters_for_auto, row_to_novel, sanitize_file_name, set_auto_run_completed, to_string,
+    update_job, AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
 };
 use rusqlite::{params, Connection};
 use std::{
@@ -153,6 +155,16 @@ pub(crate) async fn start_analyze_rewrite_all(
                     &error,
                 );
             }
+            if is_rate_limit_retry_exhausted(&error) {
+                return pause_auto_run_after_rate_limit(
+                    &state,
+                    &app,
+                    job,
+                    completed,
+                    start_batch_index,
+                    &error,
+                );
+            }
             update_job(&state, &job.id, "failed", completed, &error)?;
             emit_job_progress(&app, &job, "failed", completed, &error);
             clear_auto_run(&state, &novel_id)?;
@@ -184,6 +196,16 @@ pub(crate) async fn start_analyze_rewrite_all(
         {
             if error == AUTO_RUN_PAUSED || error == AUTO_RUN_TERMINATED {
                 return finish_stopped_auto_run(
+                    &state,
+                    &app,
+                    job,
+                    completed,
+                    start_batch_index,
+                    &error,
+                );
+            }
+            if is_rate_limit_retry_exhausted(&error) {
+                return pause_auto_run_after_rate_limit(
                     &state,
                     &app,
                     job,

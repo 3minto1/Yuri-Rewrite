@@ -1,5 +1,6 @@
 use super::common::*;
 use crate::domain::{ModelOutput, ModelProfile};
+use crate::model_support::ModelResponseError;
 use reqwest::Client;
 use serde_json::json;
 
@@ -10,7 +11,7 @@ pub(crate) async fn generate_openai_compatible(
     system: &str,
     user: &str,
     prefer_json_output: bool,
-) -> Result<ModelOutput, String> {
+) -> Result<ModelOutput, ModelResponseError> {
     let base = profile.base_url.trim().trim_end_matches('/');
     let model = normalize_model_name(base, &profile.model);
     let endpoint = if base.ends_with("/chat/completions") {
@@ -37,7 +38,7 @@ pub(crate) async fn generate_openai_compatible(
         .json(&payload)
         .send()
         .await
-        .map_err(format_request_error)?;
+        .map_err(|error| ModelResponseError::other(format_request_error(error)))?;
     let mut retried_without_thinking = false;
     let (value, raw_response) = match response_json_or_error(response).await {
         Ok(result) => result,
@@ -65,25 +66,33 @@ pub(crate) async fn generate_openai_compatible(
                 .json(&retry_payload)
                 .send()
                 .await
-                .map_err(format_request_error)?;
+                .map_err(|error| ModelResponseError::other(format_request_error(error)))?;
             let retry_result =
                 response_json_or_error(retry_response)
                     .await
                     .map_err(|retry_error| {
-                        format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
+                        ModelResponseError::other(format!(
+                            "{}；移除思考模式参数重试后仍失败：{}",
+                            error, retry_error
+                        ))
                     })?;
             retried_without_thinking = true;
             retry_result
         }
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error),
     };
     if let Some(error) = openai_content_filter_error(&value, &model) {
-        return Err(error);
+        return Err(ModelResponseError::other(error));
     }
     let text = value["choices"][0]["message"]["content"]
         .as_str()
         .map(|text| text.to_string())
-        .ok_or_else(|| format!("模型响应缺少 choices[0].message.content: {}", value))?;
+        .ok_or_else(|| {
+            ModelResponseError::other(format!(
+                "模型响应缺少 choices[0].message.content: {}",
+                value
+            ))
+        })?;
     let reasoning = value["choices"][0]["message"]["reasoning_content"]
         .as_str()
         .or_else(|| value["choices"][0]["message"]["reasoning"].as_str())

@@ -4,6 +4,7 @@ mod credentials;
 mod db;
 mod domain;
 mod model_support;
+mod rate_limit;
 mod task_control;
 mod text;
 
@@ -18,6 +19,7 @@ use db::init_db;
 use domain::*;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use model_support::model_output_truncation_error;
+use rate_limit::RateLimitCoordinator;
 use regex::Regex;
 use reqwest::Client;
 use rusqlite::{params, Connection};
@@ -65,6 +67,7 @@ pub fn run() {
                 app_dir,
                 auto_runs: Mutex::new(HashMap::new()),
                 active_tasks: ActiveTaskRegistry::default(),
+                rate_limits: RateLimitCoordinator::default(),
             });
             Ok(())
         })
@@ -154,6 +157,9 @@ async fn analyze_batch_with_parallelism(
     chapters: &[Chapter],
     rewrite_parallelism: usize,
 ) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    let rewrite_parallelism = state
+        .rate_limits
+        .effective_parallelism(rewrite_parallelism, &[profile])?;
     let shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
     let shard_total = shards.len();
     let batch_label = format_batch_label(chapters);
@@ -165,12 +171,14 @@ async fn analyze_batch_with_parallelism(
             format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
         let prompt = build_batch_analysis_prompt_with_context(&shard, &context);
         let client = state.client.clone();
+        let rate_limiter = state.rate_limits.clone();
         let profile_for_task = profile.clone();
         let api_key = api_key.to_string();
         let shard_for_task = shard.clone();
         tasks.spawn(async move {
             let output = generate_text(
                 &client,
+                Some(rate_limiter),
                 &profile_for_task,
                 &api_key,
                 "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
@@ -285,6 +293,7 @@ async fn retry_analysis_shard_after_parse_error(
     );
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         "你是严谨的中文长篇小说结构分析格式修复助手。必须只输出一个合法 JSON 对象，不要输出 Markdown、解释或空内容。",
@@ -496,6 +505,7 @@ async fn generate_name_mapping_entries(
     let prompt = build_name_mapping_prompt(settings, sources);
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         "你是中文小说姓名女性化映射助手。必须只输出合法 JSON，不要输出 Markdown 或解释。",
@@ -833,6 +843,13 @@ async fn rewrite_batch_with_parallelism(
     review_api_key: Option<&str>,
     rewrite_parallelism: usize,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let effective_profiles = match review_profile {
+        Some(review_profile) => vec![profile, review_profile],
+        None => vec![profile],
+    };
+    let rewrite_parallelism = state
+        .rate_limits
+        .effective_parallelism(rewrite_parallelism, &effective_profiles)?;
     if review_enabled {
         generate_reviewed_rewrite_pipeline(
             state,
@@ -960,6 +977,7 @@ async fn generate_single_rewrite_shard(
     );
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和正文，不要输出输入外章节。",
@@ -1107,6 +1125,7 @@ async fn recover_rewrite_shard_by_subdivision(
         );
         let output = generate_text(
             &state.client,
+            Some(state.rate_limits.clone()),
             profile,
             api_key,
             "你是中文小说改写助手。当前是失败分片的自动细分重写，只输出当前输入章节的边界标记、标题和正文；每章必须保留原样章节开始和结束标记。",
@@ -1477,6 +1496,7 @@ async fn review_shard_decision(
     );
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         system_prompt,
@@ -1576,13 +1596,14 @@ fn build_batch_review_decision_prompt_with_context(
 2. 主角是否已按设置完成女性化，正文不能残留主角男性姓名、男性身份、男性代词、男性称谓、男性身体特征或男性社会角色。
 3. 用户指定要女性化的其他姓名是否在出现处完成女性化，并保持前后一致。
 4. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别、身份、称谓和人称代词，不能因为百合改写目标被误改。
-5. 身材、体型、外貌、发色、瞳色、年龄感、能力状态、标志性服饰和伤痕是否前后一致。
-6. 百合向关系推进是否承接前文，不能突然重置、跳跃或破坏原文人物性格。
-7. 改写是否自然合理，不能只机械替换姓名/代词，也不能为了强调女性化而破坏剧情逻辑。
-8. 改写稿是否遵守最高优先级核心设定中的文风、描写方式、节奏、语气和其他全局写作要求。
-9. 章节边界、标题、正文是否完整，没有缺句、重复、串章、空正文或额外章节。
-10. 章节标题原则上保留原标题和原编号。只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才需要修改；普通意象、事件概括、其他角色描述或无法确认指向主角的男性词语均不属于标题问题。此规则对严谨模式和创意模式都相同。
-11. marker 中的 index 是内部顺序标识，不是原标题中的章节编号。序章、楔子、番外等会使两者不同；标题编号与 marker index 不一致不是问题，禁止要求按 index 重编号、补零或消除所谓数字矛盾。
+5. 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，保留原文人称代词和称谓时应视为合格，不要当作主角男性残留或未女性化问题。
+6. 身材、体型、外貌、发色、瞳色、年龄感、能力状态、标志性服饰和伤痕是否前后一致。
+7. 百合向关系推进是否承接前文，不能突然重置、跳跃或破坏原文人物性格。
+8. 改写是否自然合理，不能只机械替换姓名/代词，也不能为了强调女性化而破坏剧情逻辑。
+9. 改写稿是否遵守最高优先级核心设定中的文风、描写方式、节奏、语气和其他全局写作要求。
+10. 章节边界、标题、正文是否完整，没有缺句、重复、串章、空正文或额外章节。
+11. 章节标题原则上保留原标题和原编号。只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才需要修改；普通意象、事件概括、其他角色描述或无法确认指向主角的男性词语均不属于标题问题。此规则对严谨模式和创意模式都相同。
+12. marker 中的 index 是内部顺序标识，不是原标题中的章节编号。序章、楔子、番外等会使两者不同；标题编号与 marker index 不一致不是问题，禁止要求按 index 重编号、补零或消除所谓数字矛盾。
 
 判定规则：
 - 只有不存在必须修改的问题时，approved 才能为 true。
@@ -1590,6 +1611,7 @@ fn build_batch_review_decision_prompt_with_context(
 - 问题必须具体到章节、角色、原文逻辑或需要修改的称谓/特征，方便写作专家重写。
 - 每个问题必须以“待审查改写稿”中的实际文字为证据；禁止把“原文章节”中的姓名、代词、称谓或句子误报为改写稿残留。声称任何男性残留时，problem 必须引用改写稿中仍存在的原词或原句；如果该原词或原句只在原文中出现、当前改写稿已经替换，则不得列入 issues。
 - “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性口语昵称本身不是男性残留，不得仅因它们不够女性化、风格不统一或建议强化女性身份而列为 blocking。只有同一句或同一处证据中明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代，且该指代确实指向主角时，才属于必须修改的问题。
+- 动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物在原文未明确性别或性别模糊时，改写稿保留原文人称代词和称谓不是问题；不得仅因它们没有被女性化而列为 blocking。
 - issues 只能列出会导致 approved=false、且必须实际修改正文或符合上述条件的标题才能解决的阻断问题。
 - 已正确保留的原文、符合规则的男性配角描述、正确的姓名/代词替换、通过的审查项、优点、确认事项和“无需修改”的内容禁止写入 issues，也不得标记为 blocking。
 - 不要为了展示审查过程而逐项汇报通过情况；这些内容既不能出现在 issues，也不能成为打回理由。
@@ -1662,7 +1684,7 @@ fn build_compact_review_constraints(
     };
     let canon_summary = compact_review_canon(canon_text);
     format!(
-        "严格复检约束摘要：\n- 主角原姓名：{}\n- 主角改写后姓名：{}\n- 其他指定女性化姓名：{}\n- 身材 / 体型：{} / {}\n- 改写模式：{}\n- 高级设定：{}\n- 最高优先级核心设定：{}\n\n关键一致性资料：\n{}\n\n必须检查主角女性化、未指定角色原性别保持、姓名/代词/称谓、原文逻辑、外貌与关系连续性、文风要求及章节完整性。标题默认保留，仅在明确涉及主角原名或主角男性状态时修改。",
+        "严格复检约束摘要：\n- 主角原姓名：{}\n- 主角改写后姓名：{}\n- 其他指定女性化姓名：{}\n- 身材 / 体型：{} / {}\n- 改写模式：{}\n- 高级设定：{}\n- 最高优先级核心设定：{}\n\n关键一致性资料：\n{}\n\n必须检查主角女性化、未指定角色原性别保持、姓名/代词/称谓、原文逻辑、外貌与关系连续性、文风要求及章节完整性。标题默认保留，仅在明确涉及主角原名或主角男性状态时修改。原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，保留原文人称代词和称谓应通过审查。",
         settings.protagonist_name.trim(),
         rewritten_name,
         additional_names,
@@ -1841,10 +1863,13 @@ fn filter_review_decision_against_rewrites(
             gender_residue_evidence_is_absent_from_rewrites(&issue, &relevant_rewrites);
         let neutral_nickname_false_positive =
             gender_residue_claim_only_targets_neutral_nickname(&issue, &relevant_rewrites);
+        let ambiguous_non_human_false_positive =
+            gender_residue_claim_targets_ambiguous_non_human(&issue, settings, &relevant_rewrites);
         if !relevant_rewrites.is_empty()
             && ((claims_source_name_residue && !source_name_is_present)
                 || quoted_evidence_is_absent
-                || neutral_nickname_false_positive)
+                || neutral_nickname_false_positive
+                || ambiguous_non_human_false_positive)
         {
             filtered.push(issue);
         } else {
@@ -1858,6 +1883,39 @@ fn filter_review_decision_against_rewrites(
         },
         filtered,
     )
+}
+
+fn gender_residue_claim_targets_ambiguous_non_human(
+    issue: &ReviewIssue,
+    settings: &NovelSettings,
+    rewrites: &[&ParsedChapterRewrite],
+) -> bool {
+    let issue_text = format!("{} {}", issue.problem, issue.required_fix);
+    if !is_gender_residue_claim(&issue_text, &issue.category) {
+        return false;
+    }
+    if references_target_protagonist(&issue_text, settings) {
+        return false;
+    }
+    if !contains_non_human_reference(&issue_text)
+        || !contains_any(&issue_text, &["代词", "人称", "称谓", "他", "她", "它"])
+    {
+        return false;
+    }
+    let evidence = extract_review_quoted_evidence(&issue.problem);
+    if evidence.is_empty() {
+        return true;
+    }
+    let rewrite_text = rewrites
+        .iter()
+        .map(|rewrite| format!("{}\n{}", rewrite.title, rewrite.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    evidence.iter().any(|fragment| {
+        rewrite_text.contains(fragment.as_str())
+            && contains_any(fragment, &["他", "她", "它", "牠"])
+            && !contains_explicit_male_identity_reference(fragment)
+    })
 }
 
 fn gender_residue_claim_only_targets_neutral_nickname(
@@ -1944,6 +2002,52 @@ fn is_gender_residue_claim(text: &str, category: &str) -> bool {
         )
 }
 
+fn references_target_protagonist(text: &str, settings: &NovelSettings) -> bool {
+    let source_name = settings.protagonist_name.trim();
+    let rewritten_name = settings.rewritten_protagonist_name.trim();
+    contains_any(text, &["主角", "女主", "男主"])
+        || (!source_name.is_empty() && text.contains(source_name))
+        || (!rewritten_name.is_empty() && text.contains(rewritten_name))
+}
+
+fn contains_non_human_reference(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "非人",
+            "非人生物",
+            "动物",
+            "灵兽",
+            "妖兽",
+            "凶兽",
+            "神兽",
+            "魔兽",
+            "异兽",
+            "古兽",
+            "蛮兽",
+            "荒兽",
+            "器灵",
+            "兽",
+            "鸟",
+            "鱼",
+            "蛇",
+            "龙",
+            "虎",
+            "狼",
+            "猴",
+            "猿",
+            "熊",
+            "牛",
+            "马",
+            "鹏",
+            "蛟",
+            "狐",
+            "雀",
+            "龟",
+        ],
+    )
+}
+
 fn contains_neutral_protagonist_nickname(text: &str) -> bool {
     contains_any(
         text,
@@ -1987,6 +2091,40 @@ fn contains_explicit_male_protagonist_reference(text: &str) -> bool {
             "他",
             "他的",
             "他是",
+        ],
+    )
+}
+
+fn contains_explicit_male_identity_reference(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "雄性",
+            "公兽",
+            "雄兽",
+            "雄鸟",
+            "公鸟",
+            "雄龙",
+            "公龙",
+            "少年",
+            "男孩",
+            "男子",
+            "男人",
+            "男性",
+            "男儿",
+            "男主",
+            "公子",
+            "少爷",
+            "少主",
+            "父亲",
+            "兄弟",
+            "哥哥",
+            "弟弟",
+            "小子",
+            "汉子",
+            "爷们",
+            "郎君",
+            "少年郎",
         ],
     )
 }
@@ -2663,6 +2801,7 @@ async fn revise_rewrite_shard_after_review(
     )?;
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         "你是中文小说定向修复专家。只输出明确要求修复的目标章节，逐字保留目标章节 marker，不得输出相邻只读章节。",
@@ -2755,6 +2894,7 @@ async fn revise_full_rewrite_shard_after_review(
     );
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         "你是中文小说改写专家。审查专家已打回上一版改写稿，你必须按问题清单重新改写当前分片，并严格保留章节边界标记。",
@@ -3022,6 +3162,7 @@ async fn retry_revision_shard_after_parse_error(
     );
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         "你是中文小说审查打回重写格式修复助手。必须按审查问题重新输出当前分片的完整改写稿，逐字保留全部章节开始和结束标记，不要解释。",
@@ -3155,6 +3296,7 @@ async fn recover_revision_shard_by_subdivision(
         );
         let output = generate_text(
             &state.client,
+            Some(state.rate_limits.clone()),
             profile,
             api_key,
             "你是中文小说改写专家。当前是审查打回稿的自动细分重写，只输出当前输入章节的完整边界标记、标题和正文，不要解释。",
@@ -3319,6 +3461,7 @@ async fn retry_rewrite_shard_after_parse_error(
     );
     let output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         profile,
         api_key,
         "你是中文小说改写格式修复助手。必须重新输出当前分片的完整百合改写结果。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和非空正文，不要输出输入外章节。",
@@ -3619,6 +3762,7 @@ async fn start_rewrite_legacy(
             build_rewrite_prompt_with_settings(&chapter, &canon_text, &settings, &core_prompt);
         match generate_text(
             &state.client,
+            Some(state.rate_limits.clone()),
             &profile,
             &api_key,
             "你是中文小说改写助手，任务是把男女主文本改写为自然的双女主百合文本。只输出改写后的标题和正文。",
@@ -4390,6 +4534,32 @@ fn finish_stopped_auto_run(
             control.job_id = Some(job.id.clone());
         }
     }
+    load_job(state, &job.id)
+}
+
+fn pause_auto_run_after_rate_limit(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    start_batch_index: i64,
+    error: &str,
+) -> Result<Job, String> {
+    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
+    let message = format!(
+        "服务商限流重试已耗尽，任务已暂停。请降低并发、等待额度恢复或更换模型后点击继续；继续后将从第 {} 批重新开始。\n\n{}",
+        completed_batches + 1,
+        error
+    );
+    update_job(state, &job.id, "paused", completed_in_range, &message)?;
+    emit_job_progress(app, &job, "paused", completed_in_range, &message);
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    if let Some(control) = runs.get_mut(&job.novel_id) {
+        control.status = "paused".to_string();
+        control.completed_batches = completed_batches;
+        control.job_id = Some(job.id.clone());
+    }
+    drop(runs);
     load_job(state, &job.id)
 }
 
@@ -5728,6 +5898,8 @@ mod tests {
         assert!(strict_prompt.contains("人物关系和百合向情绪推进必须连续"));
         assert!(strict_prompt.contains("只允许主角、用户填写的“其他需要女性化的人物姓名”"));
         assert!(strict_prompt.contains("其他未指定人物必须保持原文性别、身份、称谓和人称代词"));
+        assert!(strict_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
+        assert!(strict_prompt.contains("保留原文中的人称代词和称谓"));
         assert!(strict_prompt.contains("不得因为百合改写目标而把所有重要配角"));
         assert!(creative_prompt.contains("创意模式"));
         assert!(creative_prompt.contains("优先级高于普通的“中度再创作”约束"));
@@ -5862,6 +6034,7 @@ mod tests {
         assert!(prompt.contains("不能突然重置或跳跃"));
         assert!(prompt.contains("其他配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别"));
         assert!(prompt.contains("原文男性继续使用男性代词/称谓"));
+        assert!(prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
     }
 
     #[test]
@@ -5915,6 +6088,8 @@ mod tests {
         assert!(decision_prompt.contains("标题编号与 marker index 不一致不是问题"));
         assert!(decision_prompt.contains("通过的审查项、优点、确认事项"));
         assert!(decision_prompt.contains("仅用于定位，不代表标题中的章节编号"));
+        assert!(decision_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
+        assert!(decision_prompt.contains("保留原文人称代词和称谓"));
     }
 
     #[test]
@@ -6226,6 +6401,58 @@ mod tests {
         assert!(!filtered_decision.approved);
         assert_eq!(filtered_decision.issues.len(), 2);
         assert!(filtered_issues.is_empty());
+    }
+
+    #[test]
+    fn review_decision_filters_ambiguous_non_human_pronoun_complaints() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![88],
+                "chapter",
+                "gender_residue",
+                "第88章中，灵兽原文性别不明，但改写稿仍称‘它盘踞在石台上’，没有改成女性代词。应改为‘她’以统一女性化。",
+            )],
+        };
+        let rewrites = vec![ParsedChapterRewrite {
+            id: "chapter-88".to_string(),
+            index: 88,
+            title: "第88章".to_string(),
+            text: "那头灵兽沉默不语，它盘踞在石台上，双目发光。".to_string(),
+        }];
+
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+
+        assert!(filtered_decision.approved);
+        assert!(filtered_decision.issues.is_empty());
+        assert_eq!(filtered_issues.len(), 1);
+    }
+
+    #[test]
+    fn review_decision_allows_ambiguous_non_human_original_he_pronoun() {
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![89],
+                "chapter",
+                "gender_residue",
+                "第89章中，妖兽原文性别不明，但改写稿仍称‘他伏在洞口’，没有改成女性代词。应改为‘她’以统一女性化。",
+            )],
+        };
+        let rewrites = vec![ParsedChapterRewrite {
+            id: "chapter-89".to_string(),
+            index: 89,
+            title: "第89章".to_string(),
+            text: "那头妖兽没有回应，他伏在洞口，像是在守着什么。".to_string(),
+        }];
+
+        let (filtered_decision, filtered_issues) =
+            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+
+        assert!(filtered_decision.approved);
+        assert!(filtered_decision.issues.is_empty());
+        assert_eq!(filtered_issues.len(), 1);
     }
 
     #[test]

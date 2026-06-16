@@ -1,4 +1,5 @@
 use crate::domain::{AppSettings, AppState, NovelSettings};
+use crate::task_control::{auto_runs_are_only_paused, auto_runs_have_non_paused};
 use crate::{load_novel_settings, normalize_name_list, to_string};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -36,8 +37,18 @@ pub(crate) fn save_app_settings(
     settings: AppSettings,
     state: State<AppState>,
 ) -> Result<AppSettings, String> {
-    if state.active_tasks.any_active()? || !state.auto_runs.lock().map_err(to_string)?.is_empty() {
+    if state.active_tasks.any_active()? || auto_runs_have_non_paused(&state.auto_runs)? {
         return Err("任务运行中不能修改应用设置。".to_string());
+    }
+    if auto_runs_are_only_paused(&state.auto_runs)? {
+        let current = get_app_settings(state.clone())?;
+        if current.export_dir != settings.export_dir || current.core_prompt != settings.core_prompt
+        {
+            return Err(
+                "一键任务暂停中只能修改并发、复检和模型选择，不能修改导出目录或全局核心设定。"
+                    .to_string(),
+            );
+        }
     }
     let conn = state.conn.lock().map_err(to_string)?;
     let rewrite_parallelism = normalize_rewrite_parallelism(settings.rewrite_parallelism);

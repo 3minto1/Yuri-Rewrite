@@ -119,6 +119,20 @@ pub(crate) fn should_terminate_paused_run(current_status: &str, requested_status
     current_status == "paused" && requested_status == "terminate_requested"
 }
 
+pub(crate) fn auto_runs_have_non_paused(
+    runs: &Mutex<HashMap<String, AutoRunControl>>,
+) -> Result<bool, String> {
+    let runs = runs.lock().map_err(|error| error.to_string())?;
+    Ok(runs.values().any(|control| control.status != "paused"))
+}
+
+pub(crate) fn auto_runs_are_only_paused(
+    runs: &Mutex<HashMap<String, AutoRunControl>>,
+) -> Result<bool, String> {
+    let runs = runs.lock().map_err(|error| error.to_string())?;
+    Ok(!runs.is_empty() && runs.values().all(|control| control.status == "paused"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +189,34 @@ mod tests {
             "terminate_requested"
         ));
         assert!(!should_terminate_paused_run("paused", "pause_requested"));
+    }
+
+    #[test]
+    fn distinguishes_paused_auto_runs_from_running_auto_runs() {
+        let runs = Mutex::new(HashMap::from([(
+            "novel-1".to_string(),
+            AutoRunControl {
+                status: "paused".to_string(),
+                start_batch_index: 0,
+                completed_batches: 1,
+                job_id: None,
+                profile_ids: HashSet::new(),
+            },
+        )]));
+        assert!(!auto_runs_have_non_paused(&runs).expect("paused only"));
+        assert!(auto_runs_are_only_paused(&runs).expect("paused only"));
+
+        runs.lock().expect("runs").insert(
+            "novel-2".to_string(),
+            AutoRunControl {
+                status: "running".to_string(),
+                start_batch_index: 0,
+                completed_batches: 0,
+                job_id: None,
+                profile_ids: HashSet::new(),
+            },
+        );
+        assert!(auto_runs_have_non_paused(&runs).expect("has running"));
+        assert!(!auto_runs_are_only_paused(&runs).expect("has running"));
     }
 }

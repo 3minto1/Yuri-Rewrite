@@ -17,13 +17,7 @@ pub(crate) fn save_model_profile(
     state: State<AppState>,
 ) -> Result<ModelProfile, String> {
     if let Some(profile_id) = input.id.as_deref() {
-        let paused_auto_run_uses_profile = state
-            .auto_runs
-            .lock()
-            .map_err(to_string)?
-            .values()
-            .any(|control| control.profile_ids.contains(profile_id));
-        if state.active_tasks.profile_is_active(profile_id)? || paused_auto_run_uses_profile {
+        if state.active_tasks.profile_is_active(profile_id)? {
             return Err("当前模型正在被任务使用，任务结束前不能修改配置。".to_string());
         }
     }
@@ -186,6 +180,7 @@ pub(crate) async fn test_model_profile(
     let api_key = read_stored_api_key(&state, &profile.id)?;
     match generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         &profile,
         &api_key,
         "你是一个连接测试助手。只回复一句中文。",
@@ -263,6 +258,7 @@ pub(crate) async fn diagnose_model_profile(
     let mut recommended_thinking_mode = None;
     let chat_output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         &profile,
         &api_key,
         "你是一个模型诊断助手。只回复指定内容。",
@@ -328,6 +324,7 @@ pub(crate) async fn diagnose_model_profile(
 
     let json_output = generate_text(
         &state.client,
+        Some(state.rate_limits.clone()),
         &profile,
         &api_key,
         "你是一个 JSON 诊断助手。必须只输出合法 JSON，不要 Markdown。",

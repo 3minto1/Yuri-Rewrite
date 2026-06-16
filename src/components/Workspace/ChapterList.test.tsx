@@ -44,14 +44,15 @@ describe("ChapterList", () => {
     await waitFor(() => expect(screen.getByText("3000. 第3000章")).toBeInTheDocument());
   });
 
-  it("jumps to a chapter by number without rendering the full list", () => {
+  it("filters to a chapter by number and selects it with Enter", () => {
     const onSelect = vi.fn();
     const rows = chapters(3_000);
     render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={onSelect} displayTitle={displayTitle} statusText={statusText} />);
 
-    fireEvent.change(screen.getByRole("textbox", { name: "跳转章节" }), { target: { value: "250" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索章节" }), { target: { value: "250" } });
     expect(screen.getByText((_, node) => node?.textContent === "250. 第250章")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "跳转" }));
+    expect(screen.queryByRole("button", { name: "跳转" })).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "搜索章节" }), { key: "Enter" });
 
     expect(onSelect).toHaveBeenCalledWith("chapter-250");
   });

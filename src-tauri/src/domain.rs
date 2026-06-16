@@ -1,3 +1,4 @@
+use crate::rate_limit::RateLimitCoordinator;
 use crate::task_control::{ActiveTaskRegistry, AutoRunControl};
 use reqwest::Client;
 use rusqlite::Connection;
@@ -11,6 +12,7 @@ pub(crate) struct AppState {
     pub(crate) app_dir: PathBuf,
     pub(crate) auto_runs: Mutex<HashMap<String, AutoRunControl>>,
     pub(crate) active_tasks: ActiveTaskRegistry,
+    pub(crate) rate_limits: RateLimitCoordinator,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

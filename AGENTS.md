@@ -101,6 +101,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Preserve original chapter titles and their original numbering by default. Change a title only when it explicitly contains the protagonist's source name or clearly describes the protagonist's male identity, title, or body state. This rule is identical in strict and creative modes.
 - Stable marker `index` values are internal ordering identifiers, not title chapter numbers. Prologues, interludes, and extras may make them differ; never renumber titles to match marker indexes.
 - Do not alter non-target characters' gender, pronouns, titles, seniority, relationships, or social roles.
+- For animals, spirit beasts, artifact spirits, and other non-human beings whose source gender is unclear or unspecified, preserve the source pronoun and title choices. Review must not flag them solely because they were not feminized.
 - Remove masculine residue from the target protagonist while preserving plot continuity and established appearance details.
 - Strict mode preserves plot and avoids unnecessary embellishment. Creative mode may reinforce female identity, appearance, expression, and dual-female-lead interaction without breaking continuity.
 
@@ -125,6 +126,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Review `issues` contain only actionable blocking defects. Never log compliant passages, passed checks, correctly preserved non-target male descriptions, positive observations, or confirmation-only notes as blocking issues.
 - A claimed protagonist-name or pronoun residue must quote text that still exists in the current rewrite draft. Original-text evidence alone is not actionable and must not survive deterministic post-validation.
 - Neutral colloquial nicknames such as `这家伙`, `这个家伙`, `家伙`, `熊孩子`, `孩子`, `吃货`, and `小鬼` are not blocking gender residue by themselves. Keep blocking only when the current rewrite evidence contains an explicit male reference to the protagonist such as `少年`, `男孩`, `男子`, `公子`, `少爷`, `小子`, or male pronoun `他`.
+- Animals, spirit beasts, artifact spirits, and other non-human beings with unclear or unspecified source gender pass review when the rewrite preserves the source pronouns or titles. Do not treat those preserved pronouns as protagonist gender residue.
 
 ### Task Lifecycle
 

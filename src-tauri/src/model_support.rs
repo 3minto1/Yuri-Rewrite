@@ -1,19 +1,27 @@
 use serde_json::Value;
 use std::fmt;
+use std::time::Duration;
+
+use crate::rate_limit::{classify_rate_limit, RateLimitKind};
 
 #[derive(Debug)]
 pub(crate) struct ModelResponseError {
     status: Option<u16>,
     body: String,
     message: String,
+    retry_after: Option<Duration>,
+    rate_limit_kind: Option<RateLimitKind>,
 }
 
 impl ModelResponseError {
-    pub(crate) fn provider(status: u16, body: String) -> Self {
+    pub(crate) fn provider(status: u16, body: String, retry_after: Option<Duration>) -> Self {
+        let rate_limit_kind = classify_rate_limit(Some(status), &body);
         Self {
             status: Some(status),
             message: format!("HTTP {status}: {body}"),
             body,
+            retry_after,
+            rate_limit_kind,
         }
     }
 
@@ -22,12 +30,22 @@ impl ModelResponseError {
             status: None,
             body: String::new(),
             message,
+            retry_after: None,
+            rate_limit_kind: classify_rate_limit(None, ""),
         }
     }
 
     pub(crate) fn permits_thinking_retry(&self) -> bool {
         self.status
             .is_some_and(|status| should_retry_without_thinking(status, &self.body))
+    }
+
+    pub(crate) fn is_rate_limited(&self) -> bool {
+        self.rate_limit_kind.is_some()
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
     }
 }
 

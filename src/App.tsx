@@ -267,6 +267,8 @@ export default function App() {
   const hasCompleteNovelSettings = Boolean(
     detail?.settings?.protagonist_name?.trim() && detail.settings.bust?.trim() && detail.settings.body_type?.trim()
   );
+  const pausedAutoRun = autoRunState === "paused";
+  const adjustableWhilePaused = processingTaskActive && !pausedAutoRun;
 
   useEffect(() => {
     void refreshAll();
@@ -1343,7 +1345,7 @@ export default function App() {
             profiles={profiles}
             selectedProfileId={selectedProfileId}
             menuOpen={openModelMenu}
-            processing={processingTaskActive}
+            processing={adjustableWhilePaused}
             busy={busy}
             onSelect={selectModelProfile}
             onMenuOpenChange={setOpenModelMenu}
@@ -1654,6 +1656,7 @@ export default function App() {
             profiles={profiles}
             busy={busy}
             processing={processingTaskActive}
+            allowPausedTaskAdjustments={pausedAutoRun}
             onBack={() => setActiveView("workspace")}
             onChooseExportDir={chooseExportDir}
             onClearExportDir={clearExportDir}
@@ -1698,7 +1701,7 @@ export default function App() {
               suggestions={detectedModelSuggestions}
               suggestionsOpen={openModelSuggestions}
               busy={busy}
-              processing={processingTaskActive}
+              processing={adjustableWhilePaused}
               savedApiKeyMask={savedApiKeyMask}
               thinkingModeTooltip={thinkingModeTooltip}
               onSuggestionsOpenChange={setOpenModelSuggestions}

@@ -1,6 +1,6 @@
 use super::common::*;
 use crate::domain::{ModelOutput, ModelProfile};
-use crate::model_support::parse_gemini_parts;
+use crate::model_support::{parse_gemini_parts, ModelResponseError};
 use reqwest::Client;
 use serde_json::json;
 
@@ -10,7 +10,7 @@ pub(crate) async fn generate_gemini(
     api_key: &str,
     system: &str,
     user: &str,
-) -> Result<ModelOutput, String> {
+) -> Result<ModelOutput, ModelResponseError> {
     let base = if profile.base_url.trim().is_empty() {
         "https://generativelanguage.googleapis.com/v1beta".to_string()
     } else {
@@ -37,7 +37,7 @@ pub(crate) async fn generate_gemini(
         .json(&payload)
         .send()
         .await
-        .map_err(format_request_error)?;
+        .map_err(|error| ModelResponseError::other(format_request_error(error)))?;
     let mut retried_without_thinking = false;
     let (value, raw_response) = match response_json_or_error(response).await {
         Ok(result) => result,
@@ -55,19 +55,22 @@ pub(crate) async fn generate_gemini(
                 .json(&retry_payload)
                 .send()
                 .await
-                .map_err(format_request_error)?;
+                .map_err(|error| ModelResponseError::other(format_request_error(error)))?;
             let retry_result =
                 response_json_or_error(retry_response)
                     .await
                     .map_err(|retry_error| {
-                        format!("{}；移除思考模式参数重试后仍失败：{}", error, retry_error)
+                        ModelResponseError::other(format!(
+                            "{}；移除思考模式参数重试后仍失败：{}",
+                            error, retry_error
+                        ))
                     })?;
             retried_without_thinking = true;
             retry_result
         }
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error),
     };
-    let (text, reasoning) = parse_gemini_parts(&value)?;
+    let (text, reasoning) = parse_gemini_parts(&value).map_err(ModelResponseError::other)?;
     Ok(ModelOutput {
         text,
         reasoning,

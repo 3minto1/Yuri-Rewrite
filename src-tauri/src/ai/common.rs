@@ -1,5 +1,9 @@
 use crate::domain::{AppState, ModelOutput, ModelProfile};
 use crate::model_support::ModelResponseError;
+use crate::rate_limit::{
+    is_rate_limit_retry_exhausted, parse_retry_after, RateLimitCoordinator, RateLimitScope,
+    MAX_RATE_LIMIT_RETRIES, RATE_LIMIT_RETRY_EXHAUSTED,
+};
 use crate::{
     extract_tailing_json_from_text, load_model_profile, normalize_review_profile_id,
     read_stored_api_key, to_string,
@@ -70,12 +74,67 @@ pub(crate) fn sanitize_prompt_for_mimo(text: &str) -> String {
 
 pub(crate) async fn generate_text(
     client: &Client,
+    rate_limiter: Option<RateLimitCoordinator>,
     profile: &ModelProfile,
     api_key: &str,
     system: &str,
     user: &str,
     prefer_json_output: bool,
 ) -> Result<ModelOutput, String> {
+    let scope = RateLimitScope::for_profile(profile);
+    let mut rate_limit_attempts = 0usize;
+    loop {
+        if let Some(rate_limiter) = rate_limiter.as_ref() {
+            if let Some(delay) = rate_limiter.cooldown_delay(&scope)? {
+                tokio::time::sleep(delay).await;
+            }
+        }
+        match generate_text_once(client, profile, api_key, system, user, prefer_json_output).await {
+            Ok(output) => {
+                if let Some(rate_limiter) = rate_limiter.as_ref() {
+                    rate_limiter.record_success(&scope)?;
+                }
+                return Ok(output);
+            }
+            Err(error) if error.is_rate_limited() => {
+                if rate_limit_attempts >= MAX_RATE_LIMIT_RETRIES {
+                    return Err(format!(
+                        "{}：{}。请降低并发、等待额度恢复或更换模型后重试。",
+                        RATE_LIMIT_RETRY_EXHAUSTED, error
+                    ));
+                }
+                rate_limit_attempts += 1;
+                if let Some(rate_limiter) = rate_limiter.as_ref() {
+                    let _ = rate_limiter.record_rate_limit(
+                        &scope,
+                        error.retry_after(),
+                        rate_limit_attempts,
+                    )?;
+                } else {
+                    let delay =
+                        crate::rate_limit::default_backoff_delay(&scope, rate_limit_attempts);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if is_rate_limit_retry_exhausted(&message) {
+                    return Err(message);
+                }
+                return Err(message);
+            }
+        }
+    }
+}
+
+async fn generate_text_once(
+    client: &Client,
+    profile: &ModelProfile,
+    api_key: &str,
+    system: &str,
+    user: &str,
+    prefer_json_output: bool,
+) -> Result<ModelOutput, ModelResponseError> {
     let started = Instant::now();
     let (system, user) = prepare_prompt_for_profile(profile, system, user);
     let input_chars = system.chars().count() + user.chars().count();
@@ -114,6 +173,12 @@ pub(crate) async fn response_json_or_error(
     response: reqwest::Response,
 ) -> Result<(serde_json::Value, String), ModelResponseError> {
     let status = response.status();
+    let retry_after = parse_retry_after(
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+    );
     let body = response
         .text()
         .await
@@ -122,6 +187,7 @@ pub(crate) async fn response_json_or_error(
         return Err(ModelResponseError::provider(
             status.as_u16(),
             compact_error_body(&body),
+            retry_after,
         ));
     }
     let value = serde_json::from_str(&body).map_err(|error| {

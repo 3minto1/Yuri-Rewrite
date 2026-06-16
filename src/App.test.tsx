@@ -205,6 +205,39 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("combobox", { name: "当前批次" })).toBeEnabled();
   });
 
+  it("allows parallelism changes while an auto job is paused", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile, secondProfile];
+      if (command === "get_app_settings") return settings;
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "save_app_settings") return { ...settings, rewrite_parallelism: (args as { settings: AppSettings }).settings.rewrite_parallelism };
+      if (command === "save_selected_profile_id") return { ...settings, selected_profile_id: "profile-2" };
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    act(() => {
+      mocks.progressCallback?.({ id: "auto-1", novel_id: "novel-1", job_type: "auto", status: "paused", current_chapter: 0, total_chapters: 2, message: "限流暂停" });
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeEnabled());
+    fireEvent.change(screen.getByRole("combobox", { name: "改写模型" }), { target: { value: "profile-2" } });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_selected_profile_id", { profileId: "profile-2" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("radio", { name: "3" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("save_app_settings", {
+        settings: expect.objectContaining({ rewrite_parallelism: 3 })
+      })
+    );
+  });
+
   it("refreshes rewritten chapters after an auto batch finishes without changing pages", async () => {
     let currentDetail = detail;
     mocks.invoke.mockImplementation(async (command: string) => {

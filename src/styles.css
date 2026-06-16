@@ -1528,11 +1528,6 @@ label {
   padding: 7px 9px;
 }
 
-.small-button {
-  min-height: 34px;
-  padding: 6px 10px;
-}
-
 .chapter-list {
   flex: 1;
   min-height: 0;
