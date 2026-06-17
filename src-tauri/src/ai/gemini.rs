@@ -10,6 +10,7 @@ pub(crate) async fn generate_gemini(
     api_key: &str,
     system: &str,
     user: &str,
+    prefer_json_output: bool,
 ) -> Result<ModelOutput, ModelResponseError> {
     let base = if profile.base_url.trim().is_empty() {
         "https://generativelanguage.googleapis.com/v1beta".to_string()
@@ -30,6 +31,7 @@ pub(crate) async fn generate_gemini(
             "temperature": profile.temperature
         }
     });
+    apply_gemini_json_response_format(&mut payload, prefer_json_output);
     let added_thinking_control = apply_gemini_thinking_control(&mut payload, profile);
     let response = client
         .post(&endpoint)

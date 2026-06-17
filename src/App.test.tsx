@@ -326,6 +326,38 @@ describe("App feature behavior", () => {
     await waitFor(() => expect(screen.getByText(/预计剩余 1 分 0 秒/)).toBeInTheDocument());
   });
 
+  it.each(["completed", "paused", "failed"])(
+    "refreshes task estimate when auto job becomes %s",
+    async (status) => {
+      render(<App />);
+      await screen.findByRole("heading", { name: "测试小说" });
+      await waitFor(() =>
+        expect(mocks.invoke.mock.calls.some(([command]) => command === "estimate_job_cost")).toBe(true)
+      );
+      const estimateCallsBefore = mocks.invoke.mock.calls.filter(
+        ([command]) => command === "estimate_job_cost"
+      ).length;
+
+      act(() => {
+        mocks.progressCallback?.({
+          id: `auto-${status}`,
+          novel_id: "novel-1",
+          job_type: "auto",
+          status,
+          current_chapter: status === "completed" ? 2 : 1,
+          total_chapters: 2,
+          message: status
+        });
+      });
+
+      await waitFor(() =>
+        expect(
+          mocks.invoke.mock.calls.filter(([command]) => command === "estimate_job_cost").length
+        ).toBeGreaterThan(estimateCallsBefore)
+      );
+    }
+  );
+
   it("opens novel settings and exports from the compare view", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });

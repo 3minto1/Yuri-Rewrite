@@ -40,6 +40,57 @@ pub(crate) fn is_doubao_profile(profile: &ModelProfile, base_url: &str, model: &
         || model.contains("seed-")
 }
 
+pub(crate) fn is_openai_official_profile(profile: &ModelProfile, base_url: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    base.contains("api.openai.com")
+        || base.contains("openai.azure.com")
+        || (provider == "openai" && !base.contains("compatible"))
+}
+
+pub(crate) fn is_kimi_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    provider.contains("kimi")
+        || provider.contains("moonshot")
+        || base.contains("kimi")
+        || base.contains("moonshot")
+        || model.contains("kimi-")
+        || model.contains("moonshot")
+}
+
+pub(crate) fn is_siliconflow_profile(profile: &ModelProfile, base_url: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    provider.contains("siliconflow") || base.contains("siliconflow")
+}
+
+fn siliconflow_model_supports_json_mode(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    if model.contains("deepseek-r1") {
+        return false;
+    }
+    if model.contains("deepseek-v3") {
+        return model.contains("v3.1") || model.contains("v3.2");
+    }
+    true
+}
+
+fn permissive_json_schema_response_format() -> serde_json::Value {
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "yuri_rewrite_json_response",
+            "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }
+        }
+    })
+}
+
 pub(crate) fn apply_openai_compatible_output_limit(
     payload: &mut serde_json::Value,
     profile: &ModelProfile,
@@ -68,17 +119,16 @@ pub(crate) fn openai_compatible_json_response_format(
     model: &str,
 ) -> Option<serde_json::Value> {
     if is_doubao_profile(profile, base_url, model) {
-        return Some(json!({
-            "type": "json_schema",
-            "json_schema": {
-                "name": "yuri_rewrite_json_response",
-                "schema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": true
-                }
-            }
-        }));
+        return Some(permissive_json_schema_response_format());
+    }
+
+    if is_openai_official_profile(profile, base_url) || is_kimi_profile(profile, base_url, model) {
+        return Some(permissive_json_schema_response_format());
+    }
+
+    if is_siliconflow_profile(profile, base_url) {
+        return siliconflow_model_supports_json_mode(model)
+            .then(|| json!({ "type": "json_object" }));
     }
 
     if is_deepseek_profile(profile, base_url, model) {
@@ -86,6 +136,17 @@ pub(crate) fn openai_compatible_json_response_format(
     }
 
     None
+}
+
+pub(crate) fn apply_gemini_json_response_format(
+    payload: &mut serde_json::Value,
+    prefer_json_output: bool,
+) -> bool {
+    if !prefer_json_output {
+        return false;
+    }
+    payload["generationConfig"]["responseMimeType"] = json!("application/json");
+    true
 }
 
 pub(crate) fn load_review_profile_for_run(
@@ -203,7 +264,8 @@ async fn generate_text_once(
     let (system, user) = prepare_prompt_for_profile(profile, system, user);
     let input_chars = system.chars().count() + user.chars().count();
     let mut output = if profile.provider.to_lowercase().contains("gemini") {
-        super::gemini::generate_gemini(client, profile, api_key, &system, &user).await
+        super::gemini::generate_gemini(client, profile, api_key, &system, &user, prefer_json_output)
+            .await
     } else {
         super::openai::generate_openai_compatible(
             client,
@@ -370,23 +432,6 @@ pub(crate) fn is_deepseek_profile(profile: &ModelProfile, base_url: &str, model:
     let base = base_url.to_ascii_lowercase();
     let model = model.to_ascii_lowercase();
     provider.contains("deepseek") || base.contains("deepseek") || model.contains("deepseek")
-}
-
-pub(crate) fn is_kimi_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
-    let provider = profile.provider.to_ascii_lowercase();
-    let base = base_url.to_ascii_lowercase();
-    let model = model.to_ascii_lowercase();
-    provider.contains("kimi")
-        || provider.contains("moonshot")
-        || base.contains("moonshot")
-        || base.contains("kimi")
-        || model.contains("kimi")
-}
-
-pub(crate) fn is_siliconflow_profile(profile: &ModelProfile, base_url: &str) -> bool {
-    let provider = profile.provider.to_ascii_lowercase();
-    let base = base_url.to_ascii_lowercase();
-    provider.contains("siliconflow") || base.contains("siliconflow")
 }
 
 pub(crate) fn apply_openai_compatible_thinking_control(
@@ -598,6 +643,24 @@ mod tests {
     }
 
     #[test]
+    fn json_response_format_uses_schema_for_openai_and_kimi() {
+        for profile in [
+            profile("OpenAI 兼容", "https://api.openai.com/v1", "gpt-5"),
+            profile("OpenAI 兼容", "https://api.moonshot.cn/v1", "kimi-k2.6"),
+        ] {
+            let response_format =
+                openai_compatible_json_response_format(&profile, &profile.base_url, &profile.model)
+                    .expect("provider supports structured json output");
+
+            assert_eq!(response_format["type"], json!("json_schema"));
+            assert_eq!(
+                response_format["json_schema"]["schema"]["additionalProperties"],
+                json!(true)
+            );
+        }
+    }
+
+    #[test]
     fn json_response_format_keeps_deepseek_json_object() {
         let profile = profile("DeepSeek", "https://api.deepseek.com", "deepseek-v4-pro");
         let response_format =
@@ -605,6 +668,60 @@ mod tests {
                 .expect("deepseek json object response format");
 
         assert_eq!(response_format, json!({ "type": "json_object" }));
+    }
+
+    #[test]
+    fn json_response_format_uses_json_object_for_supported_siliconflow_models() {
+        let profile = profile(
+            "OpenAI 兼容",
+            "https://api.siliconflow.cn/v1",
+            "Qwen/Qwen3.5-122B-A10B",
+        );
+        let response_format =
+            openai_compatible_json_response_format(&profile, &profile.base_url, &profile.model)
+                .expect("siliconflow model supports json mode");
+
+        assert_eq!(response_format, json!({ "type": "json_object" }));
+    }
+
+    #[test]
+    fn json_response_format_skips_siliconflow_deepseek_r1_and_v3_base_models() {
+        for model in ["deepseek-ai/DeepSeek-R1", "deepseek-ai/DeepSeek-V3"] {
+            let profile = profile("OpenAI 兼容", "https://api.siliconflow.cn/v1", model);
+            assert!(openai_compatible_json_response_format(
+                &profile,
+                &profile.base_url,
+                &profile.model
+            )
+            .is_none());
+        }
+
+        let profile = profile(
+            "OpenAI 兼容",
+            "https://api.siliconflow.cn/v1",
+            "deepseek-ai/DeepSeek-V3.2",
+        );
+        assert!(openai_compatible_json_response_format(
+            &profile,
+            &profile.base_url,
+            &profile.model
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn gemini_json_response_format_is_applied_only_for_json_requests() {
+        let mut payload = json!({ "generationConfig": { "temperature": 0.7 } });
+        assert!(!apply_gemini_json_response_format(&mut payload, false));
+        assert!(payload["generationConfig"]
+            .get("responseMimeType")
+            .is_none());
+
+        assert!(apply_gemini_json_response_format(&mut payload, true));
+        assert_eq!(
+            payload["generationConfig"]["responseMimeType"],
+            json!("application/json")
+        );
     }
 
     #[test]

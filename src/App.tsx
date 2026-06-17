@@ -104,6 +104,22 @@ const modelSuggestionGroups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "volcengine",
+    baseTerms: ["volcengine", "volces", "ark.cn-"],
+    modelTerms: ["doubao-", "seed-"],
+    models: [
+      { label: "Doubao Seed 2.0 Pro", model: "doubao-seed-2-0-pro-260215" },
+      { label: "Doubao Seed 2.0 Lite", model: "doubao-seed-2-0-lite-260428" },
+      { label: "Doubao Seed 2.0 Mini", model: "doubao-seed-2-0-mini-260428" },
+      { label: "Doubao Seed 2.0 Code", model: "doubao-seed-2-0-code-preview-260215" },
+      { label: "Doubao 1.5 Pro 32K", model: "doubao-1-5-pro-32k-250115" },
+      { label: "Doubao 1.5 Pro 256K", model: "doubao-1-5-pro-256k-250115" },
+      { label: "Doubao 1.5 Lite 32K", model: "doubao-1-5-lite-32k-250115" },
+      { label: "Doubao 1.5 Thinking Pro", model: "doubao-1-5-thinking-pro-250415" },
+      { label: "Doubao 1.5 Vision Pro", model: "doubao-1-5-vision-pro-250328" }
+    ]
+  },
+  {
     id: "openai",
     baseTerms: ["api.openai.com", "openai.azure.com"],
     modelTerms: ["gpt-", "o3", "o4"],
@@ -162,18 +178,27 @@ const modelSuggestionGroups: ModelSuggestionGroup[] = [
   {
     id: "siliconflow",
     baseTerms: ["siliconflow"],
-    modelTerms: ["qwen/", "thudm/", "deepseek-ai/", "internlm/", "mistralai/"],
+    modelTerms: ["qwen/", "thudm/", "deepseek-ai/", "moonshotai/", "minimaxai/", "zai-org/", "bytedance-seed/", "internlm/", "mistralai/", "openai/"],
     models: [
-      { label: "Qwen2 72B Instruct", model: "Qwen/Qwen2-72B-Instruct" },
-      { label: "Qwen2 57B A14B Instruct", model: "Qwen/Qwen2-57B-A14B-Instruct" },
-      { label: "Qwen2 7B Instruct", model: "Qwen/Qwen2-7B-Instruct" },
-      { label: "Qwen2 1.5B Instruct", model: "Qwen/Qwen2-1.5B-Instruct" },
-      { label: "GLM-4 9B Chat", model: "THUDM/glm-4-9b-chat" },
-      { label: "ChatGLM3 6B", model: "THUDM/chatglm3-6b" },
-      { label: "DeepSeek Coder V2 Instruct", model: "deepseek-ai/DeepSeek-Coder-V2-Instruct" },
-      { label: "DeepSeek V2 Chat", model: "deepseek-ai/DeepSeek-V2-Chat" },
-      { label: "InternLM2.5 7B Chat", model: "internlm/internlm2_5-7b-chat" },
-      { label: "Mistral 7B Instruct v0.2", model: "mistralai/Mistral-7B-Instruct-v0.2" }
+      { label: "DeepSeek V3.2", model: "deepseek-ai/DeepSeek-V3.2" },
+      { label: "DeepSeek V3.2 Exp", model: "deepseek-ai/DeepSeek-V3.2-Exp" },
+      { label: "DeepSeek V3.1 Terminus", model: "deepseek-ai/DeepSeek-V3.1-Terminus" },
+      { label: "DeepSeek V3.1", model: "deepseek-ai/DeepSeek-V3.1" },
+      { label: "DeepSeek R1", model: "deepseek-ai/DeepSeek-R1" },
+      { label: "Qwen3.6 27B", model: "Qwen/Qwen3.6-27B" },
+      { label: "Qwen3.5 122B A10B", model: "Qwen/Qwen3.5-122B-A10B" },
+      { label: "Qwen3.5 35B A3B", model: "Qwen/Qwen3.5-35B-A3B" },
+      { label: "Qwen3.5 27B", model: "Qwen/Qwen3.5-27B" },
+      { label: "Qwen3 Coder 480B A35B", model: "Qwen/Qwen3-Coder-480B-A35B-Instruct" },
+      { label: "Qwen3 Coder 30B A3B", model: "Qwen/Qwen3-Coder-30B-A3B-Instruct" },
+      { label: "Kimi K2.6", model: "moonshotai/Kimi-K2.6" },
+      { label: "Kimi K2 Instruct 0905", model: "moonshotai/Kimi-K2-Instruct-0905" },
+      { label: "GLM-5.1", model: "zai-org/GLM-5.1" },
+      { label: "GLM-4.5 Air", model: "zai-org/GLM-4.5-Air" },
+      { label: "MiniMax M2.5", model: "MiniMaxAI/MiniMax-M2.5" },
+      { label: "MiniMax M2", model: "MiniMaxAI/MiniMax-M2" },
+      { label: "GPT OSS 120B", model: "openai/gpt-oss-120b" },
+      { label: "Seed OSS 36B Instruct", model: "ByteDance-Seed/Seed-OSS-36B-Instruct" }
     ]
   },
   {
@@ -248,6 +273,7 @@ export default function App() {
   const selectedBatchIdRef = useRef("");
   const selectedChapterIdRef = useRef("");
   const lastAutoExportedBatchRef = useRef(0);
+  const estimateRequestIdRef = useRef(0);
   const silentNovelRefreshInFlightRef = useRef(false);
   const busyRef = useRef("");
   const importInProgressRef = useRef(false);
@@ -269,6 +295,25 @@ export default function App() {
   );
   const pausedAutoRun = autoRunState === "paused";
   const adjustableWhilePaused = processingTaskActive && !pausedAutoRun;
+
+  const refreshJobEstimate = useCallback(async () => {
+    const novelId = detail?.novel.id;
+    const requestId = ++estimateRequestIdRef.current;
+    if (!novelId) {
+      setJobEstimate(null);
+      return;
+    }
+    try {
+      const estimate = await invoke("estimate_job_cost", {
+        novelId,
+        batchId: selectedBatchId || null,
+        profileId: selectedProfileId || null
+      });
+      if (estimateRequestIdRef.current === requestId) setJobEstimate(estimate);
+    } catch {
+      if (estimateRequestIdRef.current === requestId) setJobEstimate(null);
+    }
+  }, [detail?.novel.id, selectedBatchId, selectedProfileId]);
 
   useEffect(() => {
     void refreshAll();
@@ -372,6 +417,9 @@ export default function App() {
         setAutoRunState("idle");
         lastAutoExportedBatchRef.current = 0;
       }
+      if (["completed", "paused", "failed"].includes(progress.status)) {
+        void refreshJobEstimate();
+      }
   });
 
   useEffect(() => {
@@ -445,28 +493,8 @@ export default function App() {
   }, [selectedChapterId]);
 
   useEffect(() => {
-    let cancelled = false;
-    async function loadEstimate() {
-      if (!detail) {
-        setJobEstimate(null);
-        return;
-      }
-      try {
-        const estimate = await invoke("estimate_job_cost", {
-          novelId: detail.novel.id,
-          batchId: selectedBatchId || null,
-          profileId: selectedProfileId || null
-        });
-        if (!cancelled) setJobEstimate(estimate);
-      } catch {
-        if (!cancelled) setJobEstimate(null);
-      }
-    }
-    void loadEstimate();
-    return () => {
-      cancelled = true;
-    };
-  }, [detail?.novel.id, selectedBatchId, selectedProfileId, settings.review_enabled, settings.rewrite_parallelism]);
+    void refreshJobEstimate();
+  }, [refreshJobEstimate, settings.review_enabled, settings.rewrite_parallelism]);
 
   async function refreshAll() {
     const [novelRows, profileRows, appSettings] = await Promise.all([
