@@ -54,8 +54,8 @@ pub(crate) fn build_compact_canon_text(assets: &[CanonAsset]) -> String {
         return "无".to_string();
     }
 
-    let compacted = assets
-        .iter()
+    let compacted = sorted_canon_assets(assets)
+        .into_iter()
         .filter_map(|asset| {
             let content = compact_canon_asset_content(&asset.kind, &asset.content);
             if content.trim().is_empty() {
@@ -89,8 +89,8 @@ pub(crate) fn build_relevant_canon_text(
         }
     }
 
-    let selected = assets
-        .iter()
+    let selected = sorted_canon_assets(assets)
+        .into_iter()
         .filter_map(|asset| {
             let content = select_relevant_canon_content(asset, &keywords, settings);
             if content.trim().is_empty() {
@@ -107,6 +107,28 @@ pub(crate) fn build_relevant_canon_text(
     } else {
         selected
     }
+}
+
+fn sorted_canon_assets(assets: &[CanonAsset]) -> Vec<&CanonAsset> {
+    let mut sorted = assets.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| {
+        canon_asset_sort_key(&left.kind).cmp(&canon_asset_sort_key(&right.kind))
+    });
+    sorted
+}
+
+fn canon_asset_sort_key(kind: &str) -> (usize, &str) {
+    let rank = match kind {
+        "姓名映射表" => 0,
+        "AI分析汇总" => 1,
+        "人物卡" => 2,
+        "人物关系" => 3,
+        "地点" => 4,
+        "术语表" => 5,
+        "伏笔" => 6,
+        _ => 100,
+    };
+    (rank, kind)
 }
 
 pub(crate) fn build_relevant_canon_text_from_text(
@@ -609,13 +631,11 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
     core_prompt: &str,
     shard_context: &str,
 ) -> String {
-    let shard_context = if shard_context.trim().is_empty() {
-        "无".to_string()
-    } else {
-        shard_context.trim().to_string()
-    };
+    let shard_context = prompt_context_or_none(shard_context);
     format!(
         r#"{}
+
+{}
 
 {}
 
@@ -639,12 +659,10 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
 17. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
 18. 只输出当前输入章节的边界标记、改写后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
-{}
-
-并发分片上下文：
-{}
-
 一致性资产：
+{}
+
+处理范围约束：
 {}
 
 当前输入章节：
@@ -676,13 +694,11 @@ pub(crate) fn build_batch_review_prompt_with_context(
     settings: &NovelSettings,
     shard_context: &str,
 ) -> String {
-    let shard_context = if shard_context.trim().is_empty() {
-        "无".to_string()
-    } else {
-        shard_context.trim().to_string()
-    };
+    let shard_context = prompt_context_or_none(shard_context);
     format!(
         r#"请复检并自动修正以下批次改写稿。
+
+{}
 
 {}
 
@@ -708,9 +724,7 @@ pub(crate) fn build_batch_review_prompt_with_context(
 3. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
 4. 只输出当前输入章节的边界标记、修正后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
 
-{}
-
-并发分片上下文：
+处理范围约束：
 {}
 
 待复检改写稿：
@@ -776,11 +790,7 @@ pub(crate) fn build_batch_analysis_prompt_with_context(
         (Some(first), Some(last)) => (first.index, last.index),
         _ => (0, 0),
     };
-    let shard_context = if shard_context.trim().is_empty() {
-        "无".to_string()
-    } else {
-        shard_context.trim().to_string()
-    };
+    let shard_context = prompt_context_or_none(shard_context);
     format!(
         r#"请只基于原文分析以下整个批次，并输出一个合法 JSON 对象。
 
@@ -809,7 +819,7 @@ pub(crate) fn build_batch_analysis_prompt_with_context(
 6. JSON 字符串内部如果需要换行，必须写成 `\n`，不要在字符串里输出真实换行或其他控制字符。
 7. 只输出 JSON，不要解释、不要 Markdown。
 
-并发分片上下文：
+处理范围约束：
 {}
 
 当前输入章节：
@@ -820,6 +830,15 @@ pub(crate) fn build_batch_analysis_prompt_with_context(
         shard_context,
         build_batch_analysis_chapter_text(chapters)
     )
+}
+
+pub(crate) fn prompt_context_or_none(context: &str) -> String {
+    let context = context.trim();
+    if context.is_empty() {
+        "无".to_string()
+    } else {
+        context.to_string()
+    }
 }
 
 #[allow(dead_code)]

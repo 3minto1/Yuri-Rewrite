@@ -280,13 +280,12 @@ async fn retry_analysis_shard_after_parse_error(
     shard: &[Chapter],
     shard_context: &str,
     shard_label: &str,
-    parse_error: &str,
+    _parse_error: &str,
     bad_output: &str,
 ) -> Result<Vec<ParsedChapterAnalysis>, String> {
     let retry_context = format!(
-        "{}\n\n修复重试：上一次分析输出无法解析，错误：{}。请重新分析当前分片，只输出当前分片级一致性资产 JSON 对象。不要输出 Markdown、解释、空内容或 chapters 数组；JSON 字符串内换行必须写成 \\n。",
-        shard_context.trim(),
-        parse_error
+        "{}\n\n只输出当前输入级一致性资产 JSON 对象；不要输出 Markdown、解释、空内容或 chapters 数组；JSON 字符串内换行必须写成 \\n。",
+        shard_context.trim()
     );
     let base_prompt = build_batch_analysis_prompt_with_context(shard, retry_context.trim());
     let prompt = format!(
@@ -1122,10 +1121,7 @@ async fn recover_rewrite_shard_by_subdivision(
         }
 
         let batch_label = format_batch_label(&subshard);
-        let context = format!(
-            "{}\n\n自动细分重试：较大的改写分片无法稳定解析，当前只处理这个更小分片。必须完整输出当前分片内的全部章节，不要输出原大分片中的其他章节。",
-            format_shard_context(0, 1, 1, &batch_label, &subshard)
-        );
+        let context = format_shard_context(0, 1, 1, &batch_label, &subshard);
         let subshard_canon_text =
             build_relevant_canon_text_from_text(canon_text, &subshard, settings);
         let prompt = build_batch_rewrite_prompt_with_context(
@@ -1786,8 +1782,6 @@ fn build_batch_review_decision_prompt_with_context(
 
 请以“审查专家”身份判断改写稿是否合格。只列会导致打回的 blocking 问题，不直接改写正文。
 
-{}
-
 Blocking 清单：
 - 主角或指定性转角色在改写稿中仍有明确男性姓名、代词、身份、称谓、身体特征或社会角色残留。
 - 未指定性转的角色被误改性别、亲属关系、称谓或代词。
@@ -1835,7 +1829,9 @@ Blocking 清单：
 
 `chapter_indexes` 使用 marker 内部 index 定位，不代表标题章节编号。`scope` 只能是 `chapter` 或 `cross_chapter`；跨章连续性、边界、缺失、重复或串章问题使用 `cross_chapter`。兼容旧格式时可使用单个 `chapter_index`。所有 issues 的 severity 必须为 `blocking`；没有实际阻断问题时必须返回 approved=true 和空 issues。
 
-并发分片上下文：
+{}
+
+处理范围约束：
 {}
 
 原文章节：
@@ -3731,13 +3727,12 @@ async fn retry_revision_shard_after_parse_error(
     shard_context: &str,
     shard_label: &str,
     decision: &ReviewDecision,
-    parse_error: &str,
+    _parse_error: &str,
     bad_output: &str,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
     let retry_context = format!(
-        "{}\n\n审查打回格式修复重试：上一次完整重写输出无法解析，错误：{}。必须重新输出当前分片的全部章节，并完整保留每章开始和结束标记。",
-        shard_context.trim(),
-        parse_error
+        "{}\n\n必须重新输出当前分片的全部章节，并完整保留每章开始和结束标记。",
+        shard_context.trim()
     );
     let base_prompt = build_batch_revision_prompt_with_context(
         shard,
@@ -3874,10 +3869,7 @@ async fn recover_revision_shard_by_subdivision(
         }
 
         let batch_label = format_batch_label(&subshard);
-        let context = format!(
-            "{}\n\n审查打回自动细分：当前只重新处理这个更小分片。必须逐条修复审查问题，完整输出当前分片内全部章节，不要输出原大分片中的其他章节。",
-            format_shard_context(0, 1, 1, &batch_label, &subshard)
-        );
+        let context = format_shard_context(0, 1, 1, &batch_label, &subshard);
         let prompt = build_batch_revision_prompt_with_context(
             &subshard,
             &subrewrites,
@@ -4032,13 +4024,12 @@ async fn retry_rewrite_shard_after_parse_error(
     shard_context: &str,
     shard_label: &str,
     review_enabled: bool,
-    parse_error: &str,
+    _parse_error: &str,
     bad_output: &str,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
     let retry_context = format!(
-        "{}\n\n修复重试：上一次改写输出无法解析，错误：{}。请完全重新输出当前分片，只输出当前分片要求的章节。每章必须包含原样章节开始标记、改写后标题、非空正文和原样章节结束标记。正文不能留空，不能输出当前分片外章节。",
-        shard_context.trim(),
-        parse_error
+        "{}\n\n请完全重新输出当前分片，只输出当前分片要求的章节。每章必须包含原样章节开始标记、改写后标题、非空正文和原样章节结束标记。正文不能留空，不能输出当前分片外章节。",
+        shard_context.trim()
     );
     let base_prompt = build_batch_rewrite_prompt_with_context(
         shard,
@@ -4282,15 +4273,12 @@ fn format_shard_label(
 }
 
 fn format_shard_context(
-    shard_index: usize,
-    shard_total: usize,
-    rewrite_parallelism: usize,
-    batch_label: &str,
+    _shard_index: usize,
+    _shard_total: usize,
+    _rewrite_parallelism: usize,
+    _batch_label: &str,
     chapters: &[Chapter],
 ) -> String {
-    if shard_total <= 1 {
-        return "当前为不并发模式，本次输入就是完整选中批次。".to_string();
-    }
     let chapter_list = chapters
         .iter()
         .map(|chapter| format!("第{}章", chapter.index))
@@ -4302,13 +4290,8 @@ fn format_shard_context(
         _ => "空分片".to_string(),
     };
     format!(
-        "当前输入是 {} 拆分出的并发分片 {}/{}，本分片实际只包含 {}：{}。只能处理和输出这些章节，严禁输出本分片外的任何章节、标题、正文或章节边界标记。所有分片共享同一份小说设定、一致性资产、姓名女性化规则和章节边界规则。请严格遵循这些全局规则，保持姓名映射、称谓、文风、剧情承接和女性化设定一致；不要因为只看到当前分片就改变人物设定或重置关系进展。当前设置的并发请求数为 {}。",
-        batch_label,
-        shard_index + 1,
-        shard_total,
-        chapter_range,
-        chapter_list,
-        normalize_rewrite_parallelism(rewrite_parallelism)
+        "本次输入只包含{}：{}。只能处理和输出这些章节，严禁输出输入外的任何章节、标题、正文或章节边界标记。所有请求共享同一份小说设定、一致性资产、姓名女性化规则和章节边界规则；不得因为只看到当前输入就改变人物设定或重置关系进展。",
+        chapter_range, chapter_list
     )
 }
 
@@ -6587,10 +6570,11 @@ mod tests {
 
         let context = format_shard_context(8, 10, 10, "第1-30章", &chapters);
 
-        assert!(context.contains("分片 9/10"));
+        assert!(!context.contains("分片 9/10"));
+        assert!(!context.contains("并发请求数"));
         assert!(context.contains("第25-27章"));
         assert!(context.contains("第25章、第26章、第27章"));
-        assert!(context.contains("严禁输出本分片外的任何章节"));
+        assert!(context.contains("严禁输出输入外的任何章节"));
     }
 
     #[test]
@@ -6650,6 +6634,69 @@ mod tests {
         assert!(canon.contains("萧炎 -> 萧妍"));
         assert!(canon.contains("二人在青山镇同行"));
         assert!(!canon.contains("无关路人"));
+    }
+
+    #[test]
+    fn relevant_canon_output_uses_stable_asset_order() {
+        let settings = sample_novel_settings();
+        let chapter = sample_chapter(1, "第一章", "萧炎进入乌坦城。");
+        let assets = vec![
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "术语表".to_string(),
+                content: "斗气：修炼体系".to_string(),
+                updated_at: "now".to_string(),
+            },
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "姓名映射表".to_string(),
+                content: "萧炎 -> 萧妍".to_string(),
+                updated_at: "now".to_string(),
+            },
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "人物关系".to_string(),
+                content: "## 萧炎\n萧炎与萧薰儿关系密切。".to_string(),
+                updated_at: "now".to_string(),
+            },
+        ];
+
+        let canon = build_relevant_canon_text(&assets, &[chapter], &settings);
+
+        let mapping_pos = canon.find("## 姓名映射表").expect("mapping first");
+        let relation_pos = canon.find("## 人物关系").expect("relationship later");
+        assert!(mapping_pos < relation_pos);
+    }
+
+    #[test]
+    fn batch_prompts_keep_dynamic_scope_after_stable_rules() {
+        let settings = sample_novel_settings();
+        let chapters = vec![sample_chapter(1, "第一章", "萧炎走进大厅。")];
+        let scope = format_shard_context(3, 10, 10, "第1-30章", &chapters);
+        let prompt = build_batch_rewrite_prompt_with_context(
+            &chapters,
+            "## 姓名映射表\n萧炎 -> 萧妍",
+            &settings,
+            "核心规则",
+            &scope,
+        );
+
+        assert!(prompt.contains("处理范围约束："));
+        assert!(!prompt.contains("并发分片上下文"));
+        assert!(!prompt.contains("当前设置的并发请求数"));
+        assert!(!prompt.contains("分片 4/10"));
+        assert!(
+            prompt.find("改写要求").expect("stable rewrite rules")
+                < prompt.find("处理范围约束：").expect("dynamic scope")
+        );
+        assert!(
+            prompt.find("一致性资产：").expect("canon section")
+                < prompt.find("处理范围约束：").expect("scope section")
+        );
+        assert!(
+            prompt.find("处理范围约束：").expect("scope section")
+                < prompt.find("当前输入章节：").expect("chapter input")
+        );
     }
 
     #[test]
