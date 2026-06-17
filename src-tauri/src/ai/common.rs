@@ -66,6 +66,40 @@ pub(crate) fn is_siliconflow_profile(profile: &ModelProfile, base_url: &str) -> 
     provider.contains("siliconflow") || base.contains("siliconflow")
 }
 
+pub(crate) fn is_zhipu_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    provider.contains("zhipu")
+        || provider.contains("bigmodel")
+        || provider.contains("智谱")
+        || base.contains("bigmodel")
+        || base.contains("zhipu")
+        || base.contains("z.ai")
+        || model.starts_with("glm-")
+}
+
+pub(crate) fn is_minimax_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    provider.contains("minimax")
+        || base.contains("minimax")
+        || model.contains("minimax")
+        || model == "m2-her"
+        || model.starts_with("m2-")
+}
+
+pub(crate) fn is_claude_profile(profile: &ModelProfile, base_url: &str, model: &str) -> bool {
+    let provider = profile.provider.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    provider.contains("anthropic")
+        || provider.contains("claude")
+        || base.contains("anthropic")
+        || model.starts_with("claude-")
+}
+
 fn siliconflow_model_supports_json_mode(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     if model.contains("deepseek-r1") {
@@ -105,8 +139,21 @@ pub(crate) fn apply_openai_compatible_output_limit(
         return true;
     }
 
-    if is_mimo_profile(profile) || is_doubao_profile(profile, base_url, model) {
+    if is_mimo_profile(profile)
+        || is_doubao_profile(profile, base_url, model)
+        || is_openai_official_profile(profile, base_url)
+        || is_kimi_profile(profile, base_url, model)
+        || is_minimax_profile(profile, base_url, model)
+    {
         payload["max_completion_tokens"] = json!(output_limit);
+        return true;
+    }
+
+    if is_zhipu_profile(profile, base_url, model)
+        || is_siliconflow_profile(profile, base_url)
+        || is_claude_profile(profile, base_url, model)
+    {
+        payload["max_tokens"] = json!(output_limit);
         return true;
     }
 
@@ -129,6 +176,10 @@ pub(crate) fn openai_compatible_json_response_format(
     if is_siliconflow_profile(profile, base_url) {
         return siliconflow_model_supports_json_mode(model)
             .then(|| json!({ "type": "json_object" }));
+    }
+
+    if is_zhipu_profile(profile, base_url, model) {
+        return Some(json!({ "type": "json_object" }));
     }
 
     if is_deepseek_profile(profile, base_url, model) {
@@ -176,6 +227,11 @@ pub(crate) fn prepare_prompt_for_profile(
             sanitize_prompt_for_mimo(system),
             sanitize_prompt_for_mimo(user),
         )
+    } else if is_zhipu_profile(profile, &profile.base_url, &profile.model) {
+        (
+            sanitize_prompt_for_zhipu(system),
+            sanitize_prompt_for_zhipu(user),
+        )
     } else {
         (system.to_string(), user.to_string())
     }
@@ -190,6 +246,15 @@ pub(crate) fn sanitize_prompt_for_mimo(text: &str) -> String {
         ("平胸", "清瘦纤细"),
         ("萝莉", "娇小少女感"),
     ];
+    let mut sanitized = text.to_string();
+    for (from, to) in replacements {
+        sanitized = sanitized.replace(from, to);
+    }
+    sanitized
+}
+
+pub(crate) fn sanitize_prompt_for_zhipu(text: &str) -> String {
+    let replacements = [("身材：巨乳", "身材：丰满"), ("巨乳", "身材丰满")];
     let mut sanitized = text.to_string();
     for (from, to) in replacements {
         sanitized = sanitized.replace(from, to);
@@ -593,6 +658,54 @@ mod tests {
     }
 
     #[test]
+    fn output_limit_uses_completion_tokens_for_openai_kimi_and_minimax() {
+        for profile in [
+            profile("OpenAI", "https://api.openai.com/v1", "gpt-5"),
+            profile("OpenAI 兼容", "https://api.moonshot.cn/v1", "kimi-k2.6"),
+            profile("MiniMax", "https://api.minimax.io/v1", "MiniMax-M2.7"),
+        ] {
+            let mut payload = json!({});
+            assert!(apply_openai_compatible_output_limit(
+                &mut payload,
+                &profile,
+                &profile.base_url,
+                &profile.model,
+                false
+            ));
+            assert_eq!(payload["max_completion_tokens"], json!(65_536));
+            assert!(payload.get("max_tokens").is_none());
+        }
+    }
+
+    #[test]
+    fn output_limit_uses_max_tokens_for_zhipu_siliconflow_and_claude() {
+        for profile in [
+            profile("智谱", "https://open.bigmodel.cn/api/paas/v4", "glm-5.2"),
+            profile(
+                "OpenAI 兼容",
+                "https://api.siliconflow.cn/v1",
+                "Qwen/Qwen3.5-122B-A10B",
+            ),
+            profile(
+                "Claude",
+                "https://api.anthropic.com/v1",
+                "claude-sonnet-4-6",
+            ),
+        ] {
+            let mut payload = json!({});
+            assert!(apply_openai_compatible_output_limit(
+                &mut payload,
+                &profile,
+                &profile.base_url,
+                &profile.model,
+                false
+            ));
+            assert_eq!(payload["max_tokens"], json!(65_536));
+            assert!(payload.get("max_completion_tokens").is_none());
+        }
+    }
+
+    #[test]
     fn json_output_limit_is_smaller() {
         let profile = profile("DeepSeek", "https://api.deepseek.com", "deepseek-v4-pro");
         let mut payload = json!({});
@@ -671,6 +784,16 @@ mod tests {
     }
 
     #[test]
+    fn json_response_format_uses_json_object_for_zhipu() {
+        let profile = profile("智谱", "https://open.bigmodel.cn/api/paas/v4", "glm-5.2");
+        let response_format =
+            openai_compatible_json_response_format(&profile, &profile.base_url, &profile.model)
+                .expect("zhipu supports json object response format");
+
+        assert_eq!(response_format, json!({ "type": "json_object" }));
+    }
+
+    #[test]
     fn json_response_format_uses_json_object_for_supported_siliconflow_models() {
         let profile = profile(
             "OpenAI 兼容",
@@ -733,6 +856,19 @@ mod tests {
             &profile.model
         )
         .is_none());
+    }
+
+    #[test]
+    fn zhipu_prompt_sanitization_softens_sensitive_body_terms() {
+        let profile = profile("智谱", "https://open.bigmodel.cn/api/paas/v4", "glm-5.2");
+        let (system, user) = prepare_prompt_for_profile(
+            &profile,
+            "系统规则：巨乳设定需要自然处理",
+            "身材：巨乳\n请改写为百合文本",
+        );
+
+        assert_eq!(system, "系统规则：身材丰满设定需要自然处理");
+        assert_eq!(user, "身材：丰满\n请改写为百合文本");
     }
 
     #[test]

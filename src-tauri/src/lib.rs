@@ -41,6 +41,17 @@ const GITHUB_REPOSITORY_URL: &str = "https://github.com/3minto1/Yuri-Rewrite";
 const GITHUB_LATEST_RELEASE_URL: &str = "https://github.com/3minto1/Yuri-Rewrite/releases/latest";
 const AUTO_RUN_PAUSED: &str = "__YURI_AUTO_RUN_PAUSED__";
 const AUTO_RUN_TERMINATED: &str = "__YURI_AUTO_RUN_TERMINATED__";
+const SYSTEM_ANALYSIS_EXPERT: &str = "你是严谨的中文长篇小说结构分析专家，擅长从原文中提取事实、人物、关系、地点、术语和性别线索。工作方式必须精确、克制、基于证据；只输出合法 JSON，不输出 Markdown 或解释。";
+const SYSTEM_ANALYSIS_JSON_REPAIR: &str = "你是中文小说分析 JSON 格式修复专家，只负责把输入修复为合法 JSON 对象，不新增事实、不改写正文、不输出 Markdown 或解释。";
+const SYSTEM_NAME_MAPPING_EXPERT: &str = "你是中文小说姓名女性化映射专家，擅长在保留姓氏、读音和人物辨识度的前提下生成稳定姓名映射。必须只输出合法 JSON，不输出 Markdown 或解释。";
+const SYSTEM_REWRITE_EXPERT: &str = "你是资深中文长篇小说改写专家，擅长在保持原文主线、人物逻辑和章节边界的前提下，将男女性别叙事自然改写为双女主百合文本。工作方式：先遵守输入中的规则、设定和一致性资产，再处理当前章节正文。输出必须只包含当前输入章节的 marker、标题和正文，不解释、不输出输入外章节。";
+const SYSTEM_REWRITE_FORMAT_REPAIR: &str = "你是中文小说改写格式修复专家，擅长修复章节边界、缺失 marker、空正文和截断式输出问题。必须重新输出当前输入章节的完整百合改写结果，逐字保留章节 marker，只输出 marker、标题和非空正文，不解释。";
+const SYSTEM_REVIEW_DECISION_EXPERT: &str = "你是严谨的中文小说改写审查专家，擅长依据规则核对姓名、性别、逻辑、一致性和章节边界。只判断会导致打回的 blocking 问题，不做润色，不直接改写正文。必须只输出合法 JSON。";
+const SYSTEM_REVIEW_FINAL_EXPERT: &str = "你是中文小说改写终审专家，擅长复判打回重写后的稿件是否已解决 blocking 问题。只输出合法 JSON，不解释，不补充非阻断建议。";
+const SYSTEM_REVIEW_JSON_REPAIR: &str = "你是 JSON 格式修复专家，只负责把审查决策修复为合法 JSON，不重新审查正文，不新增或删除问题，不输出解释。";
+const SYSTEM_TARGETED_REVISION_EXPERT: &str = "你是中文小说定向修复专家，擅长只修复指定章节中的 blocking 问题，同时保持未指定章节和只读上下文不变。只输出目标章节，逐字保留目标章节 marker，不输出相邻只读章节。";
+const SYSTEM_REVIEW_REVISION_EXPERT: &str = "你是中文小说审查打回重写专家，擅长根据审查问题清单重写当前分片，同时保持原文主线、姓名映射、人物性别和章节边界稳定。必须严格保留章节 marker，只输出当前输入章节。";
+const SYSTEM_REVIEW_REVISION_REPAIR: &str = "你是中文小说审查打回重写格式修复专家，擅长在不改变修复目标的前提下补全 marker、标题和正文。必须按审查问题重新输出当前分片完整改写稿，逐字保留全部章节开始和结束标记，不解释。";
 
 pub fn run() {
     tauri::Builder::default()
@@ -184,7 +195,7 @@ async fn analyze_batch_with_parallelism(
                 Some(rate_limiter),
                 &profile_for_task,
                 &api_key,
-                "你是严谨的中文长篇小说结构分析助手。必须输出合法 JSON，不要输出 Markdown。",
+                SYSTEM_ANALYSIS_EXPERT,
                 &prompt,
                 true,
             )
@@ -298,7 +309,7 @@ async fn retry_analysis_shard_after_parse_error(
         Some(state.rate_limits.clone()),
         profile,
         api_key,
-        "你是严谨的中文长篇小说结构分析格式修复助手。必须只输出一个合法 JSON 对象，不要输出 Markdown、解释或空内容。",
+        SYSTEM_ANALYSIS_JSON_REPAIR,
         &prompt,
         true,
     )
@@ -513,7 +524,7 @@ async fn generate_name_mapping_entries(
         Some(state.rate_limits.clone()),
         profile,
         api_key,
-        "你是中文小说姓名女性化映射助手。必须只输出合法 JSON，不要输出 Markdown 或解释。",
+        SYSTEM_NAME_MAPPING_EXPERT,
         &prompt,
         true,
     )
@@ -989,7 +1000,7 @@ async fn generate_single_rewrite_shard(
         Some(state.rate_limits.clone()),
         profile,
         api_key,
-        "你是中文小说改写助手，任务是把男女性别叙事自然改写为双女主百合文本。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和正文，不要输出输入外章节。",
+        SYSTEM_REWRITE_EXPERT,
         &prompt,
         false,
     )
@@ -1136,7 +1147,7 @@ async fn recover_rewrite_shard_by_subdivision(
             Some(state.rate_limits.clone()),
             profile,
             api_key,
-            "你是中文小说改写助手。当前是失败分片的自动细分重写，只输出当前输入章节的边界标记、标题和正文；每章必须保留原样章节开始和结束标记。",
+            SYSTEM_REWRITE_FORMAT_REPAIR,
             &prompt,
             false,
         )
@@ -1364,7 +1375,7 @@ async fn review_rewrite_shard_strict(
         shard_context,
         shard_label,
         "批次审查决策",
-        "你是中文小说改写审查专家。只负责判断改写稿是否合格，并列出必须打回的问题；不要直接改写正文。必须输出合法 JSON。",
+        SYSTEM_REVIEW_DECISION_EXPERT,
     )
     .await?;
     if first_decision.approved {
@@ -1558,7 +1569,7 @@ async fn review_shard_decision(
                         Some(state.rate_limits.clone()),
                         profile,
                         api_key,
-                        "你是 JSON 格式修复助手。只负责把输入修复为合法 JSON，不重新审查正文，不输出解释。",
+                        SYSTEM_REVIEW_JSON_REPAIR,
                         &repair_prompt,
                         true,
                     )
@@ -3393,7 +3404,7 @@ async fn revise_rewrite_shard_after_review(
         Some(state.rate_limits.clone()),
         profile,
         api_key,
-        "你是中文小说定向修复专家。只输出明确要求修复的目标章节，逐字保留目标章节 marker，不得输出相邻只读章节。",
+        SYSTEM_TARGETED_REVISION_EXPERT,
         &prompt,
         false,
     )
@@ -3486,7 +3497,7 @@ async fn revise_full_rewrite_shard_after_review(
         Some(state.rate_limits.clone()),
         profile,
         api_key,
-        "你是中文小说改写专家。审查专家已打回上一版改写稿，你必须按问题清单重新改写当前分片，并严格保留章节边界标记。",
+        SYSTEM_REVIEW_REVISION_EXPERT,
         &prompt,
         false,
     )
@@ -3602,7 +3613,7 @@ async fn review_revised_shard(
         shard_context,
         shard_label,
         "批次审查复判",
-        "你是中文小说改写终审专家。请复判打回重写后的稿件是否已经合格，只输出合法 JSON。",
+        SYSTEM_REVIEW_FINAL_EXPERT,
     )
     .await
 }
@@ -3753,7 +3764,7 @@ async fn retry_revision_shard_after_parse_error(
         Some(state.rate_limits.clone()),
         profile,
         api_key,
-        "你是中文小说审查打回重写格式修复助手。必须按审查问题重新输出当前分片的完整改写稿，逐字保留全部章节开始和结束标记，不要解释。",
+        SYSTEM_REVIEW_REVISION_REPAIR,
         &prompt,
         false,
     )
@@ -3884,7 +3895,7 @@ async fn recover_revision_shard_by_subdivision(
             Some(state.rate_limits.clone()),
             profile,
             api_key,
-            "你是中文小说改写专家。当前是审查打回稿的自动细分重写，只输出当前输入章节的完整边界标记、标题和正文，不要解释。",
+            SYSTEM_REVIEW_REVISION_EXPERT,
             &prompt,
             false,
         )
@@ -4048,7 +4059,7 @@ async fn retry_rewrite_shard_after_parse_error(
         Some(state.rate_limits.clone()),
         profile,
         api_key,
-        "你是中文小说改写格式修复助手。必须重新输出当前分片的完整百合改写结果。必须逐字保留输入中的章节边界标记，只输出当前输入章节的边界标记、标题和非空正文，不要输出输入外章节。",
+        SYSTEM_REWRITE_FORMAT_REPAIR,
         &prompt,
         false,
     )
@@ -4341,7 +4352,7 @@ async fn start_rewrite_legacy(
             Some(state.rate_limits.clone()),
             &profile,
             &api_key,
-            "你是中文小说改写助手，任务是把男女主文本改写为自然的双女主百合文本。只输出改写后的标题和正文。",
+            SYSTEM_REWRITE_EXPERT,
             &prompt,
             false,
         )

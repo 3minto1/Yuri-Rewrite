@@ -138,6 +138,23 @@ const modelSuggestionGroups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "zhipu",
+    baseTerms: ["bigmodel", "zhipu", "z.ai", "智谱"],
+    modelTerms: ["glm-"],
+    models: [
+      { label: "GLM-5.2", model: "glm-5.2" },
+      { label: "GLM-5.1", model: "glm-5.1" },
+      { label: "GLM-5", model: "glm-5" },
+      { label: "GLM-5 Turbo", model: "glm-5-turbo" },
+      { label: "GLM-4.7", model: "glm-4.7" },
+      { label: "GLM-4.6", model: "glm-4.6" },
+      { label: "GLM-4.5", model: "glm-4.5" },
+      { label: "GLM-4.5 Air", model: "glm-4.5-air" },
+      { label: "GLM-4 Plus", model: "glm-4-plus" },
+      { label: "GLM-4 Flash", model: "glm-4-flash" }
+    ]
+  },
+  {
     id: "kimi",
     baseTerms: ["moonshot", "kimi"],
     modelTerms: ["moonshot", "kimi"],
@@ -1589,6 +1606,16 @@ export default function App() {
                 </div>
               )}
             </div>
+            {["completed", "failed", "paused", "terminated"].includes(job.status) && (
+              <button
+                className="icon-button job-strip-close"
+                type="button"
+                aria-label="关闭任务提示"
+                onClick={() => setJob(null)}
+              >
+                <X size={15} />
+              </button>
+            )}
           </div>
         )}
 

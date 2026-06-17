@@ -486,6 +486,7 @@ pre {
   border: 1px solid #bad5c6;
   border-radius: 7px;
   color: #244331;
+  position: relative;
 }
 
 .job-content {
@@ -539,6 +540,20 @@ pre {
 
 .job-strip.failed .job-progress-fill {
   background: #c54f45;
+}
+
+.job-strip-close {
+  align-self: flex-start;
+  color: inherit;
+  flex: 0 0 auto;
+  height: 26px;
+  min-width: 26px;
+  opacity: 0.72;
+  padding: 4px;
+}
+
+.job-strip-close:hover {
+  opacity: 1;
 }
 
 .content-grid {
