@@ -301,6 +301,18 @@ pub(crate) fn is_recoverable_network_error(message: &str) -> bool {
         || trimmed.contains("连接失败")
 }
 
+pub(crate) fn is_recoverable_model_format_error(message: &str) -> bool {
+    [
+        "分析输出格式多次修复后仍无法解析",
+        "分析输出格式修复重试调用失败",
+        "审查决策无法解析",
+        "格式修复重试后仍失败",
+        "格式修复重试调用失败",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
 pub(crate) fn openai_content_filter_error(
     value: &serde_json::Value,
     model: &str,
@@ -604,5 +616,25 @@ mod tests {
             &profile.model
         )
         .is_none());
+    }
+
+    #[test]
+    fn model_format_errors_are_recoverable_for_auto_run() {
+        assert!(is_recoverable_model_format_error(
+            "分析输出格式多次修复后仍无法解析：control character"
+        ));
+        assert!(is_recoverable_model_format_error(
+            "分析输出格式修复重试调用失败：HTTP 500"
+        ));
+        assert!(is_recoverable_model_format_error(
+            "第1-30章：审查决策无法解析：expected value；格式修复重试后仍失败：expected `,`"
+        ));
+        assert!(is_recoverable_model_format_error(
+            "第1-30章：审查决策无法解析：expected value；格式修复重试调用失败：timeout"
+        ));
+        assert!(!is_recoverable_model_format_error(
+            "AI 输出缺少章节结束标记"
+        ));
+        assert!(!is_recoverable_model_format_error("HTTP 401: unauthorized"));
     }
 }

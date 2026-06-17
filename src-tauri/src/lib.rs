@@ -139,7 +139,10 @@ async fn analyze_chapters_for_auto(
     )
     .await
     .inspect_err(|error| {
-        if error != AUTO_RUN_PAUSED && error != AUTO_RUN_TERMINATED {
+        if error != AUTO_RUN_PAUSED
+            && error != AUTO_RUN_TERMINATED
+            && !is_recoverable_model_format_error(error)
+        {
             let _ = mark_chapters_analysis_failed(state, chapters);
         }
     })?;
@@ -330,7 +333,7 @@ async fn retry_analysis_shard_after_parse_error(
                         Some(&output.raw_response),
                     )?;
                     Err(format!(
-                        "分析输出解析失败后已自动重试，但重试输出仍无法解析：{}",
+                        "分析输出格式多次修复后仍无法解析：{}。任务可以暂停后手动继续，从当前批次重新尝试；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
                         error
                     ))
                 }
@@ -348,7 +351,10 @@ async fn retry_analysis_shard_after_parse_error(
                 None,
                 None,
             )?;
-            Err(format!("分析输出解析失败后自动重试也失败：{}", error))
+            Err(format!(
+                "分析输出格式修复重试调用失败：{}。任务可以暂停后手动继续，从当前批次重新尝试；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
+                error
+            ))
         }
     }
 }
@@ -819,7 +825,10 @@ async fn rewrite_chapters_for_auto(
     )
     .await
     .inspect_err(|error| {
-        if error != AUTO_RUN_PAUSED && error != AUTO_RUN_TERMINATED {
+        if error != AUTO_RUN_PAUSED
+            && error != AUTO_RUN_TERMINATED
+            && !is_recoverable_model_format_error(error)
+        {
             let _ = mark_chapters_rewrite_failed(state, &chapters);
         }
     })?;
@@ -1521,47 +1530,16 @@ async fn review_shard_decision(
                 Some(&output.raw_response),
             )?;
             match parse_review_decision_output(&output.text, settings) {
-                Ok(decision) => {
-                    let (decision, filtered_issues) =
-                        filter_review_decision_against_rewrites(decision, rewrites, settings);
-                    let (decision, deterministic_issues) =
-                        merge_deterministic_protagonist_residue_issues(
-                            decision, shard, rewrites, settings,
-                        );
-                    if !filtered_issues.is_empty() {
-                        append_ai_log(
-                            state,
-                            Some(novel_id),
-                            &profile.id,
-                            "批次审查误判过滤",
-                            Some(shard_label),
-                            "warning",
-                            &format!(
-                                "以下问题声称当前改写稿仍含男性残留，但程序在对应改写章节中未找到被引用的残留证据，已忽略：\n{}",
-                                review_issues_text(&filtered_issues)
-                            ),
-                            None,
-                            None,
-                        )?;
-                    }
-                    if !deterministic_issues.is_empty() {
-                        append_ai_log(
-                            state,
-                            Some(novel_id),
-                            &profile.id,
-                            "本地主角残留扫描",
-                            Some(shard_label),
-                            "warning",
-                            &format!(
-                                "本地扫描发现改写稿仍包含主角原名或派生称呼残留，将作为 blocking 问题进入修复流程：\n{}",
-                                review_issues_text(&deterministic_issues)
-                            ),
-                            None,
-                            None,
-                        )?;
-                    }
-                    Ok(decision)
-                }
+                Ok(decision) => finalize_review_decision(
+                    state,
+                    novel_id,
+                    &profile.id,
+                    shard_label,
+                    decision,
+                    shard,
+                    rewrites,
+                    settings,
+                ),
                 Err(error) => {
                     append_ai_log(
                         state,
@@ -1569,12 +1547,93 @@ async fn review_shard_decision(
                         &profile.id,
                         &format!("{}解析", log_action),
                         Some(shard_label),
-                        "error",
-                        &error,
+                        "warning",
+                        &format!(
+                            "审查决策 JSON 解析失败，开始格式修复重试：{}\n\n原始输出：\n{}",
+                            error, output.text
+                        ),
                         output.reasoning.as_deref(),
                         Some(&output.raw_response),
                     )?;
-                    Err(review_decision_parse_error_message(shard_label, &error))
+                    let repair_prompt =
+                        build_review_decision_json_repair_prompt(&output.text, &error, settings);
+                    let repair_output = generate_text(
+                        &state.client,
+                        Some(state.rate_limits.clone()),
+                        profile,
+                        api_key,
+                        "你是 JSON 格式修复助手。只负责把输入修复为合法 JSON，不重新审查正文，不输出解释。",
+                        &repair_prompt,
+                        true,
+                    )
+                    .await;
+                    match repair_output {
+                        Ok(repair_output) => {
+                            append_ai_log(
+                                state,
+                                Some(novel_id),
+                                &profile.id,
+                                "审查决策格式修复",
+                                Some(shard_label),
+                                "success",
+                                &format_model_log_content(&repair_output, profile, Some(true)),
+                                repair_output.reasoning.as_deref(),
+                                Some(&repair_output.raw_response),
+                            )?;
+                            match parse_review_decision_output(&repair_output.text, settings) {
+                                Ok(decision) => finalize_review_decision(
+                                    state,
+                                    novel_id,
+                                    &profile.id,
+                                    shard_label,
+                                    decision,
+                                    shard,
+                                    rewrites,
+                                    settings,
+                                ),
+                                Err(repair_error) => {
+                                    append_ai_log(
+                                        state,
+                                        Some(novel_id),
+                                        &profile.id,
+                                        "审查决策格式修复解析",
+                                        Some(shard_label),
+                                        "error",
+                                        &format!(
+                                            "格式修复重试后仍无法解析：{}\n\n修复输出：\n{}",
+                                            repair_error, repair_output.text
+                                        ),
+                                        repair_output.reasoning.as_deref(),
+                                        Some(&repair_output.raw_response),
+                                    )?;
+                                    Err(review_decision_parse_error_message(
+                                        shard_label,
+                                        &format!(
+                                            "{}；格式修复重试后仍失败：{}",
+                                            error, repair_error
+                                        ),
+                                    ))
+                                }
+                            }
+                        }
+                        Err(repair_error) => {
+                            append_ai_log(
+                                state,
+                                Some(novel_id),
+                                &profile.id,
+                                "审查决策格式修复",
+                                Some(shard_label),
+                                "error",
+                                &repair_error,
+                                None,
+                                None,
+                            )?;
+                            Err(review_decision_parse_error_message(
+                                shard_label,
+                                &format!("{}；格式修复重试调用失败：{}", error, repair_error),
+                            ))
+                        }
+                    }
                 }
             }
         }
@@ -1595,10 +1654,113 @@ async fn review_shard_decision(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finalize_review_decision(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    profile_id: &str,
+    shard_label: &str,
+    decision: ReviewDecision,
+    shard: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> Result<ReviewDecision, String> {
+    let (decision, filtered_issues) =
+        filter_review_decision_against_rewrites(decision, rewrites, settings);
+    let (decision, deterministic_issues) =
+        merge_deterministic_protagonist_residue_issues(decision, shard, rewrites, settings);
+    if !filtered_issues.is_empty() {
+        append_ai_log(
+            state,
+            Some(novel_id),
+            profile_id,
+            "批次审查误判过滤",
+            Some(shard_label),
+            "warning",
+            &format!(
+                "以下问题声称当前改写稿仍含男性残留，但程序在对应改写章节中未找到被引用的残留证据，已忽略：\n{}",
+                review_issues_text(&filtered_issues)
+            ),
+            None,
+            None,
+        )?;
+    }
+    if !deterministic_issues.is_empty() {
+        append_ai_log(
+            state,
+            Some(novel_id),
+            profile_id,
+            "本地主角残留扫描",
+            Some(shard_label),
+            "warning",
+            &format!(
+                "本地扫描发现改写稿仍包含主角原名或派生称呼残留，将作为 blocking 问题进入修复流程：\n{}",
+                review_issues_text(&deterministic_issues)
+            ),
+            None,
+            None,
+        )?;
+    }
+    Ok(decision)
+}
+
 fn review_decision_parse_error_message(shard_label: &str, error: &str) -> String {
     format!(
         "{}：审查决策无法解析：{}。可以手动重试当前任务；如果频繁出现，请为复检选择 JSON 输出更稳定的模型，或降低并发后再试。",
         shard_label, error
+    )
+}
+
+fn build_review_decision_json_repair_prompt(
+    invalid_output: &str,
+    parse_error: &str,
+    settings: &NovelSettings,
+) -> String {
+    format!(
+        r#"上一次审查决策输出不是合法 JSON，解析错误：{}
+
+请只修复 JSON 格式，不要重新审查正文，不要新增或删除审查问题，不要改变 approved / summary / issues 的语义。
+如果原输出中有中文引号、未转义英文引号、真实换行、尾逗号或 Markdown 包裹，请修复为合法 JSON。
+
+必须输出一个 JSON 对象，格式如下：
+{{
+  "approved": false,
+  "summary": "一句话总体判断",
+  "issues": [
+    {{
+      "chapter_indexes": [1],
+      "scope": "chapter",
+      "category": "gender_residue",
+      "severity": "blocking",
+      "problem": "具体问题",
+      "required_fix": "必须如何修改"
+    }}
+  ]
+}}
+
+如果原输出语义是完全合格，则输出：
+{{
+  "approved": true,
+  "summary": "合格",
+  "issues": []
+}}
+
+字段要求：
+- approved 必须是布尔值。
+- issues 必须是数组。
+- issue.severity 必须是 "blocking"。
+- chapter_indexes 使用 marker index；如果原输出只有 chapter_index，请转为 chapter_indexes 数组。
+- 主角原名：{}
+- 主角改写名：{}
+
+只输出修复后的 JSON，不要 Markdown，不要解释。
+
+待修复原输出：
+{}"#,
+        parse_error,
+        settings.protagonist_name.trim(),
+        settings.rewritten_protagonist_name.trim(),
+        truncate_text(invalid_output, 12_000)
     )
 }
 
@@ -1617,7 +1779,12 @@ fn build_batch_review_decision_prompt_with_context(
     };
     let review_constraints = build_compact_review_constraints(settings, core_prompt, canon_text);
     format!(
-        r#"请以“审查专家”身份判断改写稿是否合格。只列会导致打回的 blocking 问题，不直接改写正文。
+        r#"【JSON 输出硬性格式】
+- 必须只输出一个合法 JSON 对象，不要 Markdown，不要解释，不要代码块，不要前后缀。
+- JSON 字符串内的换行必须写成 \n，英文双引号必须写成 \"，不得输出未转义控制字符。
+- 必须报告所有 blocking 问题，不得因为字段长度限制而省略问题。
+
+请以“审查专家”身份判断改写稿是否合格。只列会导致打回的 blocking 问题，不直接改写正文。
 
 {}
 
@@ -1635,6 +1802,13 @@ Blocking 清单：
 - “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性昵称本身不是男性残留。只有同处证据明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代且确实指向主角，才是 blocking。
 - 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，改写稿保留原文人称代词和称谓不是问题。
 - 不要输出通过项、优点、确认事项、建议性润色或“无需修改”的内容。
+
+问题字段长度：
+- 不限制 issues 数量；同一章存在多个不同 blocking 问题时必须分别列出。
+- 同一章同类问题重复出现时可以合并为一条，但 problem 必须包含最关键的当前改写稿短引用。
+- summary 最多 80 字。
+- problem 最多 120 字，只写当前改写稿中的短证据和为什么 blocking。
+- required_fix 最多 120 字，只写必须如何修复。
 
 只输出合法 JSON，不要 Markdown，不要解释。格式：
 {{
@@ -1668,7 +1842,9 @@ Blocking 清单：
 {}
 
 待审查改写稿：
-{}"#,
+{}
+
+再次确认：只输出合法 JSON 对象；不要 Markdown、解释或代码块；字符串内换行写成 \n，英文双引号写成 \"；不得因字段长度限制漏报 blocking 问题。"#,
         review_constraints,
         shard_context,
         build_batch_chapter_text(chapters, false),
@@ -5089,6 +5265,32 @@ fn pause_auto_run_after_network_error(
     load_job(state, &job.id)
 }
 
+fn pause_auto_run_after_model_format_error(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    start_batch_index: i64,
+    error: &str,
+) -> Result<Job, String> {
+    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
+    let message = format!(
+        "模型输出格式多次修复后仍无法解析，任务已暂停。可以点击继续从第 {} 批重新开始；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。\n\n{}",
+        completed_batches + 1,
+        error
+    );
+    update_job(state, &job.id, "paused", completed_in_range, &message)?;
+    emit_job_progress(app, &job, "paused", completed_in_range, &message);
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    if let Some(control) = runs.get_mut(&job.novel_id) {
+        control.status = "paused".to_string();
+        control.completed_batches = completed_batches;
+        control.job_id = Some(job.id.clone());
+    }
+    drop(runs);
+    load_job(state, &job.id)
+}
+
 fn clear_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
     let mut runs = state.auto_runs.lock().map_err(to_string)?;
     runs.remove(novel_id);
@@ -6710,6 +6912,10 @@ mod tests {
         assert!(decision_prompt.contains("保留原文人称代词和称谓"));
         assert!(decision_prompt.contains("仅与主角原名共享单字的未指定 NPC"));
         assert!(decision_prompt.contains("同名/旧名/以旧名某字为名"));
+        assert!(decision_prompt.contains("JSON 输出硬性格式"));
+        assert!(decision_prompt.contains("不得因为字段长度限制而省略问题"));
+        assert!(decision_prompt.contains("problem 最多 120 字"));
+        assert!(decision_prompt.contains("再次确认：只输出合法 JSON 对象"));
     }
 
     #[test]
@@ -6842,6 +7048,29 @@ mod tests {
         assert!(message.contains("审查决策无法解析"));
         assert!(message.contains("可以手动重试当前任务"));
         assert!(message.contains("JSON 输出更稳定的模型"));
+    }
+
+    #[test]
+    fn review_decision_json_repair_prompt_preserves_original_semantics() {
+        let invalid_output = r#"{
+  "approved": false,
+  "issues": [
+    {"chapter_indexes":[1891],"problem":"改写稿中出现了 "少年" 称谓","required_fix":"改为少女"}
+  ]
+}"#;
+
+        let prompt = build_review_decision_json_repair_prompt(
+            invalid_output,
+            "expected `,` or `}` at line 3 column 80",
+            &sample_novel_settings(),
+        );
+
+        assert!(prompt.contains("只修复 JSON 格式"));
+        assert!(prompt.contains("不要重新审查正文"));
+        assert!(prompt.contains("不要新增或删除审查问题"));
+        assert!(prompt.contains("\"chapter_indexes\": [1]"));
+        assert!(prompt.contains("expected `,` or `}`"));
+        assert!(prompt.contains("改写稿中出现了 \"少年\" 称谓"));
     }
 
     #[test]
