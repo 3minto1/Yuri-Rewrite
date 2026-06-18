@@ -428,6 +428,16 @@ pub(crate) fn is_recoverable_network_error(message: &str) -> bool {
         || trimmed.contains("连接失败")
 }
 
+pub(crate) fn is_temporary_gateway_error(message: &str) -> bool {
+    let lower = message.trim().to_ascii_lowercase();
+    [502, 503, 504, 524].iter().any(|status| {
+        lower.contains(&format!("http {status}"))
+            || lower.contains(&format!("status code {status}"))
+            || lower.contains(&format!("error code: {status}"))
+            || lower.contains(&format!("error code {status}"))
+    })
+}
+
 pub(crate) fn is_recoverable_model_format_error(message: &str) -> bool {
     [
         "分析输出格式多次修复后仍无法解析",
@@ -889,5 +899,21 @@ mod tests {
             "AI 输出缺少章节结束标记"
         ));
         assert!(!is_recoverable_model_format_error("HTTP 401: unauthorized"));
+    }
+
+    #[test]
+    fn temporary_gateway_errors_cover_proxy_and_provider_formats() {
+        for message in [
+            "HTTP 502: bad gateway",
+            "HTTP 503: service unavailable",
+            "格式修复调用失败：HTTP 504: gateway timeout",
+            "HTTP 524: error code: 524",
+            "provider status code 503",
+        ] {
+            assert!(is_temporary_gateway_error(message), "{message}");
+        }
+        assert!(!is_temporary_gateway_error("HTTP 500: internal error"));
+        assert!(!is_temporary_gateway_error("HTTP 429: rate limit"));
+        assert!(!is_temporary_gateway_error("HTTP 401: unauthorized"));
     }
 }

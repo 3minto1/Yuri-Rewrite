@@ -5589,6 +5589,34 @@ fn pause_auto_run_after_network_error(
     load_job(state, &job.id)
 }
 
+fn pause_auto_run_after_temporary_gateway_error(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    start_batch_index: i64,
+    error: &str,
+) -> Result<Job, String> {
+    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
+    let message = format!(
+        "模型服务或反向代理暂时不可用，任务已暂停。可以调整并发或模型后点击继续；继续后将从第 {} 批重新开始。\n\n{}",
+        completed_batches + 1,
+        error
+    );
+    update_job(state, &job.id, "paused", completed_in_range, &message)?;
+    emit_job_progress(app, &job, "paused", completed_in_range, &message);
+    let mut runs = state.auto_runs.lock().map_err(to_string)?;
+    if let Some(control) = runs.get_mut(&job.novel_id) {
+        control.status = "paused".to_string();
+        control.completed_batches = completed_batches;
+        control.job_id = Some(job.id.clone());
+        let control = control.clone();
+        drop(runs);
+        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
+    }
+    load_job(state, &job.id)
+}
+
 fn pause_auto_run_after_model_format_error(
     state: &State<'_, AppState>,
     app: &AppHandle,

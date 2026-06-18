@@ -156,7 +156,7 @@ fn deterministic_jitter_seconds(scope: &RateLimitScope, attempt: usize) -> u64 {
 
 fn normalize_parallelism_for_runtime(value: usize) -> usize {
     match value {
-        1 | 3 | 6 | 10 => value,
+        1 | 3 | 6 | 10 | 25 | 50 => value,
         _ => 6,
     }
 }
@@ -172,6 +172,15 @@ pub(crate) fn apply_temporary_parallelism_drop(
         normalize_parallelism_for_runtime(configured),
         consecutive_limits,
     ) {
+        (50, 1) => 25,
+        (50, 2) => 10,
+        (50, 3) => 6,
+        (50, 4) => 3,
+        (50, _) => 1,
+        (25, 1) => 10,
+        (25, 2) => 6,
+        (25, 3) => 3,
+        (25, _) => 1,
         (10, 1) => 6,
         (10, 2) => 3,
         (10, _) => 1,
@@ -211,6 +220,16 @@ mod tests {
 
     #[test]
     fn drops_parallelism_temporarily_after_consecutive_limits() {
+        assert_eq!(apply_temporary_parallelism_drop(50, 0), 50);
+        assert_eq!(apply_temporary_parallelism_drop(50, 1), 25);
+        assert_eq!(apply_temporary_parallelism_drop(50, 2), 10);
+        assert_eq!(apply_temporary_parallelism_drop(50, 3), 6);
+        assert_eq!(apply_temporary_parallelism_drop(50, 4), 3);
+        assert_eq!(apply_temporary_parallelism_drop(50, 5), 1);
+        assert_eq!(apply_temporary_parallelism_drop(25, 1), 10);
+        assert_eq!(apply_temporary_parallelism_drop(25, 2), 6);
+        assert_eq!(apply_temporary_parallelism_drop(25, 3), 3);
+        assert_eq!(apply_temporary_parallelism_drop(25, 4), 1);
         assert_eq!(apply_temporary_parallelism_drop(10, 0), 10);
         assert_eq!(apply_temporary_parallelism_drop(10, 1), 6);
         assert_eq!(apply_temporary_parallelism_drop(10, 2), 3);
