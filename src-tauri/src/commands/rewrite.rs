@@ -1,11 +1,11 @@
 use crate::domain::{AppState, Job};
 use crate::{
-    build_relevant_canon_text, create_job, ensure_name_mapping_asset, format_batch_label,
-    load_canon_assets, load_chapters_for_batch, load_core_prompt, load_job, load_model_profile,
-    load_review_enabled, load_review_profile_for_run, load_review_profile_id,
-    load_rewrite_parallelism, mark_chapters_rewrite_failed, read_stored_api_key,
-    require_novel_settings, rewrite_batch_with_parallelism, save_parsed_rewrites,
-    set_chapter_status, to_string, update_job,
+    build_relevant_canon_text, chapter_has_source_body, create_job, ensure_name_mapping_asset,
+    format_batch_label, load_canon_assets, load_chapters_for_batch, load_core_prompt, load_job,
+    load_model_profile, load_review_enabled, load_review_profile_for_run, load_review_profile_id,
+    load_rewrite_parallelism, mark_chapters_rewrite_failed, mark_empty_source_chapters_skipped,
+    read_stored_api_key, require_novel_settings, rewrite_batch_with_parallelism,
+    save_parsed_rewrites, set_chapter_status, to_string, update_job,
 };
 use tauri::State;
 
@@ -18,15 +18,18 @@ pub(crate) async fn start_rewrite(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (chapters, settings, core_prompt, review_enabled, review_profile_id, rewrite_parallelism) = {
+    let (
+        all_chapters,
+        settings,
+        core_prompt,
+        review_enabled,
+        review_profile_id,
+        rewrite_parallelism,
+    ) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, &novel_id)?;
-        let chapters = load_chapters_for_batch(&conn, &novel_id, &batch_id)?
-            .into_iter()
-            .filter(|chapter| chapter.analysis_status == "completed")
-            .collect::<Vec<_>>();
         (
-            chapters,
+            load_chapters_for_batch(&conn, &novel_id, &batch_id)?,
             settings,
             load_core_prompt(&conn)?,
             load_review_enabled(&conn)?,
@@ -34,7 +37,20 @@ pub(crate) async fn start_rewrite(
             load_rewrite_parallelism(&conn)?,
         )
     };
-    if chapters.is_empty() {
+    if all_chapters.is_empty() {
+        return Err("当前批次没有可改写的内容。".to_string());
+    }
+    let has_unanalyzed_source = all_chapters
+        .iter()
+        .any(|chapter| chapter_has_source_body(chapter) && chapter.analysis_status != "completed");
+    let chapters = all_chapters
+        .iter()
+        .filter(|chapter| {
+            chapter_has_source_body(chapter) && chapter.analysis_status == "completed"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if chapters.is_empty() && has_unanalyzed_source {
         return Err("当前批次没有已完成分析的内容，请先分析该批次。".to_string());
     }
 
@@ -53,8 +69,19 @@ pub(crate) async fn start_rewrite(
     let _active_task = state
         .active_tasks
         .acquire(&novel_id, active_profile_ids, "改写")?;
-    let total = chapters.len() as i64;
+    let total = all_chapters.len() as i64;
     let mut job = create_job(&state, &novel_id, "rewrite", total)?;
+    mark_empty_source_chapters_skipped(&state, &all_chapters)?;
+    if chapters.is_empty() {
+        update_job(
+            &state,
+            &job.id,
+            "completed",
+            total,
+            "当前批次仅包含空正文伪章节，已清除旧占位改写并跳过模型调用",
+        )?;
+        return load_job(&state, &job.id);
+    }
     ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
     let canon_assets = {
         let conn = state.conn.lock().map_err(to_string)?;

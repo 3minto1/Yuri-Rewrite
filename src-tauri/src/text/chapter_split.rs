@@ -130,6 +130,9 @@ pub(crate) fn is_plausible_strict_heading_line(line: &str) -> bool {
     if starts_with_inline_round_phrase(&compact) {
         return false;
     }
+    if strict_heading_is_obvious_update_notice(&compact) {
+        return false;
+    }
     if strict_numbered_heading_looks_like_body_sentence(&compact) {
         return false;
     }
@@ -181,6 +184,157 @@ pub(crate) fn is_plausible_strict_heading_line(line: &str) -> bool {
     .iter()
     .all(|pattern| !compact.starts_with(pattern))
         && !special_heading_content_looks_like_body(&compact)
+}
+
+pub(crate) fn strict_heading_is_obvious_update_notice(compact: &str) -> bool {
+    let update_re = Regex::new(
+        r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+更[！!。．.…~～]*$"#,
+    )
+    .expect("valid update notice heading regex");
+    if update_re.is_match(compact) {
+        return true;
+    }
+
+    let numbered_re = Regex::new(
+        r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[章节回集话幕节页季段夜案场弹折更](.+)$"#,
+    )
+    .expect("valid update prose heading regex");
+    let Some(rest) = numbered_re
+        .captures(compact)
+        .and_then(|captures| captures.get(1))
+        .map(|mat| mat.as_str())
+    else {
+        return false;
+    };
+    let rest = rest.trim_matches(|ch| {
+        matches!(
+            ch,
+            '：' | ':'
+                | '、'
+                | '-'
+                | '—'
+                | '_'
+                | '·'
+                | '|'
+                | '.'
+                | '．'
+                | '，'
+                | ','
+                | '。'
+                | '！'
+                | '!'
+                | '？'
+                | '?'
+                | '（'
+                | '）'
+                | '('
+                | ')'
+                | ' '
+                | '　'
+        )
+    });
+    contains_update_notice_language(rest)
+}
+
+pub(crate) fn contains_update_notice_language(text: &str) -> bool {
+    contains_any_text(
+        text,
+        &[
+            "未完待续",
+            "下一章也快了",
+            "下章也快了",
+            "第二章也快了",
+            "下一更也快了",
+            "下更也快了",
+            "稍后还有一更",
+            "稍后还有更新",
+            "今天还有一更",
+            "明天继续更新",
+        ],
+    )
+}
+
+fn contains_any_text(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+pub(crate) fn is_obvious_droppable_author_note_line(line: &str) -> bool {
+    let trimmed =
+        line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　');
+    if trimmed.is_empty() {
+        return true;
+    }
+    let compact = trimmed
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if contains_any_text(
+        &compact,
+        &["完本感言", "完结感言", "卷末后记", "卷后记", "后记"],
+    ) {
+        return false;
+    }
+    if strict_heading_is_obvious_update_notice(&compact)
+        || contains_update_notice_language(&compact)
+    {
+        return true;
+    }
+    if compact.chars().all(|ch| {
+        matches!(
+            ch,
+            '-' | '—' | '_' | '=' | '*' | '＊' | '~' | '～' | '·' | '.' | '。' | '…' | '━' | '─'
+        )
+    }) {
+        return true;
+    }
+    if compact.chars().count() == 1
+        && compact
+            .chars()
+            .next()
+            .is_some_and(|ch| !is_cjk_char(ch) && !ch.is_ascii_alphanumeric())
+    {
+        return true;
+    }
+    if matches!(
+        compact.as_str(),
+        "作者的话" | "作者有话说" | "作者附言" | "题外话" | "PS" | "P.S." | "し"
+    ) {
+        return true;
+    }
+    let author_correction = contains_any_text(&compact, &["勘误", "更正", "修正"])
+        && contains_any_text(
+            &compact,
+            &["作者", "年份", "时间", "日期", "前文", "上一章"],
+        );
+    let reader_interaction = contains_any_text(
+        &compact,
+        &[
+            "求月票",
+            "求推荐票",
+            "求收藏",
+            "求订阅",
+            "求追读",
+            "大家投票",
+            "大家投",
+            "投月票",
+            "投推荐票",
+            "感谢打赏",
+            "谢谢打赏",
+        ],
+    );
+    author_correction || reader_interaction
+}
+
+pub(crate) fn is_obvious_droppable_author_note_text(text: &str) -> bool {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    !lines.is_empty()
+        && lines
+            .iter()
+            .all(|line| is_obvious_droppable_author_note_line(line))
 }
 
 pub(crate) fn starts_with_inline_round_phrase(compact: &str) -> bool {

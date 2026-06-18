@@ -498,9 +498,23 @@ pub(crate) fn clean_rewrite_block(block: &str, fallback_title: &str) -> (String,
     }
     if lines
         .first()
+        .is_some_and(|line| line.trim() == fallback_title.trim())
+    {
+        lines.remove(0);
+    }
+    if lines
+        .first()
         .is_some_and(|line| matches!(line.trim(), "正文：" | "正文:" | "正文"))
     {
         lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| {
+        matches!(
+            line.trim(),
+            "标题：" | "标题:" | "标题" | "正文：" | "正文:" | "正文"
+        )
+    }) {
+        lines.pop();
     }
     (title, lines.join("\n").trim().to_string())
 }

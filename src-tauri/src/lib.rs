@@ -180,7 +180,17 @@ async fn analyze_chapters_for_auto(
     api_key: &str,
     chapters: &[Chapter],
 ) -> Result<(), String> {
-    for chapter in chapters {
+    mark_empty_source_chapters_skipped(state, chapters)?;
+    let chapters = chapters
+        .iter()
+        .filter(|chapter| chapter_has_source_body(chapter))
+        .cloned()
+        .collect::<Vec<_>>();
+    if chapters.is_empty() {
+        ensure_name_mapping_asset_if_settings_available(state, novel_id, profile, api_key).await?;
+        return Ok(());
+    }
+    for chapter in &chapters {
         set_chapter_status(state, &chapter.id, "analysis_status", "running")?;
     }
 
@@ -193,7 +203,7 @@ async fn analyze_chapters_for_auto(
         novel_id,
         profile,
         api_key,
-        chapters,
+        &chapters,
         rewrite_parallelism,
     )
     .await
@@ -202,11 +212,11 @@ async fn analyze_chapters_for_auto(
             && error != AUTO_RUN_TERMINATED
             && !is_recoverable_model_format_error(error)
         {
-            let _ = mark_chapters_analysis_failed(state, chapters);
+            let _ = mark_chapters_analysis_failed(state, &chapters);
         }
     })?;
 
-    save_parsed_analyses(state, novel_id, chapters, parsed_analysis)?;
+    save_parsed_analyses(state, novel_id, &chapters, parsed_analysis)?;
     ensure_name_mapping_asset_if_settings_available(state, novel_id, profile, api_key).await?;
     Ok(())
 }
@@ -838,15 +848,18 @@ async fn rewrite_chapters_for_auto(
     api_key: &str,
     batch_id: &str,
 ) -> Result<(), String> {
-    let (chapters, settings, core_prompt, review_enabled, review_profile_id, rewrite_parallelism) = {
+    let (
+        all_chapters,
+        settings,
+        core_prompt,
+        review_enabled,
+        review_profile_id,
+        rewrite_parallelism,
+    ) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, novel_id)?;
-        let chapters = load_chapters_for_batch(&conn, novel_id, batch_id)?
-            .into_iter()
-            .filter(|chapter| chapter.analysis_status == "completed")
-            .collect::<Vec<_>>();
         (
-            chapters,
+            load_chapters_for_batch(&conn, novel_id, batch_id)?,
             settings,
             load_core_prompt(&conn)?,
             load_review_enabled(&conn)?,
@@ -854,8 +867,19 @@ async fn rewrite_chapters_for_auto(
             load_rewrite_parallelism(&conn)?,
         )
     };
+    mark_empty_source_chapters_skipped(state, &all_chapters)?;
+    let chapters = all_chapters
+        .iter()
+        .filter(|chapter| {
+            chapter_has_source_body(chapter) && chapter.analysis_status == "completed"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     if chapters.is_empty() {
-        return Err("当前批次没有已完成分析的内容。".to_string());
+        if all_chapters.iter().any(chapter_has_source_body) {
+            return Err("当前批次没有已完成分析的内容。".to_string());
+        }
+        return Ok(());
     }
 
     let (review_profile, review_api_key) =
@@ -1742,7 +1766,7 @@ fn finalize_review_decision(
     settings: &NovelSettings,
 ) -> Result<ReviewDecision, String> {
     let (decision, filtered_issues) =
-        filter_review_decision_against_rewrites(decision, rewrites, settings);
+        filter_review_decision_against_rewrites(decision, shard, rewrites, settings);
     let (decision, deterministic_issues) =
         merge_deterministic_protagonist_residue_issues(decision, shard, rewrites, settings);
     if !filtered_issues.is_empty() {
@@ -1754,7 +1778,7 @@ fn finalize_review_decision(
             Some(shard_label),
             "warning",
             &format!(
-                "以下问题声称当前改写稿仍含男性残留，但程序在对应改写章节中未找到被引用的残留证据，已忽略：\n{}",
+                "以下问题经本地证据校验后确认不构成 blocking（包括改写稿中不存在的性别残留引用，或仅删除了可确定的作者更新提示/非正文附言），已忽略：\n{}",
                 review_issues_text(&filtered_issues)
             ),
             None,
@@ -1877,6 +1901,7 @@ Blocking 清单：
 - “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性昵称本身不是男性残留。只有同处证据明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代且确实指向主角，才是 blocking。
 - 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，改写稿保留原文人称代词和称谓不是问题。
 - 群体成员性别不明时，保留原文“他们”或使用中性群体称呼不是问题；不得仅因群体中包含女性主角就要求改成“她们”。
+- 原文中明显不属于小说正文的作者更新提示、求票求收藏、简短勘误、作者与读者互动、装饰分隔线和孤立乱码允许删除，不得按缺句或内容缺失打回。完本感言、卷末后记、正式后记、番外和实际剧情正文不在此排除项内；无法确定时必须按正文严格审查。
 - 不要输出通过项、优点、确认事项、建议性润色或“无需修改”的内容。
 
 问题字段长度：
@@ -1957,7 +1982,7 @@ fn build_compact_review_constraints(
     };
     let canon_summary = compact_review_canon(canon_text);
     format!(
-        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、主角改名后的同名/旧名/以旧名某字为名等姓名逻辑矛盾、未指定角色误改性别、混合性别群体或含男性成员的群体被误称为“她们”、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。仅与主角原名共享单字的未指定 NPC 不得当作主角残留。性别不明的动物、灵兽等非人生物保留原文代词可通过。只有确认全员女性时才使用“她们”；群体含男性成员时使用“他们”或准确群体称呼。",
+        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、主角改名后的同名/旧名/以旧名某字为名等姓名逻辑矛盾、未指定角色误改性别、混合性别群体或含男性成员的群体被误称为“她们”、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。仅与主角原名共享单字的未指定 NPC 不得当作主角残留。性别不明的动物、灵兽等非人生物保留原文代词可通过。明显的作者更新提示、求票互动、简短勘误、分隔线和孤立乱码可删除；完本感言、卷末后记、正式后记、番外和剧情正文不可删除。只有确认全员女性时才使用“她们”；群体含男性成员时使用“他们”或准确群体称呼。",
         settings.protagonist_name.trim(),
         rewritten_name,
         additional_names,
@@ -2192,13 +2217,11 @@ fn review_issues_text(issues: &[ReviewIssue]) -> String {
 
 fn filter_review_decision_against_rewrites(
     decision: ReviewDecision,
+    chapters: &[Chapter],
     rewrites: &[ParsedChapterRewrite],
     settings: &NovelSettings,
 ) -> (ReviewDecision, Vec<ReviewIssue>) {
     let source_name = settings.protagonist_name.trim();
-    if source_name.is_empty() {
-        return (decision, Vec::new());
-    }
     let rewrites_by_index = rewrites
         .iter()
         .map(|rewrite| (rewrite.index, rewrite))
@@ -2207,7 +2230,8 @@ fn filter_review_decision_against_rewrites(
     let mut filtered = Vec::new();
     for issue in decision.issues {
         let issue_text = format!("{} {}", issue.problem, issue.required_fix);
-        let claims_source_name_residue = issue_text.contains(source_name)
+        let claims_source_name_residue = !source_name.is_empty()
+            && issue_text.contains(source_name)
             && contains_any(
                 &issue_text,
                 &[
@@ -2240,11 +2264,18 @@ fn filter_review_decision_against_rewrites(
             gender_residue_claim_only_targets_neutral_nickname(&issue, &relevant_rewrites);
         let ambiguous_non_human_false_positive =
             gender_residue_claim_targets_ambiguous_non_human(&issue, settings, &relevant_rewrites);
+        let droppable_author_note_false_positive =
+            missing_content_claim_only_targets_droppable_author_notes(
+                &issue,
+                chapters,
+                &relevant_rewrites,
+            );
         if !relevant_rewrites.is_empty()
             && ((claims_source_name_residue && !source_name_is_present)
                 || quoted_evidence_is_absent
                 || neutral_nickname_false_positive
-                || ambiguous_non_human_false_positive)
+                || ambiguous_non_human_false_positive
+                || droppable_author_note_false_positive)
         {
             filtered.push(issue);
         } else {
@@ -2258,6 +2289,89 @@ fn filter_review_decision_against_rewrites(
         },
         filtered,
     )
+}
+
+fn missing_content_claim_only_targets_droppable_author_notes(
+    issue: &ReviewIssue,
+    chapters: &[Chapter],
+    rewrites: &[&ParsedChapterRewrite],
+) -> bool {
+    let issue_text = format!("{} {}", issue.problem, issue.required_fix);
+    let category = issue.category.to_ascii_lowercase();
+    let claims_missing_content = contains_any(&category, &["missing", "content", "omission"])
+        || contains_any(
+            &issue_text,
+            &[
+                "内容缺失",
+                "正文缺失",
+                "缺句",
+                "遗漏",
+                "被删除",
+                "删除了",
+                "未保留",
+                "没有保留",
+            ],
+        );
+    if !claims_missing_content {
+        return false;
+    }
+    let relevant_indexes = if issue.chapter_indexes.is_empty() {
+        None
+    } else {
+        Some(
+            issue
+                .chapter_indexes
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+        )
+    };
+    let original_lines = chapters
+        .iter()
+        .filter(|chapter| {
+            relevant_indexes
+                .as_ref()
+                .is_none_or(|indexes| indexes.contains(&chapter.index))
+        })
+        .flat_map(|chapter| {
+            std::iter::once(chapter.title.as_str()).chain(chapter.original_text.lines())
+        })
+        .collect::<Vec<_>>();
+    let mut evidence = extract_review_quoted_evidence(&issue.problem);
+    evidence.extend(
+        original_lines
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| {
+                !line.is_empty()
+                    && issue_text.contains(*line)
+                    && is_obvious_droppable_author_note_line(line)
+            })
+            .map(str::to_string),
+    );
+    evidence.sort();
+    evidence.dedup();
+    if evidence.is_empty() {
+        return false;
+    }
+    let rewrite_text = rewrites
+        .iter()
+        .map(|rewrite| format!("{}\n{}", rewrite.title, rewrite.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let omitted_evidence = evidence
+        .iter()
+        .filter(|fragment| !rewrite_text.contains(fragment.as_str()))
+        .collect::<Vec<_>>();
+    !omitted_evidence.is_empty()
+        && omitted_evidence.iter().all(|fragment| {
+            original_lines.iter().any(|line| {
+                line.contains(fragment.as_str())
+                    && (is_obvious_droppable_author_note_text(fragment)
+                        || is_obvious_droppable_author_note_line(line))
+            })
+        })
 }
 
 fn merge_deterministic_protagonist_residue_issues(
@@ -4571,6 +4685,33 @@ fn load_chapters_for_batch(
     Ok(chapters)
 }
 
+fn chapter_has_source_body(chapter: &Chapter) -> bool {
+    !chapter.original_text.trim().is_empty()
+}
+
+fn mark_empty_source_chapters_skipped(
+    state: &State<'_, AppState>,
+    chapters: &[Chapter],
+) -> Result<(), String> {
+    let empty_chapters = chapters
+        .iter()
+        .filter(|chapter| !chapter_has_source_body(chapter))
+        .collect::<Vec<_>>();
+    if empty_chapters.is_empty() {
+        return Ok(());
+    }
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let tx = conn.transaction().map_err(to_string)?;
+    for chapter in empty_chapters {
+        tx.execute(
+            "UPDATE chapters SET analysis_json = NULL, analysis_status = 'completed', rewrite_text = NULL, ai_rewrite_text = NULL, rewrite_edited_at = NULL, rewrite_status = 'completed' WHERE id = ?1",
+            params![chapter.id],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)
+}
+
 fn load_chapter_batches(conn: &Connection, novel_id: &str) -> Result<Vec<ChapterBatch>, String> {
     let mut stmt = conn
         .prepare(
@@ -6396,6 +6537,36 @@ mod tests {
     }
 
     #[test]
+    fn batch_rewrite_parser_removes_dangling_format_labels() {
+        let chapter = sample_chapter(1, "第一章", "原文一");
+        let output = format!(
+            "{}\n标题：第一章\n正文：\n改写正文\n\n标题：\n{}",
+            chapter_start_marker(&chapter),
+            chapter_end_marker(&chapter)
+        );
+
+        let parsed = parse_batch_rewrite_output(&output, std::slice::from_ref(&chapter))
+            .expect("dangling title label should be removed");
+
+        assert_eq!(parsed[0].text, "改写正文");
+    }
+
+    #[test]
+    fn batch_rewrite_parser_rejects_empty_placeholder_pollution() {
+        let chapter = sample_chapter(2, "第二更！", "");
+        let output = format!(
+            "{}\n第二更！\n正文：\n\n标题：\n{}",
+            chapter_start_marker(&chapter),
+            chapter_end_marker(&chapter)
+        );
+
+        let error = parse_batch_rewrite_output(&output, std::slice::from_ref(&chapter))
+            .expect_err("placeholder-only output must stay invalid");
+
+        assert!(error.contains("改写正文为空"));
+    }
+
+    #[test]
     fn batch_rewrite_parser_accepts_marker_with_wrong_id_when_index_matches() {
         let chapters = vec![sample_chapter(4, "第四章", "原文四")];
         let output = "<<<YURI_REWRITE_CHAPTER_START index=4 id=model-made-up-id>>>\n标题：第四章\n正文：\n改写四\n<<<YURI_REWRITE_CHAPTER_END index=4 id=model-made-up-id>>>";
@@ -7816,7 +7987,7 @@ mod tests {
         settings.protagonist_name = "石昊".to_string();
         settings.rewritten_protagonist_name = "石念昔".to_string();
         let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &settings);
+            filter_review_decision_against_rewrites(decision, &[], &rewrites, &settings);
 
         assert!(filtered_decision.approved);
         assert!(filtered_decision.issues.is_empty());
@@ -7841,8 +8012,12 @@ mod tests {
             text: "萧炎抬起头。".to_string(),
         }];
 
-        let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            &[],
+            &rewrites,
+            &sample_novel_settings(),
+        );
 
         assert!(!filtered_decision.approved);
         assert_eq!(filtered_decision.issues.len(), 1);
@@ -7867,8 +8042,12 @@ mod tests {
             text: "每一个人都震惊，在场中防御的少女也很逆天，居然以十大洞天挡住了。".to_string(),
         }];
 
-        let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            &[],
+            &rewrites,
+            &sample_novel_settings(),
+        );
 
         assert!(filtered_decision.approved);
         assert!(filtered_decision.issues.is_empty());
@@ -7893,8 +8072,12 @@ mod tests {
             text: "每一个人都震惊，在场中防御的少年也很逆天，居然以十大洞天挡住了。".to_string(),
         }];
 
-        let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            &[],
+            &rewrites,
+            &sample_novel_settings(),
+        );
 
         assert!(!filtered_decision.approved);
         assert_eq!(filtered_decision.issues.len(), 1);
@@ -7935,8 +8118,12 @@ mod tests {
             },
         ];
 
-        let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            &[],
+            &rewrites,
+            &sample_novel_settings(),
+        );
 
         assert!(filtered_decision.approved);
         assert!(filtered_decision.issues.is_empty());
@@ -7977,8 +8164,12 @@ mod tests {
             },
         ];
 
-        let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            &[],
+            &rewrites,
+            &sample_novel_settings(),
+        );
 
         assert!(!filtered_decision.approved);
         assert_eq!(filtered_decision.issues.len(), 2);
@@ -8003,8 +8194,12 @@ mod tests {
             text: "那头灵兽沉默不语，它盘踞在石台上，双目发光。".to_string(),
         }];
 
-        let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            &[],
+            &rewrites,
+            &sample_novel_settings(),
+        );
 
         assert!(filtered_decision.approved);
         assert!(filtered_decision.issues.is_empty());
@@ -8029,12 +8224,107 @@ mod tests {
             text: "那头妖兽没有回应，他伏在洞口，像是在守着什么。".to_string(),
         }];
 
-        let (filtered_decision, filtered_issues) =
-            filter_review_decision_against_rewrites(decision, &rewrites, &sample_novel_settings());
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            &[],
+            &rewrites,
+            &sample_novel_settings(),
+        );
 
         assert!(filtered_decision.approved);
         assert!(filtered_decision.issues.is_empty());
         assert_eq!(filtered_issues.len(), 1);
+    }
+
+    #[test]
+    fn review_decision_filters_missing_droppable_author_notes_only() {
+        let chapter = sample_chapter(
+            177,
+            "第177章 归来",
+            "她推门走进院中。\n作者年份勘误\n大家投\nし\n----------",
+        );
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "她推门走进院中。".to_string(),
+        };
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![
+                sample_review_issue(
+                    vec![177],
+                    "chapter",
+                    "content_missing",
+                    "改写稿删除了原文中的“作者年份勘误”。",
+                ),
+                sample_review_issue(
+                    vec![177],
+                    "chapter",
+                    "content_missing",
+                    "改写稿未保留“大家投”。",
+                ),
+                sample_review_issue(
+                    vec![177],
+                    "chapter",
+                    "content_missing",
+                    "改写稿删除了单独的 し 和“----------”。",
+                ),
+            ],
+        };
+
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &sample_novel_settings(),
+        );
+
+        assert!(filtered_decision.approved);
+        assert_eq!(filtered_issues.len(), 3);
+    }
+
+    #[test]
+    fn review_decision_keeps_missing_story_or_protected_postscript() {
+        let chapter = sample_chapter(
+            180,
+            "第180章 尾声",
+            "她推门走进院中，终于见到了等待多年的人。\n完本感言\n感谢一路陪伴。",
+        );
+        let rewrite = ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "她推门走进院中。".to_string(),
+        };
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![
+                sample_review_issue(
+                    vec![180],
+                    "chapter",
+                    "content_missing",
+                    "改写稿删除了“终于见到了等待多年的人”。",
+                ),
+                sample_review_issue(
+                    vec![180],
+                    "chapter",
+                    "content_missing",
+                    "改写稿删除了“完本感言”。",
+                ),
+            ],
+        };
+
+        let (filtered_decision, filtered_issues) = filter_review_decision_against_rewrites(
+            decision,
+            std::slice::from_ref(&chapter),
+            std::slice::from_ref(&rewrite),
+            &sample_novel_settings(),
+        );
+
+        assert!(!filtered_decision.approved);
+        assert_eq!(filtered_decision.issues.len(), 2);
+        assert!(filtered_issues.is_empty());
     }
 
     #[test]
@@ -8513,6 +8803,42 @@ mod tests {
         assert_eq!(split.chapters.len(), 2);
         assert_eq!(split.chapters[0].title, "第1章 陨落的天才");
         assert_eq!(split.chapters[1].title, "第2章 斗气大陆");
+    }
+
+    #[test]
+    fn strict_chapter_split_ignores_update_notice_pseudo_headings() {
+        let text = "第159章 夜归\n这里是第一段正式剧情。\n第一更！\n第二更！\n第三更！\n第一章，第二章也快了。（未完待续）\n第160章 重逢\n这里是第二段正式剧情。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 2);
+        assert_eq!(split.chapters[0].title, "第159章 夜归");
+        assert!(split.chapters[0].original_text.contains("第一更！"));
+        assert!(split.chapters[0].original_text.contains("未完待续"));
+        assert_eq!(split.chapters[1].title, "第160章 重逢");
+    }
+
+    #[test]
+    fn author_note_classifier_is_conservative() {
+        for line in [
+            "第一更！",
+            "作者年份勘误",
+            "大家投",
+            "し",
+            "----------",
+            "求月票求收藏",
+        ] {
+            assert!(
+                is_obvious_droppable_author_note_line(line),
+                "expected droppable author note: {line}"
+            );
+        }
+        for line in ["完本感言", "卷末后记", "后记", "她推门走进院中。"] {
+            assert!(
+                !is_obvious_droppable_author_note_line(line),
+                "expected protected or narrative content: {line}"
+            );
+        }
     }
 
     #[test]
