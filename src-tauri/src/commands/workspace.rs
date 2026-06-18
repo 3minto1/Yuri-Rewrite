@@ -1,9 +1,8 @@
 use crate::domain::{AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate};
 use crate::{
     chapter_text_chars, estimate_requests_for_chapters, estimate_wait_stages_for_chapters,
-    load_canon_assets, load_chapter_batches, load_chapters, load_chapters_for_batch,
-    load_recent_model_stats, load_review_enabled, load_rewrite_parallelism, row_to_chapter,
-    to_string,
+    load_canon_assets, load_chapter_batches, load_chapters, load_recent_model_stats,
+    load_review_enabled, load_rewrite_parallelism, row_to_chapter, to_string,
 };
 use chrono::Utc;
 use rusqlite::params;
@@ -116,38 +115,39 @@ pub(crate) fn estimate_job_cost(
     let batches = load_chapter_batches(&conn, &novel_id)?;
     let parallelism = load_rewrite_parallelism(&conn)?;
     let review_enabled = load_review_enabled(&conn)?;
-    let selected_batch = batch_id
-        .as_deref()
-        .and_then(|id| load_chapters_for_batch(&conn, &novel_id, id).ok())
-        .or_else(|| {
-            batches
-                .first()
-                .and_then(|batch| load_chapters_for_batch(&conn, &novel_id, &batch.id).ok())
+    let chapters_by_batch = batches
+        .iter()
+        .map(|batch| {
+            chapters
+                .iter()
+                .filter(|chapter| {
+                    chapter.index >= batch.start_chapter && chapter.index <= batch.end_chapter
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         })
+        .collect::<Vec<_>>();
+    let selected_batch_index = batch_id
+        .as_deref()
+        .and_then(|id| batches.iter().position(|batch| batch.id == id))
+        .unwrap_or(0);
+    let selected_batch = chapters_by_batch
+        .get(selected_batch_index)
+        .cloned()
         .unwrap_or_default();
     let current_batch_requests =
         estimate_requests_for_chapters(&selected_batch, parallelism, review_enabled);
     let current_batch_wait_stages =
         estimate_wait_stages_for_chapters(&selected_batch, review_enabled);
-    let full_run_requests = batches
+    let full_run_requests = chapters_by_batch
         .iter()
-        .map(|batch| {
-            load_chapters_for_batch(&conn, &novel_id, &batch.id)
-                .map(|batch_chapters| {
-                    estimate_requests_for_chapters(&batch_chapters, parallelism, review_enabled)
-                })
-                .unwrap_or(0)
+        .map(|batch_chapters| {
+            estimate_requests_for_chapters(batch_chapters, parallelism, review_enabled)
         })
         .sum::<usize>();
-    let full_run_wait_stages = batches
+    let full_run_wait_stages = chapters_by_batch
         .iter()
-        .map(|batch| {
-            load_chapters_for_batch(&conn, &novel_id, &batch.id)
-                .map(|batch_chapters| {
-                    estimate_wait_stages_for_chapters(&batch_chapters, review_enabled)
-                })
-                .unwrap_or(0)
-        })
+        .map(|batch_chapters| estimate_wait_stages_for_chapters(batch_chapters, review_enabled))
         .sum::<usize>();
     let stats = profile_id
         .as_deref()

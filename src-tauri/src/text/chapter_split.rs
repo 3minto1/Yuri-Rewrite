@@ -1,5 +1,6 @@
 use crate::domain::{Chapter, SplitResult};
 use regex::Regex;
+use std::sync::OnceLock;
 use uuid::Uuid;
 
 pub(crate) fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
@@ -87,11 +88,12 @@ pub(crate) fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
     }
 }
 
-pub(crate) fn chapter_heading_regex() -> Regex {
-    Regex::new(
+pub(crate) fn chapter_heading_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(
         r#"(?m)^[\s\u{feff}　]*(?:={2,6}[ \t　]*(?:正文[ \t　]*)?第[ \t　]*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[ \t　]*[章节回卷部集篇话幕节页季段册夜案场弹折更][^=\r\n]{0,80}={2,6}|={2,6}[ \t　]*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)[^=\r\n]{0,80}={2,6}|[【〔［「『《（(\[]?[ \t　]*(?:正文[ \t　]*)?第[ \t　]*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[ \t　]*[章节回卷部集篇话幕节页季段册夜案场弹折更][ \t　]*[】〕］」』》）)\]]?[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|(?:卷|篇|部|章|回|幕|册|节)[ \t　]*[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|[上中下前后终外][ \t　]*(?:卷|篇|部|章|册)[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|(?:Chapter|CHAPTER|chapter|Chap\.?|CH\.?|ch\.?|Section|SECTION|section|Part|PART|part|Episode|EPISODE|episode|No\.?|NO\.?|no\.?)[ \t　]*[0-9０-９IVXLCDMivxlcdm]+[ \t　:：、.．\-—_·|]*[^\r\n]{0,80}|[【〔［「『《（(\[]?[ \t　]*(?:序章|楔子|引子|引言|序言|序幕|前言|终章|尾声|后记|番外(?:篇|章)?|特别篇|外传|插曲|间章|简介|文案|作品相关|上架感言|完本感言)[ \t　]*[】〕］」』》）)\]]?[ \t　:：、.．\-—_·|]*[^\r\n]{0,80})[\t 　]*\r?$"#,
     )
-    .expect("valid chapter regex")
+    .expect("valid chapter regex"))
 }
 
 pub(crate) fn is_plausible_strict_heading_line(line: &str) -> bool {
@@ -187,18 +189,20 @@ pub(crate) fn is_plausible_strict_heading_line(line: &str) -> bool {
 }
 
 pub(crate) fn strict_heading_is_obvious_update_notice(compact: &str) -> bool {
-    let update_re = Regex::new(
+    static UPDATE_RE: OnceLock<Regex> = OnceLock::new();
+    let update_re = UPDATE_RE.get_or_init(|| Regex::new(
         r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+更[！!。．.…~～]*$"#,
     )
-    .expect("valid update notice heading regex");
+    .expect("valid update notice heading regex"));
     if update_re.is_match(compact) {
         return true;
     }
 
-    let numbered_re = Regex::new(
+    static NUMBERED_RE: OnceLock<Regex> = OnceLock::new();
+    let numbered_re = NUMBERED_RE.get_or_init(|| Regex::new(
         r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[章节回集话幕节页季段夜案场弹折更](.+)$"#,
     )
-    .expect("valid update prose heading regex");
+    .expect("valid update prose heading regex"));
     let Some(rest) = numbered_re
         .captures(compact)
         .and_then(|captures| captures.get(1))
@@ -338,10 +342,13 @@ pub(crate) fn is_obvious_droppable_author_note_text(text: &str) -> bool {
 }
 
 pub(crate) fn starts_with_inline_round_phrase(compact: &str) -> bool {
-    let round_re = Regex::new(
-        r#"^(?:第)?[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+回合"#,
-    )
-    .expect("valid round phrase regex");
+    static ROUND_RE: OnceLock<Regex> = OnceLock::new();
+    let round_re = ROUND_RE.get_or_init(|| {
+        Regex::new(
+            r#"^(?:第)?[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+回合"#,
+        )
+        .expect("valid round phrase regex")
+    });
     if !round_re.is_match(compact) {
         return false;
     }
@@ -412,10 +419,11 @@ pub(crate) fn special_heading_content_looks_like_body(compact: &str) -> bool {
 }
 
 pub(crate) fn strict_numbered_heading_looks_like_body_sentence(compact: &str) -> bool {
-    let numbered_re = Regex::new(
+    static NUMBERED_RE: OnceLock<Regex> = OnceLock::new();
+    let numbered_re = NUMBERED_RE.get_or_init(|| Regex::new(
         r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+([章节回集话幕节页季段夜案场弹折更])(.+)$"#,
     )
-    .expect("valid strict numbered heading parser regex");
+    .expect("valid strict numbered heading parser regex"));
     let Some(captures) = numbered_re.captures(compact) else {
         return false;
     };
@@ -450,10 +458,11 @@ pub(crate) fn strict_numbered_heading_looks_like_body_sentence(compact: &str) ->
 
 pub(crate) fn is_numbered_strict_chapter_heading(line: &str) -> bool {
     let compact = compact_heading_line(line);
-    let numbered_re = Regex::new(
+    static NUMBERED_RE: OnceLock<Regex> = OnceLock::new();
+    let numbered_re = NUMBERED_RE.get_or_init(|| Regex::new(
         r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[章节回集话幕节页季段夜案场弹折更]"#,
     )
-    .expect("valid numbered strict chapter regex");
+    .expect("valid numbered strict chapter regex"));
     numbered_re.is_match(&compact)
         || compact.starts_with("Chapter")
         || compact.starts_with("CHAPTER")
@@ -477,10 +486,11 @@ pub(crate) fn is_numbered_strict_chapter_heading(line: &str) -> bool {
 
 pub(crate) fn is_loose_container_heading(line: &str) -> bool {
     let compact = compact_heading_line(line);
-    let container_re = Regex::new(
+    static CONTAINER_RE: OnceLock<Regex> = OnceLock::new();
+    let container_re = CONTAINER_RE.get_or_init(|| Regex::new(
         r#"^(?:第?[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+[卷部]|[卷部][0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+|[上中下前后终外][卷部])"#,
     )
-    .expect("valid loose container heading regex");
+    .expect("valid loose container heading regex"));
     container_re.is_match(&compact)
 }
 
@@ -523,11 +533,12 @@ pub(crate) fn compact_heading_line(line: &str) -> String {
     .collect()
 }
 
-pub(crate) fn loose_numbered_chapter_heading_regex() -> Regex {
-    Regex::new(
+pub(crate) fn loose_numbered_chapter_heading_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(
         r#"(?m)^[ \t\u{feff}　]*(?:[（(]?[ \t　]*)?(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})[ \t　]*(?:[）)][ \t　]*)?(?:[ \t　]+|[、.．:：\-—_·|][ \t　]*)[^\r\n]{1,60}[ \t　]*\r?$"#,
     )
-    .expect("valid loose numbered chapter regex")
+    .expect("valid loose numbered chapter regex"))
 }
 
 pub(crate) fn loose_numbered_headings_are_plausible(
@@ -662,8 +673,10 @@ pub(crate) fn loose_numbered_heading_looks_like_date_marker(line: &str, title: &
     }
 
     let title = title.trim();
-    let date_tail_re =
-        Regex::new(r#"^[0-9０-９]{1,2}(?:[.．/\-—年月日]|$)"#).expect("valid date tail regex");
+    static DATE_TAIL_RE: OnceLock<Regex> = OnceLock::new();
+    let date_tail_re = DATE_TAIL_RE.get_or_init(|| {
+        Regex::new(r#"^[0-9０-９]{1,2}(?:[.．/\-—年月日]|$)"#).expect("valid date tail regex")
+    });
     date_tail_re.is_match(title)
 }
 
@@ -699,20 +712,22 @@ pub(crate) fn loose_numbered_heading_title(line: &str) -> Option<&str> {
     Some(trimmed[mat.end()..].trim())
 }
 
-pub(crate) fn loose_numbered_heading_ordinal_prefix_regex() -> Regex {
-    Regex::new(
+pub(crate) fn loose_numbered_heading_ordinal_prefix_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(
         r#"^[（(]?[ \t　]*(?:[0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})[ \t　]*[）)]?[ \t　]*(?:[、.．:：\-—_·|]|[ \t　]+)"#,
     )
-    .expect("valid loose numbered heading ordinal prefix regex")
+    .expect("valid loose numbered heading ordinal prefix regex"))
 }
 
 pub(crate) fn parse_loose_numbered_heading_ordinal(line: &str) -> Option<u64> {
     let trimmed =
         line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '　');
-    let ordinal_re = Regex::new(
+    static ORDINAL_RE: OnceLock<Regex> = OnceLock::new();
+    let ordinal_re = ORDINAL_RE.get_or_init(|| Regex::new(
         r#"^[（(]?[ \t　]*([0-9０-９]{1,5}|[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]{1,12})"#,
     )
-    .expect("valid loose numbered heading ordinal parser regex");
+    .expect("valid loose numbered heading ordinal parser regex"));
     let token = ordinal_re.captures(trimmed)?.get(1)?.as_str();
     parse_fullwidth_digits(token).or_else(|| parse_chinese_ordinal(token))
 }

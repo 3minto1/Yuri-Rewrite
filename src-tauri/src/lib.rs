@@ -29,7 +29,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 use task_control::{
@@ -2960,8 +2960,11 @@ fn is_meaningful_review_evidence(fragment: &str) -> bool {
 }
 
 fn extract_review_issue_indexes(text: &str) -> Vec<i64> {
-    let pattern = Regex::new(r"(?:分片索引|chapter_index)\s*[:：=]?\s*(\d+)")
-        .expect("valid review issue index regex");
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        Regex::new(r"(?:分片索引|chapter_index)\s*[:：=]?\s*(\d+)")
+            .expect("valid review issue index regex")
+    });
     let mut indexes = pattern
         .captures_iter(text)
         .filter_map(|capture| capture.get(1)?.as_str().parse::<i64>().ok())
@@ -3432,9 +3435,11 @@ fn validate_targeted_rewrite_markers(
     output: &str,
     target_chapters: &[Chapter],
 ) -> Result<(), String> {
-    let marker_pattern =
+    static MARKER_PATTERN: OnceLock<Regex> = OnceLock::new();
+    let marker_pattern = MARKER_PATTERN.get_or_init(|| {
         Regex::new(r"<<<YURI_REWRITE_CHAPTER_(START|END)\s+index=(\d+)\s+id=([^>\s]+)>>>")
-            .expect("valid targeted rewrite marker regex");
+            .expect("valid targeted rewrite marker regex")
+    });
     let expected = target_chapters
         .iter()
         .map(|chapter| (chapter.index, chapter.id.as_str()))
@@ -6360,10 +6365,15 @@ fn to_string<E: std::fmt::Display>(error: E) -> String {
 }
 
 fn redact_sensitive_text(text: &str) -> String {
-    let query_secret_re = Regex::new(r"(?i)([?&](?:key|api_key|access_token|token)=)[^&\s]+")
-        .expect("valid secret query regex");
-    let bearer_re =
-        Regex::new(r"(?i)(authorization:\s*bearer\s+)[^\s,;]+").expect("valid bearer regex");
+    static QUERY_SECRET_RE: OnceLock<Regex> = OnceLock::new();
+    static BEARER_RE: OnceLock<Regex> = OnceLock::new();
+    let query_secret_re = QUERY_SECRET_RE.get_or_init(|| {
+        Regex::new(r"(?i)([?&](?:key|api_key|access_token|token)=)[^&\s]+")
+            .expect("valid secret query regex")
+    });
+    let bearer_re = BEARER_RE.get_or_init(|| {
+        Regex::new(r"(?i)(authorization:\s*bearer\s+)[^\s,;]+").expect("valid bearer regex")
+    });
     let redacted = query_secret_re.replace_all(text, "${1}[REDACTED]");
     bearer_re
         .replace_all(&redacted, "${1}[REDACTED]")

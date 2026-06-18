@@ -125,6 +125,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_jobs_novel ON jobs(novel_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_novel ON ai_logs(novel_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_ai_logs_profile_created ON ai_logs(profile_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_chapter_batches_novel ON chapter_batches(novel_id, batch_index);
         "#,
     )?;
