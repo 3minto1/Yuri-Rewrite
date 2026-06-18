@@ -1,10 +1,10 @@
 use crate::domain::{AppState, Job};
+use crate::services::analysis::analyze_and_save;
 use crate::{
-    analyze_batch_with_parallelism, chapter_has_source_body, create_job, ensure_name_mapping_asset,
-    format_batch_label, load_chapters_for_batch, load_job, load_model_profile,
-    load_rewrite_parallelism, mark_chapters_analysis_failed, mark_empty_source_chapters_skipped,
-    read_stored_api_key, require_novel_settings, save_parsed_analyses, set_chapter_status,
-    to_string, update_job,
+    chapter_has_source_body, create_job, ensure_name_mapping_asset, format_batch_label,
+    load_chapters_for_batch, load_job, load_model_profile, load_rewrite_parallelism,
+    mark_chapters_analysis_failed, mark_empty_source_chapters_skipped, read_stored_api_key,
+    require_novel_settings, set_chapter_status, to_string, update_job,
 };
 use tauri::State;
 
@@ -63,7 +63,7 @@ pub(crate) async fn start_analysis(
         set_chapter_status(&state, &chapter.id, "analysis_status", "running")?;
     }
 
-    let parsed_analysis = match analyze_batch_with_parallelism(
+    if let Err(error) = analyze_and_save(
         &state,
         &novel_id,
         &profile,
@@ -73,16 +73,11 @@ pub(crate) async fn start_analysis(
     )
     .await
     {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            mark_chapters_analysis_failed(&state, &chapters)?;
-            update_job(&state, &job.id, "failed", 0, &error)?;
-            job = load_job(&state, &job.id)?;
-            return Ok(job);
-        }
-    };
-
-    save_parsed_analyses(&state, &novel_id, &chapters, parsed_analysis)?;
+        mark_chapters_analysis_failed(&state, &chapters)?;
+        update_job(&state, &job.id, "failed", 0, &error)?;
+        job = load_job(&state, &job.id)?;
+        return Ok(job);
+    }
     ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
 
     update_job(

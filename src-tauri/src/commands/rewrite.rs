@@ -1,11 +1,11 @@
 use crate::domain::{AppState, Job};
+use crate::services::rewrite::{rewrite_and_save, RewriteRunContext};
 use crate::{
     build_relevant_canon_text, chapter_has_source_body, create_job, ensure_name_mapping_asset,
     format_batch_label, load_canon_assets, load_chapters_for_batch, load_core_prompt, load_job,
     load_model_profile, load_review_enabled, load_review_profile_for_run, load_review_profile_id,
     load_rewrite_parallelism, mark_chapters_rewrite_failed, mark_empty_source_chapters_skipped,
-    read_stored_api_key, require_novel_settings, rewrite_batch_with_parallelism,
-    save_parsed_rewrites, set_chapter_status, to_string, update_job,
+    read_stored_api_key, require_novel_settings, set_chapter_status, to_string, update_job,
 };
 use tauri::State;
 
@@ -101,32 +101,29 @@ pub(crate) async fn start_rewrite(
         0,
         &format!("正在批次改写 {}", batch_label),
     )?;
-    let final_rewrite = match rewrite_batch_with_parallelism(
+    if let Err(error) = rewrite_and_save(
         &state,
-        &novel_id,
-        &profile,
-        &api_key,
-        &chapters,
-        &canon_text,
-        &settings,
-        &core_prompt,
-        review_enabled,
-        review_profile.as_ref(),
-        review_api_key.as_deref(),
-        rewrite_parallelism,
+        RewriteRunContext {
+            novel_id: &novel_id,
+            profile: &profile,
+            api_key: &api_key,
+            chapters: &chapters,
+            canon_text: &canon_text,
+            settings: &settings,
+            core_prompt: &core_prompt,
+            review_enabled,
+            review_profile: review_profile.as_ref(),
+            review_api_key: review_api_key.as_deref(),
+            parallelism: rewrite_parallelism,
+        },
     )
     .await
     {
-        Ok(rewrites) => rewrites,
-        Err(error) => {
-            mark_chapters_rewrite_failed(&state, &chapters)?;
-            update_job(&state, &job.id, "failed", 0, &error)?;
-            job = load_job(&state, &job.id)?;
-            return Ok(job);
-        }
-    };
-
-    save_parsed_rewrites(&state, final_rewrite)?;
+        mark_chapters_rewrite_failed(&state, &chapters)?;
+        update_job(&state, &job.id, "failed", 0, &error)?;
+        job = load_job(&state, &job.id)?;
+        return Ok(job);
+    }
 
     update_job(
         &state,

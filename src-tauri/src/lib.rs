@@ -5,6 +5,7 @@ mod db;
 mod domain;
 mod model_support;
 mod rate_limit;
+mod services;
 mod task_control;
 mod text;
 
@@ -198,7 +199,7 @@ async fn analyze_chapters_for_auto(
         let conn = state.conn.lock().map_err(to_string)?;
         load_rewrite_parallelism(&conn)?
     };
-    let parsed_analysis = analyze_batch_with_parallelism(
+    services::analysis::analyze_and_save(
         state,
         novel_id,
         profile,
@@ -215,8 +216,6 @@ async fn analyze_chapters_for_auto(
             let _ = mark_chapters_analysis_failed(state, &chapters);
         }
     })?;
-
-    save_parsed_analyses(state, novel_id, &chapters, parsed_analysis)?;
     ensure_name_mapping_asset_if_settings_available(state, novel_id, profile, api_key).await?;
     Ok(())
 }
@@ -894,19 +893,21 @@ async fn rewrite_chapters_for_auto(
         set_chapter_status(state, &chapter.id, "rewrite_status", "running")?;
     }
 
-    let final_rewrite = rewrite_batch_with_parallelism(
+    services::rewrite::rewrite_and_save(
         state,
-        novel_id,
-        profile,
-        api_key,
-        &chapters,
-        &canon_text,
-        &settings,
-        &core_prompt,
-        review_enabled,
-        review_profile.as_ref(),
-        review_api_key.as_deref(),
-        rewrite_parallelism,
+        services::rewrite::RewriteRunContext {
+            novel_id,
+            profile,
+            api_key,
+            chapters: &chapters,
+            canon_text: &canon_text,
+            settings: &settings,
+            core_prompt: &core_prompt,
+            review_enabled,
+            review_profile: review_profile.as_ref(),
+            review_api_key: review_api_key.as_deref(),
+            parallelism: rewrite_parallelism,
+        },
     )
     .await
     .inspect_err(|error| {
@@ -917,8 +918,6 @@ async fn rewrite_chapters_for_auto(
             let _ = mark_chapters_rewrite_failed(state, &chapters);
         }
     })?;
-
-    save_parsed_rewrites(state, final_rewrite)?;
     Ok(())
 }
 
