@@ -1,0 +1,258 @@
+use crate::domain::{ActiveShardProgress, AppState, Chapter, JobProgress};
+use crate::task_control::AutoRunProgressState;
+use crate::{row_to_job, to_string, update_job};
+use rusqlite::params;
+use tauri::{Emitter, State};
+
+fn phase_label(phase: &str) -> &'static str {
+    match phase {
+        "analysis" => "分析",
+        "rewrite" => "改写",
+        "review" => "审查",
+        "revision" => "修复",
+        "final_review" => "终审",
+        "export" => "导出",
+        _ => "处理中",
+    }
+}
+
+pub(crate) fn begin_auto_batch_progress(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+    batch_index: i64,
+    batch_total: i64,
+    batch_label: &str,
+) -> Result<(), String> {
+    if !state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .contains_key(novel_id)
+    {
+        return Ok(());
+    }
+    state.auto_run_progress.lock().map_err(to_string)?.insert(
+        novel_id.to_string(),
+        AutoRunProgressState {
+            phase: Some(phase.to_string()),
+            batch_index: Some(batch_index),
+            batch_total: Some(batch_total),
+            batch_label: Some(batch_label.to_string()),
+            ..AutoRunProgressState::default()
+        },
+    );
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+pub(crate) fn set_auto_progress_shard_total(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+    shard_total: usize,
+) -> Result<(), String> {
+    if !state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .contains_key(novel_id)
+    {
+        return Ok(());
+    }
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let entry = progress.entry(novel_id.to_string()).or_default();
+    entry.phase = Some(phase.to_string());
+    entry.shard_total = shard_total;
+    entry.completed_shards.clear();
+    entry.active_shards.clear();
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+pub(crate) fn set_auto_progress_phase(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+) -> Result<(), String> {
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    entry.active_shards.clear();
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+pub(crate) fn report_auto_shard_started(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+    shard_index: usize,
+    shard_total: usize,
+    shard: &[Chapter],
+) -> Result<(), String> {
+    let Some(first) = shard.first() else {
+        return Ok(());
+    };
+    let last = shard.last().unwrap_or(first);
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    entry.shard_total = shard_total;
+    entry.active_shards.insert(
+        shard_index,
+        ActiveShardProgress {
+            index: shard_index + 1,
+            total: shard_total,
+            start_chapter: first.index,
+            end_chapter: last.index,
+            phase: phase.to_string(),
+        },
+    );
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+pub(crate) fn report_auto_shard_phase(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    shard_index: usize,
+    phase: &str,
+) -> Result<(), String> {
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    if let Some(shard) = entry.active_shards.get_mut(&shard_index) {
+        shard.phase = phase.to_string();
+    }
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+pub(crate) fn report_auto_shard_phase_for_chapters(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    chapters: &[Chapter],
+    phase: &str,
+) -> Result<(), String> {
+    let Some(first) = chapters.first() else {
+        return Ok(());
+    };
+    let last = chapters.last().unwrap_or(first);
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    if let Some(shard) = entry
+        .active_shards
+        .values_mut()
+        .find(|shard| shard.start_chapter == first.index && shard.end_chapter == last.index)
+    {
+        shard.phase = phase.to_string();
+    }
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+pub(crate) fn report_auto_shard_completed(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    shard_index: usize,
+) -> Result<(), String> {
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.active_shards.remove(&shard_index);
+    entry.completed_shards.insert(shard_index);
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
+    let control = state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .get(novel_id)
+        .cloned();
+    let Some(control) = control else {
+        return Ok(());
+    };
+    let Some(job_id) = control.job_id.as_deref() else {
+        return Ok(());
+    };
+    let progress_state = state
+        .auto_run_progress
+        .lock()
+        .map_err(to_string)?
+        .get(novel_id)
+        .cloned()
+        .unwrap_or_default();
+    let conn = state.conn.lock().map_err(to_string)?;
+    let job = conn
+        .query_row(
+            "SELECT id, novel_id, job_type, status, current_chapter, total_chapters, message, created_at, updated_at FROM jobs WHERE id = ?1",
+            params![job_id],
+            row_to_job,
+        )
+        .map_err(to_string)?;
+    drop(conn);
+    let phase = progress_state.phase.as_deref().unwrap_or("rewrite");
+    let batch_index = progress_state.batch_index.unwrap_or(0);
+    let batch_total = progress_state.batch_total.unwrap_or(job.total_chapters);
+    let shard_completed = progress_state.completed_shards.len();
+    let shard_total = progress_state.shard_total;
+    let message = if shard_total > 0 {
+        format!(
+            "第 {}/{} 批 · {} · 分片已完成 {}/{}",
+            batch_index,
+            batch_total,
+            phase_label(phase),
+            shard_completed,
+            shard_total
+        )
+    } else {
+        format!(
+            "第 {}/{} 批 · {}",
+            batch_index,
+            batch_total,
+            phase_label(phase)
+        )
+    };
+    update_job(
+        state,
+        &job.id,
+        "running",
+        control
+            .completed_batches
+            .saturating_sub(control.start_batch_index),
+        &message,
+    )?;
+    let payload = JobProgress {
+        id: job.id,
+        novel_id: job.novel_id,
+        job_type: job.job_type,
+        status: "running".to_string(),
+        current_chapter: control
+            .completed_batches
+            .saturating_sub(control.start_batch_index),
+        total_chapters: job.total_chapters,
+        message,
+        phase: progress_state.phase,
+        batch_index: progress_state.batch_index,
+        batch_total: progress_state.batch_total,
+        batch_label: progress_state.batch_label,
+        shard_completed: Some(shard_completed),
+        shard_total: Some(shard_total),
+        active_shards: Some(progress_state.active_shards.into_values().collect()),
+    };
+    let _ = state.app.emit("job-progress", payload);
+    Ok(())
+}
