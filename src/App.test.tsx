@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
-import type { AiLog, AppSettings, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
+import type { AiLog, AppSettings, AutoRunRecovery, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -94,12 +94,14 @@ const estimate: JobEstimate = {
   recent_success_calls: 0,
   recent_failed_calls: 0
 };
+let recoveryRows: AutoRunRecovery[] = [];
 
 function installDefaultCommands() {
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "list_novels") return novels;
     if (command === "list_model_profiles") return [profile];
     if (command === "get_app_settings") return settings;
+    if (command === "list_auto_run_recoveries") return recoveryRows;
     if (command === "get_novel_detail") return detail;
     if (command === "list_ai_logs") return [];
     if (command === "estimate_job_cost") return estimate;
@@ -126,6 +128,7 @@ describe("App feature behavior", () => {
     useAppStore.getState().reset();
     mocks.invoke.mockReset();
     mocks.progressCallback = undefined;
+    recoveryRows = [];
     window.localStorage.setItem("yuri-rewrite.quick-start-seen", "true");
     installDefaultCommands();
   });
@@ -135,6 +138,31 @@ describe("App feature behavior", () => {
     expect(await screen.findByRole("heading", { name: "测试小说" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-1");
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+  });
+
+  it("restores an interrupted auto run as paused on startup", async () => {
+    recoveryRows = [{
+      novel_id: "novel-1",
+      start_batch_index: 0,
+      next_batch_index: 1,
+      status: "paused",
+      pause_reason: "软件意外关闭。",
+      profile_ids: ["profile-1"],
+      job: {
+        id: "job-recovery",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "paused",
+        current_chapter: 1,
+        total_chapters: 2,
+        message: "旧消息"
+      }
+    }];
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "继续" })).toBeEnabled();
+    expect(screen.getByText(/检测到上次未完成的一键任务，将从第 2 批重新开始/)).toBeInTheDocument();
+    expect(screen.getByText("未完成")).toBeInTheDocument();
   });
 
   it("shows the updated quick start help text", async () => {
@@ -152,6 +180,7 @@ describe("App feature behavior", () => {
       if (command === "list_novels") return novels;
       if (command === "list_model_profiles") return [profile, secondProfile];
       if (command === "get_app_settings") return { ...settings, selected_profile_id: "profile-2" };
+      if (command === "list_auto_run_recoveries") return [];
       if (command === "get_novel_detail") return detail;
       if (command === "list_ai_logs") return [];
       if (command === "estimate_job_cost") return estimate;
@@ -221,6 +250,7 @@ describe("App feature behavior", () => {
       if (command === "list_novels") return novels;
       if (command === "list_model_profiles") return [profile, secondProfile];
       if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
       if (command === "get_novel_detail") return detail;
       if (command === "list_ai_logs") return [];
       if (command === "estimate_job_cost") return estimate;
@@ -257,6 +287,7 @@ describe("App feature behavior", () => {
       if (command === "list_novels") return novels;
       if (command === "list_model_profiles") return [profile];
       if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
       if (command === "list_ai_logs") return currentLogs;
       if (command === "estimate_job_cost") return estimate;
       if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
@@ -324,6 +355,72 @@ describe("App feature behavior", () => {
     });
 
     await waitFor(() => expect(screen.getByText(/预计剩余 1 分 0 秒/)).toBeInTheDocument());
+  });
+
+  it("shows detailed batch and active shard progress", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-detail",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 10,
+        message: "详细进度",
+        phase: "review",
+        batch_index: 2,
+        batch_total: 10,
+        shard_completed: 3,
+        shard_total: 6,
+        active_shards: [{
+          index: 4,
+          total: 6,
+          start_chapter: 40,
+          end_chapter: 42,
+          phase: "review"
+        }]
+      });
+    });
+
+    expect(await screen.findByText(/第 2\/10 批 · 审查 · 分片 3\/6/)).toBeInTheDocument();
+    expect(screen.getByText(/4\/6 第40-42章（审查）/)).toBeInTheDocument();
+  });
+
+  it("limits active shard details to three entries", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-many-shards",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 0,
+        total_chapters: 2,
+        message: "多个分片",
+        phase: "rewrite",
+        batch_index: 1,
+        batch_total: 2,
+        shard_completed: 0,
+        shard_total: 6,
+        active_shards: [1, 2, 3, 4].map((index) => ({
+          index,
+          total: 6,
+          start_chapter: index,
+          end_chapter: index,
+          phase: "rewrite"
+        }))
+      });
+    });
+
+    expect(await screen.findByText("1/6 第1章（改写）")).toBeInTheDocument();
+    expect(screen.getByText("3/6 第3章（改写）")).toBeInTheDocument();
+    expect(screen.queryByText("4/6 第4章（改写）")).not.toBeInTheDocument();
+    expect(screen.getByText("另有 1 个处理中")).toBeInTheDocument();
   });
 
   it.each(["completed", "paused", "failed"])(

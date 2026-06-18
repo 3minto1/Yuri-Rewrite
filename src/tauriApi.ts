@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AiLog,
   AppSettings,
+  AutoRunRecovery,
   CanonAsset,
   CanonAssetInput,
   ExportResult,
@@ -21,6 +22,7 @@ import type {
 type CommandMap = {
   list_novels: { args?: undefined; result: Novel[] };
   get_novel_detail: { args: { novelId: string }; result: NovelDetail };
+  list_auto_run_recoveries: { args?: undefined; result: AutoRunRecovery[] };
   import_txt: { args: { filePath: string }; result: Novel };
   delete_novel: { args: { novelId: string }; result: void };
   list_model_profiles: { args?: undefined; result: ModelProfile[] };
@@ -50,6 +52,14 @@ type CommandMap = {
     result: JobEstimate;
   };
   update_canon_assets: { args: { novelId: string; assets: CanonAssetInput[] }; result: CanonAsset[] };
+  save_chapter_rewrite_edit: {
+    args: { chapterId: string; rewriteText: string };
+    result: import("./types").Chapter;
+  };
+  restore_chapter_rewrite_edit: {
+    args: { chapterId: string };
+    result: import("./types").Chapter;
+  };
   start_analysis: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
   start_rewrite: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
   start_analyze_rewrite_all: {

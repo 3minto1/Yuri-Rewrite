@@ -4,6 +4,8 @@ use rusqlite::Connection;
 pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
+        PRAGMA foreign_keys = ON;
+
         CREATE TABLE IF NOT EXISTS novels (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -21,6 +23,8 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             original_text TEXT NOT NULL,
             analysis_json TEXT,
             rewrite_text TEXT,
+            ai_rewrite_text TEXT,
+            rewrite_edited_at TEXT,
             analysis_status TEXT NOT NULL,
             rewrite_status TEXT NOT NULL,
             FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
@@ -101,6 +105,21 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS auto_run_checkpoints (
+            novel_id TEXT PRIMARY KEY,
+            start_batch_index INTEGER NOT NULL,
+            next_batch_index INTEGER NOT NULL,
+            job_id TEXT,
+            status TEXT NOT NULL,
+            pause_reason TEXT NOT NULL DEFAULT '',
+            phase TEXT,
+            batch_index INTEGER,
+            profile_ids TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id, chapter_index);
         CREATE INDEX IF NOT EXISTS idx_jobs_novel ON jobs(novel_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
@@ -117,6 +136,12 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     migrations::ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
+    migrations::ensure_column(conn, "chapters", "ai_rewrite_text", "TEXT")?;
+    migrations::ensure_column(conn, "chapters", "rewrite_edited_at", "TEXT")?;
+    conn.execute(
+        "UPDATE chapters SET ai_rewrite_text = rewrite_text WHERE ai_rewrite_text IS NULL AND rewrite_text IS NOT NULL AND trim(rewrite_text) != ''",
+        [],
+    )?;
     migrations::ensure_column(
         conn,
         "novel_settings",
@@ -137,4 +162,96 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     migrations::migrate_api_keys_to_keyring(conn)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_preserves_existing_rewrite_as_ai_baseline() {
+        let conn = Connection::open_in_memory().expect("open database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE chapters (
+                id TEXT PRIMARY KEY,
+                novel_id TEXT NOT NULL,
+                chapter_index INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                original_text TEXT NOT NULL,
+                analysis_json TEXT,
+                rewrite_text TEXT,
+                analysis_status TEXT NOT NULL,
+                rewrite_status TEXT NOT NULL
+            );
+            INSERT INTO chapters VALUES (
+                'chapter-1', 'novel-1', 1, '第一章', '原文', NULL, '已有改写',
+                'completed', 'completed'
+            );
+            "#,
+        )
+        .expect("seed old schema");
+
+        init_db(&conn).expect("migrate schema");
+
+        let (baseline, edited_at): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT ai_rewrite_text, rewrite_edited_at FROM chapters WHERE id = 'chapter-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load migrated chapter");
+        assert_eq!(baseline.as_deref(), Some("已有改写"));
+        assert!(edited_at.is_none());
+    }
+
+    #[test]
+    fn creates_auto_run_checkpoint_table() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, created_at) VALUES ('novel-1', '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, status, profile_ids, created_at, updated_at) VALUES ('novel-1', 0, 2, 'paused', '[\"profile-1\"]', 'now', 'now')",
+            [],
+        )
+        .expect("insert checkpoint");
+        let next: i64 = conn
+            .query_row(
+                "SELECT next_batch_index FROM auto_run_checkpoints WHERE novel_id = 'novel-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load checkpoint");
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn deleting_novel_cascades_auto_run_checkpoint() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, created_at) VALUES ('novel-1', '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, status, profile_ids, created_at, updated_at) VALUES ('novel-1', 0, 0, 'paused', '[]', 'now', 'now')",
+            [],
+        )
+        .expect("insert checkpoint");
+
+        conn.execute("DELETE FROM novels WHERE id = 'novel-1'", [])
+            .expect("delete novel");
+
+        let checkpoint_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM auto_run_checkpoints", [], |row| {
+                row.get(0)
+            })
+            .expect("count checkpoints");
+        assert_eq!(checkpoint_count, 0);
+    }
 }

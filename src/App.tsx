@@ -40,6 +40,7 @@ import { invokeCommand as invoke } from "./tauriApi";
 import type {
   AiLog,
   AppSettings,
+  AutoRunRecovery,
   CanonAsset,
   Chapter,
   DiagnosisStatus,
@@ -251,6 +252,15 @@ const statusText: Record<string, string> = {
   imported: "已导入"
 };
 
+const jobPhaseText: Record<string, string> = {
+  analysis: "分析",
+  rewrite: "改写",
+  review: "审查",
+  revision: "修复",
+  final_review: "终审",
+  export: "导出"
+};
+
 export default function App() {
   const {
     novels, setNovels, detail, setDetail, selectedChapterId, setSelectedChapterId,
@@ -282,6 +292,7 @@ export default function App() {
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [showQuickStart, setShowQuickStart] = useState(false);
+  const [autoRunRecoveries, setAutoRunRecoveries] = useState<AutoRunRecovery[]>([]);
   const [autoRunMenuOpen, setAutoRunMenuOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLDivElement | null>(null);
@@ -437,6 +448,9 @@ export default function App() {
       if (["completed", "paused", "failed"].includes(progress.status)) {
         void refreshJobEstimate();
       }
+      if (["completed", "paused", "failed", "terminated"].includes(progress.status)) {
+        void invoke("list_auto_run_recoveries").then(setAutoRunRecoveries);
+      }
   });
 
   useEffect(() => {
@@ -514,26 +528,55 @@ export default function App() {
   }, [refreshJobEstimate, settings.review_enabled, settings.rewrite_parallelism]);
 
   async function refreshAll() {
-    const [novelRows, profileRows, appSettings] = await Promise.all([
+    const [novelRows, profileRows, appSettings, recoveryRows] = await Promise.all([
       invoke("list_novels"),
       invoke("list_model_profiles"),
-      invoke("get_app_settings")
+      invoke("get_app_settings"),
+      invoke("list_auto_run_recoveries")
     ]);
     setNovels(novelRows);
     setProfiles(profileRows);
     setSettings(appSettings);
+    setAutoRunRecoveries(recoveryRows);
     const currentProfileIsValid = selectedProfileId && profileRows.some((profile) => profile.id === selectedProfileId);
     const savedProfileId = appSettings.selected_profile_id ?? "";
     const savedProfileIsValid = savedProfileId && profileRows.some((profile) => profile.id === savedProfileId);
     if (!currentProfileIsValid) {
       setSelectedProfileId(savedProfileIsValid ? savedProfileId : profileRows[0]?.id ?? "");
     }
-    if (!detail && novelRows[0]) await loadNovel(novelRows[0].id);
+    if (!detail && novelRows[0]) {
+      const firstRecoveryNovel = recoveryRows.find((recovery) => novelRows.some((novel) => novel.id === recovery.novel_id));
+      await loadNovel(firstRecoveryNovel?.novel_id ?? novelRows[0].id, { recoveries: recoveryRows });
+    } else if (detail) {
+      applyRecoveryForNovel(detail.novel.id, recoveryRows);
+    }
     await refreshLogs();
   }
 
-  async function loadNovel(novelId: string, options: { preserveBatchId?: string; preserveChapterId?: string } = {}) {
-    if (processingTaskActive && detail?.novel.id !== novelId) {
+  function applyRecoveryForNovel(novelId: string, recoveries = autoRunRecoveries) {
+    const recovery = recoveries.find((item) => item.novel_id === novelId);
+    if (!recovery) {
+      if (autoRunState === "paused") {
+        setAutoRunState("idle");
+        setJob(null);
+      }
+      return;
+    }
+    setAutoRunState("paused");
+    if (recovery.job) {
+      setJob({
+        ...recovery.job,
+        status: "paused",
+        message: `检测到上次未完成的一键任务，将从第 ${recovery.next_batch_index + 1} 批重新开始。${recovery.pause_reason ? ` ${recovery.pause_reason}` : ""}`
+      });
+    }
+  }
+
+  async function loadNovel(
+    novelId: string,
+    options: { preserveBatchId?: string; preserveChapterId?: string; recoveries?: AutoRunRecovery[] } = {}
+  ) {
+    if ((autoRunState === "running" || autoRunState === "stopping") && detail?.novel.id !== novelId) {
       showNotice("当前任务运行或暂停中，不能切换小说。请先完成或终止任务。");
       return;
     }
@@ -564,6 +607,7 @@ export default function App() {
     );
     setOpenNovelMenuId("");
     setActiveView("workspace");
+    applyRecoveryForNovel(novelId, options.recoveries);
     await refreshLogs(next.novel.id);
   }
 
@@ -892,6 +936,14 @@ export default function App() {
     }
   }
 
+  function confirmRewriteOverwrite(chapters: Chapter[]) {
+    const editedCount = chapters.filter((chapter) => chapter.rewrite_edited).length;
+    if (editedCount === 0) return true;
+    return window.confirm(
+      `当前处理范围有 ${editedCount} 章包含人工编辑内容。重新改写会用新的 AI 稿覆盖这些修改，是否继续？`
+    );
+  }
+
   async function runJob(kind: "analysis" | "rewrite") {
     if (!detail || !selectedProfileId) {
       showNotice("请先导入小说并选择模型配置。");
@@ -906,6 +958,14 @@ export default function App() {
       showNotice("当前小说没有可处理的批次。");
       return;
     }
+    if (
+      kind === "rewrite"
+      && !confirmRewriteOverwrite(
+        detail.chapters.filter(
+          (chapter) => chapter.index >= selectedBatch.start_chapter && chapter.index <= selectedBatch.end_chapter
+        )
+      )
+    ) return;
     setBusy(kind);
     setNotice("");
     try {
@@ -944,6 +1004,11 @@ export default function App() {
     }
     const batchId = selectedBatch.id;
     const novelId = detail.novel.id;
+    if (!confirmRewriteOverwrite(
+      detail.chapters.filter(
+        (chapter) => chapter.index >= selectedBatch.start_chapter && chapter.index <= selectedBatch.end_chapter
+      )
+    )) return;
     setBusy("auto-batch");
     setNotice("");
     try {
@@ -989,6 +1054,14 @@ export default function App() {
       setSettingsDialog("basic");
       return;
     }
+    const recovery = autoRunRecoveries.find((item) => item.novel_id === detail.novel.id);
+    const startPosition = autoRunState === "paused" && recovery
+      ? recovery.next_batch_index
+      : startBatchId
+        ? Math.max(0, detail.batches.findIndex((batch) => batch.id === startBatchId))
+        : 0;
+    const firstIncludedChapter = detail.batches[startPosition]?.start_chapter ?? Number.MAX_SAFE_INTEGER;
+    if (!confirmRewriteOverwrite(detail.chapters.filter((chapter) => chapter.index >= firstIncludedChapter))) return;
     setBusy("auto");
     setAutoRunState("running");
     setAutoRunMenuOpen(false);
@@ -1274,10 +1347,70 @@ export default function App() {
     return estimatedSecondsPerBatch * remainingBatches;
   }, [job, jobEstimate]);
 
+  const selectedRecovery = useMemo(
+    () => autoRunRecoveries.find((recovery) => recovery.novel_id === detail?.novel.id),
+    [autoRunRecoveries, detail?.novel.id]
+  );
+  const selectedChapterBatchPosition = useMemo(() => {
+    if (!detail || !selectedChapter) return -1;
+    return detail.batches.findIndex(
+      (batch) => selectedChapter.index >= batch.start_chapter && selectedChapter.index <= batch.end_chapter
+    );
+  }, [detail, selectedChapter]);
+  const compareEditingAllowed = Boolean(
+    selectedChapter
+      && busy === ""
+      && autoRunState !== "running"
+      && autoRunState !== "stopping"
+      && (
+        autoRunState !== "paused"
+        || (selectedRecovery && selectedChapterBatchPosition >= 0 && selectedChapterBatchPosition < selectedRecovery.next_batch_index)
+      )
+  );
+  const compareEditDisabledReason = autoRunState === "paused"
+    ? "暂停任务当前未完成批次及后续批次不能编辑"
+    : processingTaskActive
+      ? "任务运行期间不能编辑改写稿"
+      : busy
+        ? "当前操作完成后可编辑"
+        : undefined;
+
   const handleCompareBack = useCallback(() => setActiveView("workspace"), []);
   const handleCompareExport = useCallback(() => {
     void exportNovel("txt");
   }, [exportNovel]);
+
+  const updateChapterFromBackend = useCallback((chapter: Chapter) => {
+    const current = detailRef.current;
+    if (!current || current.novel.id !== chapter.novel_id) return;
+    const next = {
+      ...current,
+      chapters: current.chapters.map((item) => item.id === chapter.id ? chapter : item)
+    };
+    setDetail(next);
+  }, [setDetail]);
+
+  const saveChapterRewriteEdit = useCallback(async (chapterId: string, rewriteText: string) => {
+    try {
+      const chapter = await invoke("save_chapter_rewrite_edit", { chapterId, rewriteText });
+      updateChapterFromBackend(chapter);
+      showNotice("当前章节人工修改已保存。");
+    } catch (error) {
+      showNotice(String(error));
+      throw error;
+    }
+  }, [showNotice, updateChapterFromBackend]);
+
+  const restoreChapterRewriteEdit = useCallback(async (chapterId: string) => {
+    try {
+      const chapter = await invoke("restore_chapter_rewrite_edit", { chapterId });
+      updateChapterFromBackend(chapter);
+      showNotice("当前章节已恢复到最近 AI 稿。");
+    } catch (error) {
+      showNotice(String(error));
+      throw error;
+    }
+  }, [showNotice, updateChapterFromBackend]);
 
   function diagnosisStatusText(status: DiagnosisStatus) {
     if (status === "ok") return "通过";
@@ -1368,10 +1501,13 @@ export default function App() {
                 <button
                   className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"}
                   onClick={() => loadNovel(novel.id)}
-                  disabled={processingTaskActive && detail?.novel.id !== novel.id}
+                  disabled={(autoRunState === "running" || autoRunState === "stopping" || ["analysis", "rewrite", "auto-batch"].includes(busy)) && detail?.novel.id !== novel.id}
                 >
                   <BookOpen size={16} />
                   <span>{novel.title}</span>
+                  {autoRunRecoveries.some((recovery) => recovery.novel_id === novel.id) && (
+                    <small className="novel-recovery-badge">未完成</small>
+                  )}
                 </button>
                 <button
                   className="icon-button menu-trigger"
@@ -1598,12 +1734,41 @@ export default function App() {
                   : ""}
               </span>
               {job.job_type === "auto" && (
-                <div className="job-progress-row" aria-label={`一键分析改写进度 ${autoProgressPercent}%`}>
-                  <div className="job-progress-bar">
-                    <div className="job-progress-fill" style={{ width: `${autoProgressPercent}%` }} />
+                <>
+                  <div className="job-progress-row" aria-label={`一键分析改写进度 ${autoProgressPercent}%`}>
+                    <div className="job-progress-bar">
+                      <div className="job-progress-fill" style={{ width: `${autoProgressPercent}%` }} />
+                    </div>
+                    <strong>{autoProgressPercent}%</strong>
                   </div>
-                  <strong>{autoProgressPercent}%</strong>
-                </div>
+                  {job.shard_total !== undefined && job.shard_total > 0 && (
+                    <div className="job-stage-progress">
+                      <div className="job-stage-summary">
+                        <span>
+                          第 {job.batch_index ?? "—"}/{job.batch_total ?? job.total_chapters} 批
+                          {job.phase ? ` · ${jobPhaseText[job.phase] ?? job.phase}` : ""}
+                          {` · 分片 ${job.shard_completed ?? 0}/${job.shard_total}`}
+                        </span>
+                        <div className="job-stage-bar" aria-label={`当前阶段分片进度 ${job.shard_completed ?? 0}/${job.shard_total}`}>
+                          <div
+                            className="job-stage-fill"
+                            style={{ width: `${Math.round(((job.shard_completed ?? 0) / job.shard_total) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                      {job.active_shards && job.active_shards.length > 0 && (
+                        <div className="job-active-shards">
+                          {job.active_shards.slice(0, 3).map((shard) => (
+                            <span key={`${shard.index}-${shard.phase}`}>
+                              {`${shard.index}/${shard.total} 第${shard.start_chapter}${shard.end_chapter === shard.start_chapter ? "" : `-${shard.end_chapter}`}章（${jobPhaseText[shard.phase] ?? shard.phase}）`}
+                            </span>
+                          ))}
+                          {job.active_shards.length > 3 && <span>另有 {job.active_shards.length - 3} 个处理中</span>}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </div>
             {["completed", "failed", "paused", "terminated"].includes(job.status) && (
@@ -1746,6 +1911,10 @@ export default function App() {
             onSelectChapter={setSelectedChapterId}
             onBack={handleCompareBack}
             onExport={handleCompareExport}
+            editingAllowed={compareEditingAllowed}
+            editDisabledReason={compareEditDisabledReason}
+            onSaveRewrite={saveChapterRewriteEdit}
+            onRestoreRewrite={restoreChapterRewriteEdit}
           />
         )}
 

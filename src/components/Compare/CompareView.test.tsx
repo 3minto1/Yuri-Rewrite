@@ -11,11 +11,12 @@ const chapters: Chapter[] = [
 ];
 
 function Harness({ onBack = vi.fn() }: { onBack?: () => void }) {
+  const [chapterRows, setChapterRows] = useState(chapters);
   const [selectedChapterId, setSelectedChapterId] = useState("c1");
   return (
     <CompareView
-      chapters={chapters}
-      selectedChapter={chapters.find((chapter) => chapter.id === selectedChapterId)}
+      chapters={chapterRows}
+      selectedChapter={chapterRows.find((chapter) => chapter.id === selectedChapterId)}
       selectedChapterId={selectedChapterId}
       busy=""
       originalRef={createRef<HTMLDivElement>()}
@@ -23,6 +24,17 @@ function Harness({ onBack = vi.fn() }: { onBack?: () => void }) {
       onSelectChapter={setSelectedChapterId}
       onBack={onBack}
       onExport={vi.fn()}
+      editingAllowed
+      onSaveRewrite={async (chapterId, rewriteText) => {
+        setChapterRows((rows) => rows.map((chapter) => chapter.id === chapterId
+          ? { ...chapter, rewrite_text: rewriteText, rewrite_edited: true }
+          : chapter));
+      }}
+      onRestoreRewrite={async (chapterId) => {
+        setChapterRows((rows) => rows.map((chapter) => chapter.id === chapterId
+          ? { ...chapter, rewrite_text: chapters.find((source) => source.id === chapterId)?.rewrite_text, rewrite_edited: false }
+          : chapter));
+      }}
     />
   );
 }
@@ -51,6 +63,32 @@ describe("CompareView", () => {
     });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 / 1"));
     expect(screen.getByLabelText("改写稿内容").textContent).toContain("alpha");
+  });
+
+  it("saves an edited rewrite and recalculates visible text", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "人工修改后的目标正文" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("人工修改后的目标正文"));
+    expect(screen.getByRole("button", { name: "恢复 AI 稿" })).toBeInTheDocument();
+  });
+
+  it("asks before navigating away from unsaved edits", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "尚未保存的正文" }
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+
+    expect(screen.getByRole("dialog", { name: "改写稿尚未保存" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c1");
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c2"));
   });
 
   afterEach(() => {

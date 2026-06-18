@@ -32,7 +32,9 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
-use task_control::{should_terminate_paused_run, ActiveTaskRegistry, AutoRunControl};
+use task_control::{
+    should_terminate_paused_run, ActiveTaskRegistry, AutoRunControl, AutoRunProgressState,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use text::*;
 use uuid::Uuid;
@@ -67,16 +69,19 @@ pub fn run() {
             cleanup_deletion_trash(&data_dir);
             let conn = Connection::open(data_dir.join("yuri-rewrite.sqlite3"))?;
             init_db(&conn)?;
+            let restored_auto_runs = restore_auto_run_controls(&conn)?;
             let client = Client::builder()
                 .connect_timeout(Duration::from_secs(20))
                 .timeout(Duration::from_secs(20 * 60))
                 .build()?;
             app.manage(AppState {
+                app: app.handle().clone(),
                 conn: Mutex::new(conn),
                 client,
                 data_dir,
                 app_dir,
-                auto_runs: Mutex::new(HashMap::new()),
+                auto_runs: Mutex::new(restored_auto_runs),
+                auto_run_progress: Mutex::new(HashMap::new()),
                 active_tasks: ActiveTaskRegistry::default(),
                 rate_limits: RateLimitCoordinator::default(),
             });
@@ -108,6 +113,9 @@ pub fn run() {
             pause_analyze_rewrite_all,
             terminate_analyze_rewrite_all,
             get_job,
+            list_auto_run_recoveries,
+            save_chapter_rewrite_edit,
+            restore_chapter_rewrite_edit,
             export_novel,
             open_github_url,
             check_for_updates,
@@ -116,6 +124,46 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuri Rewrite");
+}
+
+fn restore_auto_run_controls(
+    conn: &Connection,
+) -> Result<HashMap<String, AutoRunControl>, Box<dyn std::error::Error>> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE auto_run_checkpoints SET status = 'paused', pause_reason = CASE WHEN trim(pause_reason) = '' THEN '检测到软件上次运行时任务未正常结束。' ELSE pause_reason END, updated_at = ?1 WHERE status IN ('running', 'pausing', 'pause_requested', 'terminating', 'terminate_requested')",
+        params![now],
+    )?;
+    conn.execute(
+        "UPDATE jobs SET status = 'paused', message = '检测到上次未完成的一键任务，可点击继续从当前批次重新开始。', updated_at = ?1 WHERE job_type = 'auto' AND status IN ('running', 'pausing', 'terminating') AND id IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
+        params![now],
+    )?;
+    conn.execute(
+        "UPDATE jobs SET status = 'failed', message = '旧版本任务在软件关闭时中断，缺少恢复检查点，无法继续。', updated_at = ?1 WHERE job_type = 'auto' AND status IN ('running', 'pausing', 'terminating') AND id NOT IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
+        params![now],
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT novel_id, start_batch_index, next_batch_index, job_id, status, profile_ids FROM auto_run_checkpoints",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let profile_json: String = row.get(5)?;
+        let profile_ids = serde_json::from_str::<Vec<String>>(&profile_json)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        Ok((
+            row.get::<_, String>(0)?,
+            AutoRunControl {
+                start_batch_index: row.get(1)?,
+                completed_batches: row.get(2)?,
+                job_id: row.get(3)?,
+                status: row.get(4)?,
+                profile_ids,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
 }
 
 fn cleanup_deletion_trash(data_dir: &Path) {
@@ -178,8 +226,10 @@ async fn analyze_batch_with_parallelism(
     let shard_total = shards.len();
     let batch_label = format_batch_label(chapters);
     let mut tasks = tokio::task::JoinSet::new();
+    set_auto_progress_shard_total(state, novel_id, "analysis", shard_total)?;
 
     for (idx, shard) in shards.into_iter().enumerate() {
+        report_auto_shard_started(state, novel_id, "analysis", idx, shard_total, &shard)?;
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
         let context =
             format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
@@ -255,6 +305,7 @@ async fn analyze_batch_with_parallelism(
                         }
                     }
                 };
+                report_auto_shard_completed(state, novel_id, idx)?;
                 parsed_by_shard.push((idx, parsed));
             }
             Err(error) => {
@@ -918,8 +969,10 @@ async fn generate_rewrite_shards(
     let shard_total = shards.len();
     let batch_label = format_batch_label(chapters);
     let mut tasks = FuturesUnordered::new();
+    set_auto_progress_shard_total(state, novel_id, "rewrite", shard_total)?;
 
     for (idx, shard) in shards.into_iter().enumerate() {
+        report_auto_shard_started(state, novel_id, "rewrite", idx, shard_total, &shard)?;
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
         let context =
             format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
@@ -958,7 +1011,10 @@ async fn generate_rewrite_shards(
             break;
         };
         match parsed {
-            Ok(parsed) => parsed_by_shard.push((idx, parsed)),
+            Ok(parsed) => {
+                report_auto_shard_completed(state, novel_id, idx)?;
+                parsed_by_shard.push((idx, parsed))
+            }
             Err(error) => {
                 drop(tasks);
                 return Err(format!("{}：{}", shard_label, error));
@@ -1101,6 +1157,7 @@ async fn recover_rewrite_shard_by_subdivision(
     review_enabled: bool,
     original_error: &str,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
+    report_auto_shard_phase_for_chapters(state, novel_id, shard, "revision")?;
     let Some((left, right)) = split_chapters_for_rewrite_recovery(shard) else {
         return Err(original_error.to_string());
     };
@@ -1274,8 +1331,10 @@ async fn generate_reviewed_rewrite_pipeline(
     let shard_total = chapter_shards.len();
     let batch_label = format_batch_label(chapters);
     let mut tasks = FuturesUnordered::new();
+    set_auto_progress_shard_total(state, novel_id, "rewrite", shard_total)?;
 
     for (idx, shard) in chapter_shards.into_iter().enumerate() {
+        report_auto_shard_started(state, novel_id, "rewrite", idx, shard_total, &shard)?;
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
         let context =
             format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
@@ -1295,6 +1354,7 @@ async fn generate_reviewed_rewrite_pipeline(
             )
             .await
             .map_err(|error| format!("{}：{}", shard_label, error))?;
+            report_auto_shard_phase(state, novel_id, idx, "review")?;
             let reviewed = review_rewrite_shard_strict(
                 state,
                 novel_id,
@@ -1309,6 +1369,7 @@ async fn generate_reviewed_rewrite_pipeline(
                 core_prompt,
                 &context,
                 &shard_label,
+                idx,
             )
             .await?;
             Ok::<_, String>((idx, shard_label, reviewed))
@@ -1331,7 +1392,10 @@ async fn generate_reviewed_rewrite_pipeline(
             break;
         };
         match result {
-            Ok((idx, _, parsed)) => parsed_by_shard.push((idx, parsed)),
+            Ok((idx, _, parsed)) => {
+                report_auto_shard_completed(state, novel_id, idx)?;
+                parsed_by_shard.push((idx, parsed))
+            }
             Err(error) => {
                 drop(tasks);
                 return Err(error);
@@ -1361,6 +1425,7 @@ async fn review_rewrite_shard_strict(
     core_prompt: &str,
     shard_context: &str,
     shard_label: &str,
+    progress_shard_index: usize,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
     let first_decision = review_shard_decision(
         state,
@@ -1381,6 +1446,7 @@ async fn review_rewrite_shard_strict(
     if first_decision.approved {
         return Ok(rewrite_shard);
     }
+    report_auto_shard_phase(state, novel_id, progress_shard_index, "revision")?;
     append_ai_log(
         state,
         Some(novel_id),
@@ -1408,6 +1474,7 @@ async fn review_rewrite_shard_strict(
     )
     .await?;
     let second_label = format!("{} · 第二次审查", shard_label);
+    report_auto_shard_phase(state, novel_id, progress_shard_index, "review")?;
     let second_decision = review_revised_shard(
         state,
         novel_id,
@@ -1425,6 +1492,7 @@ async fn review_rewrite_shard_strict(
     if second_decision.approved {
         return Ok(revised);
     }
+    report_auto_shard_phase(state, novel_id, progress_shard_index, "revision")?;
     append_ai_log(
         state,
         Some(novel_id),
@@ -1452,6 +1520,7 @@ async fn review_rewrite_shard_strict(
     )
     .await?;
     let third_label = format!("{} · 第三次审查", shard_label);
+    report_auto_shard_phase(state, novel_id, progress_shard_index, "final_review")?;
     let third_decision = review_revised_shard(
         state,
         novel_id,
@@ -1796,6 +1865,7 @@ fn build_batch_review_decision_prompt_with_context(
 Blocking 清单：
 - 主角或指定性转角色在改写稿中仍有明确男性姓名、代词、身份、称谓、身体特征或社会角色残留。
 - 未指定性转的角色被误改性别、亲属关系、称谓或代词。
+- 主角与男性角色共同被复数指代，或群体中包含任一未指定性转的男性成员时，改写稿却使用“她们”；此类混合性别群体必须使用“他们”或准确的群体称呼。只有确认全员女性时才使用“她们”。
 - 当前改写稿缺句、重复、串章、空正文、额外章节、marker/章节边界错误，或破坏原文事件顺序、因果、战力、伏笔、人物动机。
 - 外貌、能力状态、关系推进、核心设定或高级设定出现实质矛盾。
 - 主角改名后，改写稿仍保留“同名、原名、旧名、以旧名某字为名、名字含义”等暴露旧主角姓名或与新姓名矛盾的表达。
@@ -1806,6 +1876,7 @@ Blocking 清单：
 - 不要把仅与主角原名共享单字的未指定 NPC 当成主角残留。例如主角“石昊”改为“石念昔”时，未被指定或映射的 NPC“秦昊”仍应保留，不是 blocking。
 - “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性昵称本身不是男性残留。只有同处证据明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代且确实指向主角，才是 blocking。
 - 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，改写稿保留原文人称代词和称谓不是问题。
+- 群体成员性别不明时，保留原文“他们”或使用中性群体称呼不是问题；不得仅因群体中包含女性主角就要求改成“她们”。
 - 不要输出通过项、优点、确认事项、建议性润色或“无需修改”的内容。
 
 问题字段长度：
@@ -1886,7 +1957,7 @@ fn build_compact_review_constraints(
     };
     let canon_summary = compact_review_canon(canon_text);
     format!(
-        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、主角改名后的同名/旧名/以旧名某字为名等姓名逻辑矛盾、未指定角色误改性别、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。仅与主角原名共享单字的未指定 NPC 不得当作主角残留。性别不明的动物、灵兽等非人生物保留原文代词可通过。",
+        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、主角改名后的同名/旧名/以旧名某字为名等姓名逻辑矛盾、未指定角色误改性别、混合性别群体或含男性成员的群体被误称为“她们”、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。仅与主角原名共享单字的未指定 NPC 不得当作主角残留。性别不明的动物、灵兽等非人生物保留原文代词可通过。只有确认全员女性时才使用“她们”；群体含男性成员时使用“他们”或准确群体称呼。",
         settings.protagonist_name.trim(),
         rewritten_name,
         additional_names,
@@ -1964,7 +2035,7 @@ fn build_batch_revision_prompt_with_context(
 必须遵守：
 1. 不要只局部补丁，必须重新输出当前分片所有章节的完整标题和正文。
 2. 保留原章节顺序和所有 `<<<YURI_REWRITE_CHAPTER_START ...>>>` / `<<<YURI_REWRITE_CHAPTER_END ...>>>` marker，marker 的 index 和 id 必须逐字复制。
-3. 逐条修复审查问题，同时继续遵守姓名映射、女性化要求、未指定角色性别保持、外貌一致性和原文逻辑。
+3. 逐条修复审查问题，同时继续遵守姓名映射、女性化要求、未指定角色性别保持、外貌一致性和原文逻辑。主角与男性共同被指代或群体含男性成员时必须使用“他们”或准确群体称呼，只有确认全员女性时才使用“她们”。
 4. 只输出当前分片章节，不要解释、不要 Markdown、不要输出审查意见。
 
 审查打回问题：
@@ -2034,7 +2105,7 @@ fn build_targeted_revision_prompt(
 - 核心设定：{}
 - 高级设定：{}
 - 保留原章节顺序、原文主线、因果、战力、伏笔、人物动机和目标章节 marker。
-- 只修复 blocking 问题，不改动已合格内容；未指定性转角色保持原文性别；性别不明的动物、灵兽等非人生物保留原文代词可通过。
+- 只修复 blocking 问题，不改动已合格内容；未指定性转角色保持原文性别；主角与男性共同被指代或群体含男性成员时使用“他们”或准确群体称呼，只有全员女性时才使用“她们”；性别不明的动物、灵兽等非人生物保留原文代词可通过。
 - 每个目标章节必须完整输出原 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 和 `<<<YURI_REWRITE_CHAPTER_END ...>>>`，marker 的 index 和 id 逐字复制。
 - 只输出目标章节的 marker、标题、正文；不要解释、不要 Markdown。
 
@@ -4372,7 +4443,7 @@ async fn start_rewrite_legacy(
                 )?;
                 let conn = state.conn.lock().map_err(to_string)?;
                 conn.execute(
-                    "UPDATE chapters SET rewrite_text = ?1, rewrite_status = 'completed' WHERE id = ?2",
+            "UPDATE chapters SET rewrite_text = ?1, ai_rewrite_text = ?1, rewrite_edited_at = NULL, rewrite_status = 'completed' WHERE id = ?2",
                     params![output.text.trim(), chapter.id],
                 )
                 .map_err(to_string)?;
@@ -4461,7 +4532,7 @@ fn create_chapter_batches(
 fn load_chapters(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, analysis_status, rewrite_status FROM chapters WHERE novel_id = ?1 ORDER BY chapter_index",
+            "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, rewrite_edited_at IS NOT NULL, analysis_status, rewrite_status FROM chapters WHERE novel_id = ?1 ORDER BY chapter_index",
         )
         .map_err(to_string)?;
     let chapters = stmt
@@ -4486,7 +4557,7 @@ fn load_chapters_for_batch(
         .map_err(to_string)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, analysis_status, rewrite_status FROM chapters WHERE novel_id = ?1 AND chapter_index BETWEEN ?2 AND ?3 ORDER BY chapter_index",
+            "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, rewrite_edited_at IS NOT NULL, analysis_status, rewrite_status FROM chapters WHERE novel_id = ?1 AND chapter_index BETWEEN ?2 AND ?3 ORDER BY chapter_index",
         )
         .map_err(to_string)?;
     let chapters = stmt
@@ -4622,7 +4693,7 @@ fn save_parsed_rewrites(
     let tx = conn.transaction().map_err(to_string)?;
     for rewrite in rewrites {
         tx.execute(
-            "UPDATE chapters SET title = ?1, rewrite_text = ?2, rewrite_status = 'completed' WHERE id = ?3",
+            "UPDATE chapters SET title = ?1, rewrite_text = ?2, ai_rewrite_text = ?2, rewrite_edited_at = NULL, rewrite_status = 'completed' WHERE id = ?3",
             params![rewrite.title.trim(), rewrite.text.trim(), rewrite.id],
         )
         .map_err(to_string)?;
@@ -5064,6 +5135,9 @@ fn prepare_auto_run(
             profile_ids,
         },
     );
+    let control = runs.get(novel_id).cloned().expect("inserted auto run");
+    drop(runs);
+    persist_auto_run_checkpoint(state, novel_id, &control, "", None, None)?;
     Ok((resume_from, start_batch_index))
 }
 
@@ -5088,6 +5162,9 @@ fn register_auto_run_job(
     control.start_batch_index = start_batch_index;
     control.completed_batches = completed_batches;
     control.job_id = Some(job_id.to_string());
+    let control = control.clone();
+    drop(runs);
+    persist_auto_run_checkpoint(state, novel_id, &control, "", None, None)?;
     Ok(())
 }
 
@@ -5099,8 +5176,92 @@ fn set_auto_run_completed(
     let mut runs = state.auto_runs.lock().map_err(to_string)?;
     if let Some(control) = runs.get_mut(novel_id) {
         control.completed_batches = completed_batches;
+        let control = control.clone();
+        drop(runs);
+        persist_auto_run_checkpoint(
+            state,
+            novel_id,
+            &control,
+            "",
+            Some("export"),
+            Some(completed_batches),
+        )?;
     }
     Ok(())
+}
+
+fn persist_auto_run_checkpoint(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    control: &AutoRunControl,
+    pause_reason: &str,
+    phase: Option<&str>,
+    batch_index: Option<i64>,
+) -> Result<(), String> {
+    let profile_ids =
+        serde_json::to_string(&control.profile_ids.iter().cloned().collect::<Vec<_>>())
+            .map_err(to_string)?;
+    let now = Utc::now().to_rfc3339();
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.execute(
+        r#"
+        INSERT INTO auto_run_checkpoints (
+            novel_id, start_batch_index, next_batch_index, job_id, status,
+            pause_reason, phase, batch_index, profile_ids, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+        ON CONFLICT(novel_id) DO UPDATE SET
+            start_batch_index = excluded.start_batch_index,
+            next_batch_index = excluded.next_batch_index,
+            job_id = excluded.job_id,
+            status = excluded.status,
+            pause_reason = CASE
+                WHEN excluded.status = 'running' THEN excluded.pause_reason
+                WHEN excluded.pause_reason = '' THEN auto_run_checkpoints.pause_reason
+                ELSE excluded.pause_reason
+            END,
+            phase = COALESCE(excluded.phase, auto_run_checkpoints.phase),
+            batch_index = COALESCE(excluded.batch_index, auto_run_checkpoints.batch_index),
+            profile_ids = excluded.profile_ids,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            novel_id,
+            control.start_batch_index,
+            control.completed_batches,
+            control.job_id,
+            control.status,
+            pause_reason,
+            phase,
+            batch_index,
+            profile_ids,
+            now
+        ],
+    )
+    .map_err(to_string)?;
+    Ok(())
+}
+
+fn update_auto_run_checkpoint_phase(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+    batch_index: i64,
+) -> Result<(), String> {
+    let control = state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .get(novel_id)
+        .cloned()
+        .ok_or_else(|| "当前一键任务状态不存在。".to_string())?;
+    persist_auto_run_checkpoint(
+        state,
+        novel_id,
+        &control,
+        "",
+        Some(phase),
+        Some(batch_index),
+    )
 }
 
 fn requested_auto_run_stop(
@@ -5154,6 +5315,16 @@ fn request_auto_run_stop(
             terminate_paused_run,
         )
     };
+    if !terminate_paused_run {
+        let control = state
+            .auto_runs
+            .lock()
+            .map_err(to_string)?
+            .get(novel_id)
+            .cloned()
+            .ok_or_else(|| "当前一键任务状态不存在。".to_string())?;
+        persist_auto_run_checkpoint(state, novel_id, &control, &message, None, None)?;
+    }
     if terminate_paused_run {
         let message = "一键分析改写已终止。下次点击将从头开始新的执行。";
         update_job(
@@ -5202,6 +5373,9 @@ fn finish_stopped_auto_run(
             control.status = "paused".to_string();
             control.completed_batches = completed_batches;
             control.job_id = Some(job.id.clone());
+            let control = control.clone();
+            drop(runs);
+            persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
         }
     }
     load_job(state, &job.id)
@@ -5228,8 +5402,10 @@ fn pause_auto_run_after_rate_limit(
         control.status = "paused".to_string();
         control.completed_batches = completed_batches;
         control.job_id = Some(job.id.clone());
+        let control = control.clone();
+        drop(runs);
+        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
     }
-    drop(runs);
     load_job(state, &job.id)
 }
 
@@ -5254,8 +5430,10 @@ fn pause_auto_run_after_network_error(
         control.status = "paused".to_string();
         control.completed_batches = completed_batches;
         control.job_id = Some(job.id.clone());
+        let control = control.clone();
+        drop(runs);
+        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
     }
-    drop(runs);
     load_job(state, &job.id)
 }
 
@@ -5280,14 +5458,28 @@ fn pause_auto_run_after_model_format_error(
         control.status = "paused".to_string();
         control.completed_batches = completed_batches;
         control.job_id = Some(job.id.clone());
+        let control = control.clone();
+        drop(runs);
+        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
     }
-    drop(runs);
     load_job(state, &job.id)
 }
 
 fn clear_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
     let mut runs = state.auto_runs.lock().map_err(to_string)?;
     runs.remove(novel_id);
+    drop(runs);
+    state
+        .auto_run_progress
+        .lock()
+        .map_err(to_string)?
+        .remove(novel_id);
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.execute(
+        "DELETE FROM auto_run_checkpoints WHERE novel_id = ?1",
+        params![novel_id],
+    )
+    .map_err(to_string)?;
     Ok(())
 }
 
@@ -5329,8 +5521,268 @@ fn emit_job_progress(
         current_chapter,
         total_chapters: job.total_chapters,
         message: message.to_string(),
+        phase: None,
+        batch_index: None,
+        batch_total: None,
+        batch_label: None,
+        shard_completed: None,
+        shard_total: None,
+        active_shards: None,
     };
     let _ = app.emit("job-progress", progress);
+}
+
+fn phase_label(phase: &str) -> &'static str {
+    match phase {
+        "analysis" => "分析",
+        "rewrite" => "改写",
+        "review" => "审查",
+        "revision" => "修复",
+        "final_review" => "终审",
+        "export" => "导出",
+        _ => "处理中",
+    }
+}
+
+fn begin_auto_batch_progress(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+    batch_index: i64,
+    batch_total: i64,
+    batch_label: &str,
+) -> Result<(), String> {
+    if !state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .contains_key(novel_id)
+    {
+        return Ok(());
+    }
+    state.auto_run_progress.lock().map_err(to_string)?.insert(
+        novel_id.to_string(),
+        AutoRunProgressState {
+            phase: Some(phase.to_string()),
+            batch_index: Some(batch_index),
+            batch_total: Some(batch_total),
+            batch_label: Some(batch_label.to_string()),
+            ..AutoRunProgressState::default()
+        },
+    );
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn set_auto_progress_shard_total(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+    shard_total: usize,
+) -> Result<(), String> {
+    if !state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .contains_key(novel_id)
+    {
+        return Ok(());
+    }
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let entry = progress.entry(novel_id.to_string()).or_default();
+    entry.phase = Some(phase.to_string());
+    entry.shard_total = shard_total;
+    entry.completed_shards.clear();
+    entry.active_shards.clear();
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn set_auto_progress_phase(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+) -> Result<(), String> {
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    entry.active_shards.clear();
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn report_auto_shard_started(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    phase: &str,
+    shard_index: usize,
+    shard_total: usize,
+    shard: &[Chapter],
+) -> Result<(), String> {
+    let Some(first) = shard.first() else {
+        return Ok(());
+    };
+    let last = shard.last().unwrap_or(first);
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    entry.shard_total = shard_total;
+    entry.active_shards.insert(
+        shard_index,
+        ActiveShardProgress {
+            index: shard_index + 1,
+            total: shard_total,
+            start_chapter: first.index,
+            end_chapter: last.index,
+            phase: phase.to_string(),
+        },
+    );
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn report_auto_shard_phase(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    shard_index: usize,
+    phase: &str,
+) -> Result<(), String> {
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    if let Some(shard) = entry.active_shards.get_mut(&shard_index) {
+        shard.phase = phase.to_string();
+    }
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn report_auto_shard_phase_for_chapters(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    chapters: &[Chapter],
+    phase: &str,
+) -> Result<(), String> {
+    let Some(first) = chapters.first() else {
+        return Ok(());
+    };
+    let last = chapters.last().unwrap_or(first);
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.phase = Some(phase.to_string());
+    if let Some(shard) = entry
+        .active_shards
+        .values_mut()
+        .find(|shard| shard.start_chapter == first.index && shard.end_chapter == last.index)
+    {
+        shard.phase = phase.to_string();
+    }
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn report_auto_shard_completed(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    shard_index: usize,
+) -> Result<(), String> {
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    let Some(entry) = progress.get_mut(novel_id) else {
+        return Ok(());
+    };
+    entry.active_shards.remove(&shard_index);
+    entry.completed_shards.insert(shard_index);
+    drop(progress);
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
+    let control = state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .get(novel_id)
+        .cloned();
+    let Some(control) = control else {
+        return Ok(());
+    };
+    let Some(job_id) = control.job_id.as_deref() else {
+        return Ok(());
+    };
+    let progress_state = state
+        .auto_run_progress
+        .lock()
+        .map_err(to_string)?
+        .get(novel_id)
+        .cloned()
+        .unwrap_or_default();
+    let conn = state.conn.lock().map_err(to_string)?;
+    let job = conn
+        .query_row(
+            "SELECT id, novel_id, job_type, status, current_chapter, total_chapters, message, created_at, updated_at FROM jobs WHERE id = ?1",
+            params![job_id],
+            row_to_job,
+        )
+        .map_err(to_string)?;
+    drop(conn);
+    let phase = progress_state.phase.as_deref().unwrap_or("rewrite");
+    let batch_index = progress_state.batch_index.unwrap_or(0);
+    let batch_total = progress_state.batch_total.unwrap_or(job.total_chapters);
+    let shard_completed = progress_state.completed_shards.len();
+    let shard_total = progress_state.shard_total;
+    let message = if shard_total > 0 {
+        format!(
+            "第 {}/{} 批 · {} · 分片已完成 {}/{}",
+            batch_index,
+            batch_total,
+            phase_label(phase),
+            shard_completed,
+            shard_total
+        )
+    } else {
+        format!(
+            "第 {}/{} 批 · {}",
+            batch_index,
+            batch_total,
+            phase_label(phase)
+        )
+    };
+    update_job(
+        state,
+        &job.id,
+        "running",
+        control
+            .completed_batches
+            .saturating_sub(control.start_batch_index),
+        &message,
+    )?;
+    let payload = JobProgress {
+        id: job.id,
+        novel_id: job.novel_id,
+        job_type: job.job_type,
+        status: "running".to_string(),
+        current_chapter: control
+            .completed_batches
+            .saturating_sub(control.start_batch_index),
+        total_chapters: job.total_chapters,
+        message,
+        phase: progress_state.phase,
+        batch_index: progress_state.batch_index,
+        batch_total: progress_state.batch_total,
+        batch_label: progress_state.batch_label,
+        shard_completed: Some(shard_completed),
+        shard_total: Some(shard_total),
+        active_shards: Some(progress_state.active_shards.into_values().collect()),
+    };
+    let _ = state.app.emit("job-progress", payload);
+    Ok(())
 }
 
 fn set_chapter_status(
@@ -5425,8 +5877,9 @@ fn row_to_chapter(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chapter> {
         original_text: row.get(4)?,
         analysis_json: row.get(5)?,
         rewrite_text: row.get(6)?,
-        analysis_status: row.get(7)?,
-        rewrite_status: row.get(8)?,
+        rewrite_edited: row.get(7)?,
+        analysis_status: row.get(8)?,
+        rewrite_status: row.get(9)?,
     })
 }
 
@@ -5755,6 +6208,7 @@ mod tests {
             original_text: original_text.to_string(),
             analysis_json: None,
             rewrite_text: None,
+            rewrite_edited: false,
             analysis_status: "completed".to_string(),
             rewrite_status: "pending".to_string(),
         }
@@ -6315,6 +6769,39 @@ mod tests {
     }
 
     #[test]
+    fn startup_restores_incomplete_auto_run_as_paused() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, created_at) VALUES ('novel-1', '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO jobs (id, novel_id, job_type, status, current_chapter, total_chapters, message, created_at, updated_at) VALUES ('job-1', 'novel-1', 'auto', 'running', 2, 10, '运行中', 'now', 'now')",
+            [],
+        )
+        .expect("insert job");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, job_id, status, pause_reason, phase, batch_index, profile_ids, created_at, updated_at) VALUES ('novel-1', 0, 2, 'job-1', 'running', '', 'rewrite', 3, '[\"profile-1\"]', 'now', 'now')",
+            [],
+        )
+        .expect("insert checkpoint");
+
+        let restored = restore_auto_run_controls(&conn).expect("restore controls");
+        let control = restored.get("novel-1").expect("restored novel");
+        assert_eq!(control.status, "paused");
+        assert_eq!(control.completed_batches, 2);
+        assert!(control.profile_ids.contains("profile-1"));
+        let status: String = conn
+            .query_row("SELECT status FROM jobs WHERE id = 'job-1'", [], |row| {
+                row.get(0)
+            })
+            .expect("load job");
+        assert_eq!(status, "paused");
+    }
+
+    #[test]
     fn core_prompt_can_be_saved_loaded_and_cleared() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         init_db(&conn).expect("init db");
@@ -6763,6 +7250,9 @@ mod tests {
         assert!(strict_prompt.contains("其他未指定人物必须保持原文性别、身份、称谓和人称代词"));
         assert!(strict_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
         assert!(strict_prompt.contains("保留原文中的人称代词和称谓"));
+        assert!(strict_prompt.contains("群体中包含任何未指定性转的男性成员"));
+        assert!(strict_prompt.contains("只有能够确认群体成员全部为女性时才使用“她们”"));
+        assert!(strict_prompt.contains("性别构成不明时保留原文“他们”"));
         assert!(strict_prompt.contains("不得因为百合改写目标而把所有重要配角"));
         assert!(strict_prompt.contains("不要因为 NPC 名字与主角原名共享某个字"));
         assert!(strict_prompt.contains("涉及主角姓名来源、同名关系、名字含义、旧名对比"));
@@ -6912,6 +7402,9 @@ mod tests {
         assert!(prompt.contains("不能突然重置或跳跃"));
         assert!(prompt.contains("其他配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别"));
         assert!(prompt.contains("原文男性继续使用男性代词/称谓"));
+        assert!(prompt.contains("主角与男性角色共同被指代"));
+        assert!(prompt.contains("禁止改成“她们”"));
+        assert!(prompt.contains("只有确认全员女性时才能使用“她们”"));
         assert!(prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
     }
 
@@ -6962,7 +7455,11 @@ mod tests {
             prompt.contains("未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者是否被误改性别")
         );
         assert!(prompt.contains("同一人物在不同章节中的他/她"));
+        assert!(prompt.contains("复数群体代词是否符合成员构成"));
+        assert!(prompt.contains("若被改成“她们”必须修正"));
         assert!(decision_prompt.contains("Blocking 清单"));
+        assert!(decision_prompt.contains("混合性别群体必须使用“他们”"));
+        assert!(decision_prompt.contains("不得仅因群体中包含女性主角就要求改成“她们”"));
         assert!(decision_prompt.contains("标题编号与 marker index 不一致不是问题"));
         assert!(decision_prompt.contains("不要输出通过项、优点、确认事项"));
         assert!(decision_prompt.contains("不代表标题章节编号"));
@@ -7013,7 +7510,7 @@ mod tests {
             {
               "chapter_index": 13,
               "severity": "blocking",
-              "problem": "尽管整体表现良好，但将男性配角代词‘他们’误改为‘她们’，违反未指定角色性别保持规则。",
+              "problem": "主角与男性配角共同组成的群体原应使用‘他们’，改写稿却误改为‘她们’，违反混合性别群体代词规则。",
               "required_fix": "必须修正为‘他们’。"
             },
             {
@@ -7032,6 +7529,7 @@ mod tests {
         assert_eq!(decision.issues.len(), 1);
         assert_eq!(decision.issues[0].chapter_indexes, vec![13]);
         assert!(review_issue_text(&decision.issues[0]).contains("误改为‘她们’"));
+        assert!(review_issue_text(&decision.issues[0]).contains("混合性别群体"));
     }
 
     #[test]
@@ -7764,6 +8262,8 @@ mod tests {
         assert!(prompt.contains("【输出格式硬性要求】"));
         assert!(prompt.contains("再次确认：只输出目标章节的结果"));
         assert!(prompt.contains("相邻章节只读上下文"));
+        assert!(prompt.contains("主角与男性共同被指代或群体含男性成员时使用“他们”"));
+        assert!(prompt.contains("只有全员女性时才使用“她们”"));
         assert!(!prompt.contains(&format!("原文内容 1 {}", "很长正文".repeat(20))));
         assert!(!prompt.contains(&format!("原文内容 3 {}", "很长正文".repeat(20))));
         assert!(!prompt.contains(&chapter_start_marker(&chapters[0])));

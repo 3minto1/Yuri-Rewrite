@@ -1,12 +1,99 @@
-use crate::domain::{AppState, CanonAsset, CanonAssetInput, ChapterBatch, JobEstimate};
+use crate::domain::{AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate};
 use crate::{
     chapter_text_chars, estimate_requests_for_chapters, estimate_wait_stages_for_chapters,
     load_canon_assets, load_chapter_batches, load_chapters, load_chapters_for_batch,
-    load_recent_model_stats, load_review_enabled, load_rewrite_parallelism, to_string,
+    load_recent_model_stats, load_review_enabled, load_rewrite_parallelism, row_to_chapter,
+    to_string,
 };
 use chrono::Utc;
 use rusqlite::params;
 use tauri::State;
+
+fn chapter_edit_is_allowed(
+    state: &State<'_, AppState>,
+    conn: &rusqlite::Connection,
+    chapter: &Chapter,
+) -> Result<(), String> {
+    if state.active_tasks.novel_is_active(&chapter.novel_id)? {
+        return Err("当前小说任务正在运行，不能编辑改写稿。".to_string());
+    }
+    let paused = state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .get(&chapter.novel_id)
+        .cloned();
+    if let Some(control) = paused {
+        if control.status != "paused" {
+            return Err("当前一键任务正在处理或等待暂停，不能编辑改写稿。".to_string());
+        }
+        let batch_index = conn
+            .query_row(
+                "SELECT batch_index FROM chapter_batches WHERE novel_id = ?1 AND ?2 BETWEEN start_chapter AND end_chapter LIMIT 1",
+                params![chapter.novel_id, chapter.index],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(to_string)?;
+        if batch_index > control.completed_batches {
+            return Err("暂停任务当前未完成批次及后续批次不能编辑。".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn load_chapter_by_id(conn: &rusqlite::Connection, chapter_id: &str) -> Result<Chapter, String> {
+    conn.query_row(
+        "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, rewrite_edited_at IS NOT NULL, analysis_status, rewrite_status FROM chapters WHERE id = ?1",
+        params![chapter_id],
+        row_to_chapter,
+    )
+    .map_err(to_string)
+}
+
+#[tauri::command]
+pub(crate) fn save_chapter_rewrite_edit(
+    chapter_id: String,
+    rewrite_text: String,
+    state: State<AppState>,
+) -> Result<Chapter, String> {
+    if rewrite_text.trim().is_empty() {
+        return Err("改写正文不能为空。".to_string());
+    }
+    let conn = state.conn.lock().map_err(to_string)?;
+    let chapter = load_chapter_by_id(&conn, &chapter_id)?;
+    if chapter.rewrite_status != "completed"
+        || chapter.rewrite_text.as_deref().is_none_or(str::is_empty)
+    {
+        return Err("当前章节尚无可编辑的已完成改写稿。".to_string());
+    }
+    chapter_edit_is_allowed(&state, &conn, &chapter)?;
+    conn.execute(
+        "UPDATE chapters SET ai_rewrite_text = COALESCE(ai_rewrite_text, rewrite_text), rewrite_text = ?1, rewrite_edited_at = ?2 WHERE id = ?3",
+        params![rewrite_text, Utc::now().to_rfc3339(), chapter_id],
+    )
+    .map_err(to_string)?;
+    load_chapter_by_id(&conn, &chapter_id)
+}
+
+#[tauri::command]
+pub(crate) fn restore_chapter_rewrite_edit(
+    chapter_id: String,
+    state: State<AppState>,
+) -> Result<Chapter, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let chapter = load_chapter_by_id(&conn, &chapter_id)?;
+    chapter_edit_is_allowed(&state, &conn, &chapter)?;
+    let restored = conn
+        .execute(
+            "UPDATE chapters SET rewrite_text = ai_rewrite_text, rewrite_edited_at = NULL WHERE id = ?1 AND ai_rewrite_text IS NOT NULL AND trim(ai_rewrite_text) != ''",
+            params![chapter_id],
+        )
+        .map_err(to_string)?;
+    if restored == 0 {
+        return Err("当前章节没有可恢复的 AI 改写稿。".to_string());
+    }
+    load_chapter_by_id(&conn, &chapter_id)
+}
 
 #[tauri::command]
 pub(crate) fn list_chapter_batches(

@@ -2,15 +2,16 @@ use crate::domain::{AppState, Chapter, ChapterBatch, Job};
 use crate::rate_limit::is_rate_limit_retry_exhausted;
 use crate::task_control::AutoRunCleanup;
 use crate::{
-    analyze_chapters_for_auto, build_rewritten_export_body, chinese_batch_label, clear_auto_run,
-    create_job, emit_job_progress, finish_stopped_auto_run, load_chapter_batches,
-    load_chapters_for_batch, load_job, load_model_profile, load_review_enabled,
-    load_review_profile_for_run, load_review_profile_id, pause_auto_run_after_model_format_error,
-    pause_auto_run_after_network_error, pause_auto_run_after_rate_limit, prepare_auto_run,
-    read_stored_api_key, register_auto_run_job, request_auto_run_stop, requested_auto_run_stop,
-    require_novel_settings, resolve_rewrite_export_dir, rewrite_chapters_for_auto, row_to_novel,
-    sanitize_file_name, set_auto_run_completed, to_string, update_job, AUTO_RUN_PAUSED,
-    AUTO_RUN_TERMINATED,
+    analyze_chapters_for_auto, begin_auto_batch_progress, build_rewritten_export_body,
+    chinese_batch_label, clear_auto_run, create_job, emit_job_progress, finish_stopped_auto_run,
+    load_chapter_batches, load_chapters_for_batch, load_job, load_model_profile,
+    load_review_enabled, load_review_profile_for_run, load_review_profile_id,
+    pause_auto_run_after_model_format_error, pause_auto_run_after_network_error,
+    pause_auto_run_after_rate_limit, prepare_auto_run, read_stored_api_key, register_auto_run_job,
+    request_auto_run_stop, requested_auto_run_stop, require_novel_settings,
+    resolve_rewrite_export_dir, rewrite_chapters_for_auto, row_to_novel, sanitize_file_name,
+    set_auto_progress_phase, set_auto_run_completed, to_string, update_auto_run_checkpoint_phase,
+    update_job, AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
 };
 use crate::{is_recoverable_model_format_error, is_recoverable_network_error};
 use rusqlite::{params, Connection};
@@ -87,7 +88,12 @@ pub(crate) async fn start_analyze_rewrite_all(
         auto_profile_ids,
         requested_start_batch_index,
     )?;
-    let _auto_run_cleanup = AutoRunCleanup::new(&state.auto_runs, &novel_id);
+    let _auto_run_cleanup = AutoRunCleanup::new(
+        &state.auto_runs,
+        &state.auto_run_progress,
+        &state.conn,
+        &novel_id,
+    );
     let export_suffix = auto_run_export_suffix(&batches, start_batch_index);
     let cumulative_export_path = auto_run_export_path(&output_dir, &novel.title, &export_suffix);
     remove_legacy_auto_batch_exports(&output_dir, &novel.title, &batches)?;
@@ -129,6 +135,15 @@ pub(crate) async fn start_analyze_rewrite_all(
             );
         }
         let analysis_message = format!("正在分析第 {} 批", current);
+        update_auto_run_checkpoint_phase(&state, &novel_id, "analysis", current)?;
+        begin_auto_batch_progress(
+            &state,
+            &novel_id,
+            "analysis",
+            current,
+            batches.len() as i64,
+            &batch.label,
+        )?;
         update_job(
             &state,
             &job.id,
@@ -205,6 +220,15 @@ pub(crate) async fn start_analyze_rewrite_all(
             );
         }
         let rewrite_message = format!("正在改写第 {} 批", current);
+        update_auto_run_checkpoint_phase(&state, &novel_id, "rewrite", current)?;
+        begin_auto_batch_progress(
+            &state,
+            &novel_id,
+            "rewrite",
+            current,
+            batches.len() as i64,
+            &batch.label,
+        )?;
         update_job(
             &state,
             &job.id,
@@ -273,6 +297,8 @@ pub(crate) async fn start_analyze_rewrite_all(
                 idx as i64,
             )?
         };
+        update_auto_run_checkpoint_phase(&state, &novel_id, "export", current)?;
+        set_auto_progress_phase(&state, &novel_id, "export")?;
         if let Err(error) =
             write_auto_run_cumulative_export(&app, &cumulative_export_path, &export_chapters).await
         {

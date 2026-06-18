@@ -249,6 +249,11 @@ pub(crate) fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(
         .map_err(to_string)?;
         tx.execute("DELETE FROM jobs WHERE novel_id = ?1", params![novel_id])
             .map_err(to_string)?;
+        tx.execute(
+            "DELETE FROM auto_run_checkpoints WHERE novel_id = ?1",
+            params![novel_id],
+        )
+        .map_err(to_string)?;
         tx.execute("DELETE FROM ai_logs WHERE novel_id = ?1", params![novel_id])
             .map_err(to_string)?;
         tx.execute("DELETE FROM novels WHERE id = ?1", params![novel_id])

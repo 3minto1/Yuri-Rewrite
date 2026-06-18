@@ -1,16 +1,19 @@
 use crate::rate_limit::RateLimitCoordinator;
-use crate::task_control::{ActiveTaskRegistry, AutoRunControl};
+use crate::task_control::{ActiveTaskRegistry, AutoRunControl, AutoRunProgressState};
 use reqwest::Client;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use tauri::AppHandle;
 
 pub(crate) struct AppState {
+    pub(crate) app: AppHandle,
     pub(crate) conn: Mutex<Connection>,
     pub(crate) client: Client,
     pub(crate) data_dir: PathBuf,
     pub(crate) app_dir: PathBuf,
     pub(crate) auto_runs: Mutex<HashMap<String, AutoRunControl>>,
+    pub(crate) auto_run_progress: Mutex<HashMap<String, AutoRunProgressState>>,
     pub(crate) active_tasks: ActiveTaskRegistry,
     pub(crate) rate_limits: RateLimitCoordinator,
 }
@@ -34,6 +37,8 @@ pub(crate) struct Chapter {
     pub(crate) original_text: String,
     pub(crate) analysis_json: Option<String>,
     pub(crate) rewrite_text: Option<String>,
+    #[serde(default)]
+    pub(crate) rewrite_edited: bool,
     pub(crate) analysis_status: String,
     pub(crate) rewrite_status: String,
 }
@@ -125,7 +130,7 @@ pub(crate) struct ModelTestResult {
     pub(crate) message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct Job {
     pub(crate) id: String,
     pub(crate) novel_id: String,
@@ -138,6 +143,15 @@ pub(crate) struct Job {
     pub(crate) updated_at: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct ActiveShardProgress {
+    pub(crate) index: usize,
+    pub(crate) total: usize,
+    pub(crate) start_chapter: i64,
+    pub(crate) end_chapter: i64,
+    pub(crate) phase: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub(crate) struct JobProgress {
     pub(crate) id: String,
@@ -147,6 +161,33 @@ pub(crate) struct JobProgress {
     pub(crate) current_chapter: i64,
     pub(crate) total_chapters: i64,
     pub(crate) message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_index: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_total: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shard_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shard_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) active_shards: Option<Vec<ActiveShardProgress>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct AutoRunRecovery {
+    pub(crate) novel_id: String,
+    pub(crate) start_batch_index: i64,
+    pub(crate) next_batch_index: i64,
+    pub(crate) status: String,
+    pub(crate) pause_reason: String,
+    pub(crate) phase: Option<String>,
+    pub(crate) batch_index: Option<i64>,
+    pub(crate) profile_ids: Vec<String>,
+    pub(crate) job: Option<Job>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

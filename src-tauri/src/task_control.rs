@@ -1,5 +1,7 @@
+use crate::domain::ActiveShardProgress;
+use rusqlite::Connection;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Mutex,
 };
 
@@ -88,15 +90,35 @@ pub(crate) struct AutoRunControl {
     pub(crate) profile_ids: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AutoRunProgressState {
+    pub(crate) phase: Option<String>,
+    pub(crate) batch_index: Option<i64>,
+    pub(crate) batch_total: Option<i64>,
+    pub(crate) batch_label: Option<String>,
+    pub(crate) shard_total: usize,
+    pub(crate) completed_shards: HashSet<usize>,
+    pub(crate) active_shards: BTreeMap<usize, ActiveShardProgress>,
+}
+
 pub(crate) struct AutoRunCleanup<'a> {
     runs: &'a Mutex<HashMap<String, AutoRunControl>>,
+    progress: &'a Mutex<HashMap<String, AutoRunProgressState>>,
+    conn: &'a Mutex<Connection>,
     novel_id: String,
 }
 
 impl<'a> AutoRunCleanup<'a> {
-    pub(crate) fn new(runs: &'a Mutex<HashMap<String, AutoRunControl>>, novel_id: &str) -> Self {
+    pub(crate) fn new(
+        runs: &'a Mutex<HashMap<String, AutoRunControl>>,
+        progress: &'a Mutex<HashMap<String, AutoRunProgressState>>,
+        conn: &'a Mutex<Connection>,
+        novel_id: &str,
+    ) -> Self {
         Self {
             runs,
+            progress,
+            conn,
             novel_id: novel_id.to_string(),
         }
     }
@@ -104,13 +126,28 @@ impl<'a> AutoRunCleanup<'a> {
 
 impl Drop for AutoRunCleanup<'_> {
     fn drop(&mut self) {
-        if let Ok(mut runs) = self.runs.lock() {
-            if runs
+        let should_cleanup = if let Ok(mut runs) = self.runs.lock() {
+            let should_cleanup = runs
                 .get(&self.novel_id)
-                .is_none_or(|control| control.status != "paused")
-            {
+                .is_none_or(|control| control.status != "paused");
+            if should_cleanup {
                 runs.remove(&self.novel_id);
             }
+            should_cleanup
+        } else {
+            false
+        };
+        if !should_cleanup {
+            return;
+        }
+        if let Ok(mut progress) = self.progress.lock() {
+            progress.remove(&self.novel_id);
+        }
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "DELETE FROM auto_run_checkpoints WHERE novel_id = ?1",
+                [&self.novel_id],
+            );
         }
     }
 }
@@ -164,8 +201,29 @@ mod tests {
                 profile_ids: HashSet::new(),
             },
         )]));
-        drop(AutoRunCleanup::new(&runs, "novel-1"));
+        let progress = Mutex::new(HashMap::from([(
+            "novel-1".to_string(),
+            AutoRunProgressState::default(),
+        )]));
+        let conn = Mutex::new(Connection::open_in_memory().expect("open database"));
+        conn.lock()
+            .expect("database")
+            .execute_batch(
+                "CREATE TABLE auto_run_checkpoints (novel_id TEXT PRIMARY KEY);
+                 INSERT INTO auto_run_checkpoints VALUES ('novel-1');",
+            )
+            .expect("seed checkpoint");
+        drop(AutoRunCleanup::new(&runs, &progress, &conn, "novel-1"));
         assert!(runs.lock().expect("runs").is_empty());
+        assert!(progress.lock().expect("progress").is_empty());
+        let checkpoint_count: i64 = conn
+            .lock()
+            .expect("database")
+            .query_row("SELECT COUNT(*) FROM auto_run_checkpoints", [], |row| {
+                row.get(0)
+            })
+            .expect("count checkpoints");
+        assert_eq!(checkpoint_count, 0);
 
         runs.lock().expect("runs").insert(
             "novel-1".to_string(),
@@ -177,8 +235,20 @@ mod tests {
                 profile_ids: HashSet::new(),
             },
         );
-        drop(AutoRunCleanup::new(&runs, "novel-1"));
+        conn.lock()
+            .expect("database")
+            .execute("INSERT INTO auto_run_checkpoints VALUES ('novel-1')", [])
+            .expect("restore checkpoint");
+        drop(AutoRunCleanup::new(&runs, &progress, &conn, "novel-1"));
         assert!(runs.lock().expect("runs").contains_key("novel-1"));
+        let checkpoint_count: i64 = conn
+            .lock()
+            .expect("database")
+            .query_row("SELECT COUNT(*) FROM auto_run_checkpoints", [], |row| {
+                row.get(0)
+            })
+            .expect("count checkpoints");
+        assert_eq!(checkpoint_count, 1);
     }
 
     #[test]

@@ -1,15 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
+import type { Job } from "./types";
 
-export type AutoRunProgress = {
-  id: string;
-  novel_id: string;
-  job_type: string;
-  status: string;
-  current_chapter: number;
-  total_chapters: number;
-  message: string;
-};
+export type AutoRunProgress = Job;
 
 export function useAutoRunProgress(
   novelId: string | null,

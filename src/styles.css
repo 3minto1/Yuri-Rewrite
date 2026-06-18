@@ -489,6 +489,20 @@ pre {
   position: relative;
 }
 
+.novel-recovery-badge {
+  background: #80642f;
+  border-radius: 999px;
+  color: #fff4d1;
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+.novel-item.active .novel-recovery-badge {
+  background: #d9c28f;
+  color: #4b3816;
+}
+
 .job-content {
   display: flex;
   flex: 1;
@@ -540,6 +554,47 @@ pre {
 
 .job-strip.failed .job-progress-fill {
   background: #c54f45;
+}
+
+.job-stage-progress {
+  background: rgba(255, 255, 255, 0.36);
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  padding: 7px 9px;
+}
+
+.job-stage-summary {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(190px, auto) minmax(120px, 1fr);
+}
+
+.job-stage-summary > span,
+.job-active-shards span {
+  font-size: 12px;
+}
+
+.job-stage-bar {
+  background: rgba(36, 67, 49, 0.12);
+  border-radius: 999px;
+  height: 5px;
+  overflow: hidden;
+}
+
+.job-stage-fill {
+  background: #669b75;
+  border-radius: inherit;
+  height: 100%;
+  transition: width 180ms ease;
+}
+
+.job-active-shards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  opacity: 0.86;
 }
 
 .job-strip-close {
@@ -1728,13 +1783,32 @@ label {
   overflow: hidden;
 }
 
-.large-compare-grid h2 {
+.compare-pane-heading {
+  align-items: center;
   background: #f7f4ed;
   border-bottom: 1px solid #e2ded5;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: 45px;
+  padding: 7px 10px 7px 12px;
+}
+
+.large-compare-grid h2 {
   font-size: 16px;
   letter-spacing: 0;
   margin: 0;
-  padding: 10px 12px;
+}
+
+.compare-pane-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.compare-pane-actions button {
+  min-height: 30px;
+  padding: 4px 8px;
 }
 
 .large-compare-grid .compare-text {
@@ -1748,6 +1822,24 @@ label {
   text-rendering: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.compare-edit-textarea {
+  border: 0;
+  border-radius: 0;
+  flex: 1;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.8;
+  min-height: 0;
+  outline: none;
+  padding: 18px;
+  resize: none;
+  white-space: pre-wrap;
+}
+
+.compare-unsaved-dialog {
+  max-width: 520px;
 }
 
 .diff-removed {

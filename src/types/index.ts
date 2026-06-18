@@ -15,6 +15,7 @@ export type Chapter = {
   original_text: string;
   analysis_json?: string | null;
   rewrite_text?: string | null;
+  rewrite_edited?: boolean;
   analysis_status: string;
   rewrite_status: string;
 };
@@ -91,6 +92,33 @@ export type Job = {
   current_chapter: number;
   total_chapters: number;
   message: string;
+  phase?: "analysis" | "rewrite" | "review" | "revision" | "final_review" | "export";
+  batch_index?: number;
+  batch_total?: number;
+  batch_label?: string;
+  shard_completed?: number;
+  shard_total?: number;
+  active_shards?: ActiveShardProgress[];
+};
+
+export type ActiveShardProgress = {
+  index: number;
+  total: number;
+  start_chapter: number;
+  end_chapter: number;
+  phase: "analysis" | "rewrite" | "review" | "revision" | "final_review" | "export";
+};
+
+export type AutoRunRecovery = {
+  novel_id: string;
+  start_batch_index: number;
+  next_batch_index: number;
+  status: string;
+  pause_reason: string;
+  phase?: string | null;
+  batch_index?: number | null;
+  profile_ids: string[];
+  job?: Job | null;
 };
 
 export type AiLog = {

@@ -1,6 +1,7 @@
-import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Search, X } from "lucide-react";
-import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RotateCcw, Save, Search, X } from "lucide-react";
+import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { Chapter } from "../../types";
+import { Modal } from "../common/Modal";
 import { calculateDiff, type DiffRange, type DiffResult, type DiffSide } from "./compareDiff";
 import { getCachedDiff, setCachedDiff } from "./compareDiffCache";
 import { HighlightedText } from "./HighlightedText";
@@ -16,6 +17,10 @@ type CompareViewProps = {
   onSelectChapter: (chapterId: string) => void;
   onBack: () => void;
   onExport: () => void;
+  editingAllowed?: boolean;
+  editDisabledReason?: string;
+  onSaveRewrite?: (chapterId: string, rewriteText: string) => Promise<void>;
+  onRestoreRewrite?: (chapterId: string) => Promise<void>;
 };
 
 type DiffState = DiffResult & {
@@ -102,15 +107,21 @@ type TextPaneProps = {
   diffRanges: DiffRange[];
   searchMatches: SearchMatch[];
   activeMatchId?: string;
+  headerActions?: ReactNode;
+  editor?: ReactNode;
 };
 
 const TextPane = memo(function TextPane(props: TextPaneProps) {
-  const { heading, side, text, emptyText, containerRef, diffRanges, searchMatches, activeMatchId } = props;
+  const { heading, side, text, emptyText, containerRef, diffRanges, searchMatches, activeMatchId, headerActions, editor } = props;
   return (
     <article>
-      <h2>{heading}</h2>
-      <div ref={containerRef} className="compare-text" aria-label={`${heading}内容`}>
-        {text ? (
+      <div className="compare-pane-heading">
+        <h2>{heading}</h2>
+        {headerActions}
+      </div>
+      {editor ?? (
+        <div ref={containerRef} className="compare-text" aria-label={`${heading}内容`}>
+          {text ? (
           <HighlightedText
             text={text}
             side={side}
@@ -119,14 +130,19 @@ const TextPane = memo(function TextPane(props: TextPaneProps) {
             searchMatches={searchMatches}
             activeMatchId={activeMatchId}
           />
-        ) : <span className="muted">{emptyText}</span>}
-      </div>
+          ) : <span className="muted">{emptyText}</span>}
+        </div>
+      )}
     </article>
   );
 });
 
 export const CompareView = memo(function CompareView(props: CompareViewProps) {
-  const { chapters, selectedChapter, selectedChapterId, busy, originalRef, rewriteRef, onSelectChapter, onBack, onExport } = props;
+  const {
+    chapters, selectedChapter, selectedChapterId, busy, originalRef, rewriteRef,
+    onSelectChapter, onBack, onExport, editingAllowed = false, editDisabledReason,
+    onSaveRewrite = async () => undefined, onRestoreRewrite = async () => undefined
+  } = props;
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
@@ -134,6 +150,11 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [activeMatchIndex, setActiveMatchIndex] = useState<number | null>(null);
   const [wrapped, setWrapped] = useState(false);
   const [diffEnabled, setDiffEnabled] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState("");
+  const [editBusy, setEditBusy] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState(false);
+  const pendingNavigationRef = useRef<(() => void) | null>(null);
   const deferredQuery = useDeferredValue(query);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const navigationTargetRef = useRef<string | null>(null);
@@ -150,6 +171,37 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const chapterMatches = useMemo(() => globalMatches.filter((match) => match.chapter_id === selectedChapterId), [globalMatches, selectedChapterId]);
   const originalMatches = useMemo(() => chapterMatches.filter((match) => match.side === "original"), [chapterMatches]);
   const rewriteMatches = useMemo(() => chapterMatches.filter((match) => match.side === "rewrite"), [chapterMatches]);
+  const editDirty = editing && editDraft !== rewriteText;
+
+  function runOrConfirmNavigation(action: () => void) {
+    if (!editDirty) {
+      action();
+      return;
+    }
+    pendingNavigationRef.current = action;
+    setPendingNavigation(true);
+  }
+
+  async function saveEdit(closeAfterSave = true) {
+    if (!selectedChapter) return false;
+    if (!editDraft.trim()) return false;
+    setEditBusy(true);
+    try {
+      await onSaveRewrite(selectedChapter.id, editDraft);
+      if (closeAfterSave) setEditing(false);
+      return true;
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
+  function finishPendingNavigation() {
+    const action = pendingNavigationRef.current;
+    pendingNavigationRef.current = null;
+    setPendingNavigation(false);
+    setEditing(false);
+    action?.();
+  }
 
   function closeSearch() {
     setSearchOpen(false);
@@ -164,8 +216,10 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     if (index === null) return;
     const match = globalMatches[index];
     if (match.chapter_id !== selectedChapterId) {
-      navigationTargetRef.current = match.chapter_id;
-      onSelectChapter(match.chapter_id);
+      runOrConfirmNavigation(() => {
+        navigationTargetRef.current = match.chapter_id;
+        onSelectChapter(match.chapter_id);
+      });
     }
   }
 
@@ -186,7 +240,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     navigationTargetRef.current = null;
     setActiveMatchIndex(null);
     setWrapped(false);
-    onSelectChapter(chapterId);
+    runOrConfirmNavigation(() => onSelectChapter(chapterId));
   }
 
   useEffect(() => {
@@ -233,6 +287,13 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     previousChapterRef.current = selectedChapterId;
   }, [selectedChapterId]);
 
+  useEffect(() => {
+    setEditing(false);
+    setEditDraft(selectedChapter?.rewrite_text ?? "");
+    pendingNavigationRef.current = null;
+    setPendingNavigation(false);
+  }, [selectedChapterId]);
+
   return (
     <div className="compare-page">
       <div className="compare-page-toolbar">
@@ -245,7 +306,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
         <div className="compare-toolbar-actions">
           <button className={searchOpen ? "active" : ""} aria-pressed={searchOpen} onClick={() => searchOpen ? closeSearch() : setSearchOpen(true)}><Search size={17} />查找</button>
           <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
-          <button onClick={onBack}><ArrowLeft size={17} />返回</button>
+          <button onClick={() => runOrConfirmNavigation(onBack)}><ArrowLeft size={17} />返回</button>
           <button onClick={onExport} disabled={busy !== ""}><Download size={17} />TXT</button>
         </div>
       </div>
@@ -315,9 +376,87 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
             diffRanges={visibleDiffRanges}
             searchMatches={rewriteMatches}
             activeMatchId={activeMatch?.id}
+            headerActions={(
+              <div className="compare-pane-actions">
+                {selectedChapter.rewrite_edited && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!window.confirm("恢复到最近一次 AI 生成的改写稿？当前人工修改将被覆盖。")) return;
+                      setEditBusy(true);
+                      void onRestoreRewrite(selectedChapter.id).finally(() => {
+                        setEditBusy(false);
+                        setEditing(false);
+                      });
+                    }}
+                    disabled={!editingAllowed || editBusy}
+                    title={editingAllowed ? "恢复最近 AI 稿" : editDisabledReason}
+                  >
+                    <RotateCcw size={15} />恢复 AI 稿
+                  </button>
+                )}
+                {!editing ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditDraft(rewriteText);
+                      setEditing(true);
+                    }}
+                    disabled={!editingAllowed || !rewriteText.trim()}
+                    title={editingAllowed ? "编辑当前章节改写正文" : editDisabledReason}
+                  >
+                    <Pencil size={15} />编辑
+                  </button>
+                ) : (
+                  <>
+                    <button type="button" onClick={() => void saveEdit()} disabled={editBusy || !editDraft.trim() || !editDirty}>
+                      <Save size={15} />保存
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runOrConfirmNavigation(() => setEditing(false))}
+                      disabled={editBusy}
+                    >
+                      <X size={15} />关闭编辑
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            editor={editing ? (
+              <textarea
+                className="compare-edit-textarea"
+                aria-label="编辑改写稿正文"
+                value={editDraft}
+                onChange={(event) => setEditDraft(event.target.value)}
+                disabled={editBusy}
+              />
+            ) : undefined}
           />
         </div>
       ) : <p className="muted">请选择章节。</p>}
+      {pendingNavigation && (
+        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="compare-unsaved-title">
+          <header className="dialog-titlebar">
+            <h2 id="compare-unsaved-title">改写稿尚未保存</h2>
+          </header>
+          <div className="dialog-body">
+            <p>当前章节有未保存的人工修改。保存后继续，还是放弃修改？</p>
+          </div>
+          <footer className="dialog-actions">
+            <button type="button" onClick={() => { pendingNavigationRef.current = null; setPendingNavigation(false); }} disabled={editBusy}>取消</button>
+            <button type="button" onClick={finishPendingNavigation} disabled={editBusy}>放弃修改</button>
+            <button
+              className="dialog-primary"
+              type="button"
+              disabled={editBusy || !editDraft.trim()}
+              onClick={() => void saveEdit(false).then((saved) => { if (saved) finishPendingNavigation(); })}
+            >
+              保存并继续
+            </button>
+          </footer>
+        </Modal>
+      )}
     </div>
   );
 });
