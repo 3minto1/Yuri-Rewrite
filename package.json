@@ -10,7 +10,9 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1"
+    "verify": "powershell -ExecutionPolicy Bypass -File scripts/verify.ps1",
+    "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
+    "package:portable:fresh": "powershell -ExecutionPolicy Bypass -File scripts/package-portable-fresh.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
