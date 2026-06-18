@@ -79,7 +79,7 @@ const detail: NovelDetail = {
   }
 };
 
-const settings: AppSettings = { review_enabled: false, rewrite_parallelism: 6 };
+const settings: AppSettings = { review_enabled: false, chapter_batch_size: 30, rewrite_parallelism: 6 };
 const estimate: JobEstimate = {
   novel_chapters: 1,
   novel_chars: 4,
@@ -271,12 +271,48 @@ describe("App feature behavior", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_selected_profile_id", { profileId: "profile-2" }));
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("radio", { name: "50 章" })).toBeDisabled();
     fireEvent.click(screen.getByRole("radio", { name: "3" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("save_app_settings", {
         settings: expect.objectContaining({ rewrite_parallelism: 3 })
       })
     );
+  });
+
+  it("enables high concurrency only for compatible batch sizes", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "save_app_settings") {
+        const requested = (args as { settings: AppSettings }).settings;
+        return { ...settings, ...requested };
+      }
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+
+    expect(screen.getByRole("radio", { name: "25" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "50" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("radio", { name: "50 章" }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "25" })).toBeEnabled());
+    expect(screen.getByRole("radio", { name: "50" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("radio", { name: "100 章" }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "50" })).toBeEnabled());
+    expect(mocks.invoke).toHaveBeenCalledWith("save_app_settings", {
+      settings: expect.objectContaining({ chapter_batch_size: 100 })
+    });
   });
 
   it("refreshes rewritten chapters after an auto batch finishes without changing pages", async () => {

@@ -252,6 +252,14 @@ const statusText: Record<string, string> = {
   imported: "已导入"
 };
 
+function batchIdContainingChapter(detail: NovelDetail, chapterId: string): string {
+  const chapter = detail.chapters.find((item) => item.id === chapterId);
+  if (!chapter) return detail.batches[0]?.id ?? "";
+  return detail.batches.find(
+    (batch) => chapter.index >= batch.start_chapter && chapter.index <= batch.end_chapter
+  )?.id ?? detail.batches[0]?.id ?? "";
+}
+
 const jobPhaseText: Record<string, string> = {
   analysis: "分析",
   rewrite: "改写",
@@ -525,7 +533,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshJobEstimate();
-  }, [refreshJobEstimate, settings.review_enabled, settings.rewrite_parallelism]);
+  }, [refreshJobEstimate, settings.chapter_batch_size, settings.review_enabled, settings.rewrite_parallelism]);
 
   async function refreshAll() {
     const [novelRows, profileRows, appSettings, recoveryRows] = await Promise.all([
@@ -589,7 +597,7 @@ export default function App() {
     const nextBatchId =
       options.preserveBatchId && next.batches.some((batch) => batch.id === options.preserveBatchId)
         ? options.preserveBatchId
-        : next.batches[0]?.id ?? "";
+        : batchIdContainingChapter(next, nextChapterId);
     setSelectedChapterId(nextChapterId);
     setSelectedBatchId(nextBatchId);
     setNovelSettingsDraft(
@@ -625,7 +633,7 @@ export default function App() {
         setSelectedChapterId(next.chapters[0]?.id ?? "");
       }
       if (!next.batches.some((batch) => batch.id === preservedBatchId)) {
-        setSelectedBatchId(next.batches[0]?.id ?? "");
+        setSelectedBatchId(batchIdContainingChapter(next, preservedChapterId));
       }
       if (next.settings) {
         setNovelSettingsDraft({
@@ -1150,6 +1158,7 @@ export default function App() {
       review_enabled: settings.review_enabled ?? false,
       review_profile_id: settings.review_profile_id ?? null,
       selected_profile_id: selectedProfileId || null,
+      chapter_batch_size: settings.chapter_batch_size ?? 30,
       rewrite_parallelism: settings.rewrite_parallelism ?? 6,
       ...overrides
     };
@@ -1206,7 +1215,39 @@ export default function App() {
     }
   }
 
-  async function setRewriteParallelism(value: 1 | 3 | 6 | 10) {
+  async function setChapterBatchSize(value: 30 | 50 | 100) {
+    setBusy("batch-size-setting");
+    setNotice("");
+    try {
+      const previousParallelism = settings.rewrite_parallelism ?? 6;
+      const preservedChapterId = selectedChapterId;
+      const saved = await invoke("save_app_settings", {
+        settings: appSettingsPayload({ chapter_batch_size: value })
+      });
+      setSettings(saved);
+      if (detail) {
+        const next = await invoke("get_novel_detail", { novelId: detail.novel.id });
+        setDetail(next);
+        const nextChapterId = next.chapters.some((chapter) => chapter.id === preservedChapterId)
+          ? preservedChapterId
+          : next.chapters[0]?.id ?? "";
+        setSelectedChapterId(nextChapterId);
+        setSelectedBatchId(batchIdContainingChapter(next, nextChapterId));
+      }
+      const clamped = saved.rewrite_parallelism !== previousParallelism;
+      showNotice(
+        clamped
+          ? `已设置每批 ${value} 章并重新生成批次；当前并发已自动调整为 ${saved.rewrite_parallelism}。`
+          : `已设置每批 ${value} 章并重新生成现有章节型小说批次。`
+      );
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function setRewriteParallelism(value: 1 | 3 | 6 | 10 | 25 | 50) {
     setBusy("parallelism-setting");
     setNotice("");
     try {
@@ -1896,6 +1937,7 @@ export default function App() {
             onClearExportDir={clearExportDir}
             onToggleReview={toggleReviewEnabled}
             onReviewProfileChange={setReviewProfileId}
+            onBatchSizeChange={setChapterBatchSize}
             onParallelismChange={setRewriteParallelism}
           />
         )}

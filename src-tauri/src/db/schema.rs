@@ -12,6 +12,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             source_path TEXT NOT NULL,
             encoding TEXT NOT NULL,
             status TEXT NOT NULL,
+            detected_chapters INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
 
@@ -138,6 +139,20 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     migrations::ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
     migrations::ensure_column(conn, "chapters", "ai_rewrite_text", "TEXT")?;
     migrations::ensure_column(conn, "chapters", "rewrite_edited_at", "TEXT")?;
+    migrations::ensure_column(
+        conn,
+        "novels",
+        "detected_chapters",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    conn.execute(
+        "UPDATE novels SET detected_chapters = 0 WHERE EXISTS (
+            SELECT 1 FROM chapter_batches
+            WHERE chapter_batches.novel_id = novels.id
+              AND chapter_batches.label LIKE '%约10万字%'
+        )",
+        [],
+    )?;
     conn.execute(
         "UPDATE chapters SET ai_rewrite_text = rewrite_text WHERE ai_rewrite_text IS NULL AND rewrite_text IS NOT NULL AND trim(rewrite_text) != ''",
         [],
@@ -227,6 +242,57 @@ mod tests {
             )
             .expect("load checkpoint");
         assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn backfills_legacy_character_split_novels() {
+        let conn = Connection::open_in_memory().expect("open database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE novels (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                encoding TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE chapter_batches (
+                id TEXT PRIMARY KEY,
+                novel_id TEXT NOT NULL,
+                batch_index INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                start_chapter INTEGER NOT NULL,
+                end_chapter INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO novels VALUES ('chapter-novel', '章节小说', 'a.txt', 'UTF-8', 'imported', 'now');
+            INSERT INTO novels VALUES ('text-novel', '长文本', 'b.txt', 'UTF-8', 'imported', 'now');
+            INSERT INTO chapter_batches VALUES ('batch-1', 'chapter-novel', 1, '1-30章', 1, 30, 'a', 'now');
+            INSERT INTO chapter_batches VALUES ('batch-2', 'text-novel', 1, '第1批（约10万字）', 1, 1, 'b', 'now');
+            "#,
+        )
+        .expect("seed old schema");
+
+        init_db(&conn).expect("migrate schema");
+
+        let chapter_detected: bool = conn
+            .query_row(
+                "SELECT detected_chapters FROM novels WHERE id = 'chapter-novel'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load chapter novel flag");
+        let text_detected: bool = conn
+            .query_row(
+                "SELECT detected_chapters FROM novels WHERE id = 'text-novel'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load text novel flag");
+        assert!(chapter_detected);
+        assert!(!text_detected);
     }
 
     #[test]

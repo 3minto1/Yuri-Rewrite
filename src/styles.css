@@ -910,6 +910,10 @@ pre {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.mode-toggle-six {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
 .mode-toggle button {
   border-color: transparent;
   min-height: 34px;

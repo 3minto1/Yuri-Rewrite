@@ -1,8 +1,8 @@
 use crate::domain::{AppState, Novel, NovelDetail};
 use crate::{
     create_chapter_batches, decode_text, fill_empty_canon_assets_from_analysis, load_canon_assets,
-    load_chapter_batches, load_chapters, load_novel_settings, review_warning_file_paths,
-    row_to_novel, seed_canon_assets, split_chapters, to_string,
+    load_chapter_batch_size, load_chapter_batches, load_chapters, load_novel_settings,
+    review_warning_file_paths, row_to_novel, seed_canon_assets, split_chapters, to_string,
 };
 use chrono::Utc;
 use rusqlite::params;
@@ -129,8 +129,8 @@ pub(crate) fn import_txt(file_path: String, state: State<AppState>) -> Result<No
     let mut conn = state.conn.lock().map_err(to_string)?;
     let tx = conn.transaction().map_err(to_string)?;
     tx.execute(
-        "INSERT INTO novels (id, title, source_path, encoding, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![novel.id, novel.title, novel.source_path, novel.encoding, novel.status, novel.created_at],
+        "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![novel.id, novel.title, novel.source_path, novel.encoding, novel.status, split.detected_chapters, novel.created_at],
     )
     .map_err(to_string)?;
 
@@ -148,6 +148,7 @@ pub(crate) fn import_txt(file_path: String, state: State<AppState>) -> Result<No
         &novel.id,
         &split.chapters,
         split.detected_chapters,
+        load_chapter_batch_size(&tx)?,
     )
     .map_err(to_string)?;
     seed_canon_assets(&tx, &novel.id).map_err(to_string)?;
@@ -184,7 +185,21 @@ pub(crate) fn get_novel_detail(
         .map_err(to_string)?;
     let chapters = load_chapters(&conn, &novel.id)?;
     if !chapters.is_empty() && load_chapter_batches(&conn, &novel.id)?.is_empty() {
-        create_chapter_batches(&conn, &state.data_dir, &novel.id, &chapters, true)?;
+        let detected_chapters = conn
+            .query_row(
+                "SELECT detected_chapters FROM novels WHERE id = ?1",
+                params![novel.id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(to_string)?;
+        create_chapter_batches(
+            &conn,
+            &state.data_dir,
+            &novel.id,
+            &chapters,
+            detected_chapters,
+            load_chapter_batch_size(&conn)?,
+        )?;
     }
     fill_empty_canon_assets_from_analysis(&conn, &novel.id).map_err(to_string)?;
     let canon_assets = load_canon_assets(&conn, &novel.id)?;

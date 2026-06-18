@@ -4312,11 +4312,17 @@ fn split_chapters_for_parallelism(
     if parallelism <= 1 {
         return vec![chapters.to_vec()];
     }
-    let chunk_size = chapters.len().div_ceil(parallelism);
-    chapters
-        .chunks(chunk_size)
-        .map(|chunk| chunk.to_vec())
-        .collect()
+    let base_size = chapters.len() / parallelism;
+    let remainder = chapters.len() % parallelism;
+    let mut shards = Vec::with_capacity(parallelism);
+    let mut start = 0usize;
+    for shard_index in 0..parallelism {
+        let shard_size = base_size + usize::from(shard_index < remainder);
+        let end = start + shard_size;
+        shards.push(chapters[start..end].to_vec());
+        start = end;
+    }
+    shards
 }
 
 fn estimate_requests_for_chapters(
@@ -4603,8 +4609,13 @@ fn create_chapter_batches(
     novel_id: &str,
     chapters: &[Chapter],
     detected_chapters: bool,
+    chapter_batch_size: usize,
 ) -> Result<(), String> {
-    let batch_size = if detected_chapters { 30 } else { 1 };
+    let batch_size = if detected_chapters {
+        normalize_chapter_batch_size(chapter_batch_size)
+    } else {
+        1
+    };
     let batch_dir = data_dir.join("chapter_batches").join(novel_id);
     fs::create_dir_all(&batch_dir).map_err(to_string)?;
     let now = Utc::now().to_rfc3339();
@@ -6920,6 +6931,10 @@ mod tests {
             load_rewrite_parallelism(&conn).expect("load default parallelism"),
             6
         );
+        assert_eq!(
+            load_chapter_batch_size(&conn).expect("load default batch size"),
+            30
+        );
 
         save_review_enabled(&conn, true).expect("enable review");
         assert!(load_review_enabled(&conn).expect("load enabled review setting"));
@@ -6936,6 +6951,17 @@ mod tests {
         assert_eq!(
             load_rewrite_parallelism(&conn).expect("load normalized parallelism"),
             6
+        );
+        save_chapter_batch_size(&conn, 100).expect("save batch size");
+        save_rewrite_parallelism(&conn, 50).expect("save high parallelism");
+        assert_eq!(
+            load_rewrite_parallelism(&conn).expect("load high parallelism"),
+            50
+        );
+        save_chapter_batch_size(&conn, 30).expect("lower batch size");
+        assert_eq!(
+            load_rewrite_parallelism(&conn).expect("clamp high parallelism"),
+            10
         );
     }
 
@@ -7154,6 +7180,15 @@ mod tests {
         let single = split_chapters_for_parallelism(&chapters, 1);
         assert_eq!(single.len(), 1);
         assert_eq!(single[0].len(), 30);
+
+        let uneven = split_chapters_for_parallelism(&chapters[..24], 10);
+        assert_eq!(uneven.len(), 10);
+        assert_eq!(
+            uneven.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![3, 3, 3, 3, 2, 2, 2, 2, 2, 2]
+        );
+        assert_eq!(uneven[0][0].index, 1);
+        assert_eq!(uneven[9][1].index, 24);
     }
 
     #[test]

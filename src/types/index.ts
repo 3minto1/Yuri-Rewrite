@@ -140,7 +140,8 @@ export type AppSettings = {
   review_enabled?: boolean;
   review_profile_id?: string | null;
   selected_profile_id?: string | null;
-  rewrite_parallelism?: 1 | 3 | 6 | 10;
+  chapter_batch_size?: 30 | 50 | 100;
+  rewrite_parallelism?: 1 | 3 | 6 | 10 | 25 | 50;
 };
 
 export type UpdateCheckResult = {
