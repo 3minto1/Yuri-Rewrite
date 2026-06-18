@@ -174,6 +174,10 @@ pub(crate) struct JobProgress {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shard_total: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chapter_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chapter_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) active_shards: Option<Vec<ActiveShardProgress>>,
 }
 

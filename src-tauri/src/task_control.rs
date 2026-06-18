@@ -88,6 +88,7 @@ pub(crate) struct AutoRunControl {
     pub(crate) completed_batches: i64,
     pub(crate) job_id: Option<String>,
     pub(crate) profile_ids: HashSet<String>,
+    pub(crate) recoverable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -98,6 +99,8 @@ pub(crate) struct AutoRunProgressState {
     pub(crate) batch_label: Option<String>,
     pub(crate) shard_total: usize,
     pub(crate) completed_shards: HashSet<usize>,
+    pub(crate) chapter_total: usize,
+    pub(crate) completed_chapter_ids: HashSet<String>,
     pub(crate) active_shards: BTreeMap<usize, ActiveShardProgress>,
 }
 
@@ -199,6 +202,7 @@ mod tests {
                 completed_batches: 0,
                 job_id: None,
                 profile_ids: HashSet::new(),
+                recoverable: true,
             },
         )]));
         let progress = Mutex::new(HashMap::from([(
@@ -233,6 +237,7 @@ mod tests {
                 completed_batches: 1,
                 job_id: None,
                 profile_ids: HashSet::new(),
+                recoverable: true,
             },
         );
         conn.lock()
@@ -271,6 +276,7 @@ mod tests {
                 completed_batches: 1,
                 job_id: None,
                 profile_ids: HashSet::new(),
+                recoverable: true,
             },
         )]));
         assert!(!auto_runs_have_non_paused(&runs).expect("paused only"));
@@ -284,6 +290,7 @@ mod tests {
                 completed_batches: 0,
                 job_id: None,
                 profile_ids: HashSet::new(),
+                recoverable: true,
             },
         );
         assert!(auto_runs_have_non_paused(&runs).expect("has running"));

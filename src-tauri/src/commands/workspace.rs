@@ -1,6 +1,6 @@
 use crate::domain::{AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate};
 use crate::{
-    chapter_text_chars, estimate_requests_for_chapters, estimate_wait_stages_for_chapters,
+    chapter_text_chars, estimate_requests_for_chapters, estimate_wait_seconds_for_chapters,
     load_canon_assets, load_chapter_batches, load_chapters, load_recent_model_stats,
     load_review_enabled, load_rewrite_parallelism, row_to_chapter, to_string,
 };
@@ -137,17 +137,11 @@ pub(crate) fn estimate_job_cost(
         .unwrap_or_default();
     let current_batch_requests =
         estimate_requests_for_chapters(&selected_batch, parallelism, review_enabled);
-    let current_batch_wait_stages =
-        estimate_wait_stages_for_chapters(&selected_batch, review_enabled);
     let full_run_requests = chapters_by_batch
         .iter()
         .map(|batch_chapters| {
             estimate_requests_for_chapters(batch_chapters, parallelism, review_enabled)
         })
-        .sum::<usize>();
-    let full_run_wait_stages = chapters_by_batch
-        .iter()
-        .map(|batch_chapters| estimate_wait_stages_for_chapters(batch_chapters, review_enabled))
         .sum::<usize>();
     let stats = profile_id
         .as_deref()
@@ -155,6 +149,7 @@ pub(crate) fn estimate_job_cost(
         .and_then(|id| load_recent_model_stats(&conn, id).ok())
         .unwrap_or_default();
     let average_call_seconds = stats.average_call_seconds();
+    let average_input_chars = stats.average_input_chars();
     Ok(JobEstimate {
         novel_chapters: chapters.len(),
         novel_chars: chapters.iter().map(chapter_text_chars).sum(),
@@ -166,13 +161,30 @@ pub(crate) fn estimate_job_cost(
         current_batch_requests,
         full_run_requests,
         average_call_seconds,
-        estimated_current_batch_seconds: average_call_seconds
-            .map(|seconds| seconds * current_batch_wait_stages as f64),
-        estimated_full_run_seconds: average_call_seconds
-            .map(|seconds| seconds * full_run_wait_stages as f64),
+        estimated_current_batch_seconds: estimate_wait_seconds_for_chapters(
+            &selected_batch,
+            parallelism,
+            review_enabled,
+            average_call_seconds,
+            average_input_chars,
+        ),
+        estimated_full_run_seconds: average_call_seconds.map(|_| {
+            chapters_by_batch
+                .iter()
+                .filter_map(|batch_chapters| {
+                    estimate_wait_seconds_for_chapters(
+                        batch_chapters,
+                        parallelism,
+                        review_enabled,
+                        average_call_seconds,
+                        average_input_chars,
+                    )
+                })
+                .sum()
+        }),
         recent_success_calls: stats.success_calls,
         recent_failed_calls: stats.failed_calls,
-        average_input_chars: stats.average_input_chars(),
+        average_input_chars,
         average_output_chars: stats.average_output_chars(),
     })
 }

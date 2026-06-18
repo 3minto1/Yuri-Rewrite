@@ -70,6 +70,7 @@ pub(crate) async fn start_analysis(
         &api_key,
         &chapters,
         rewrite_parallelism,
+        None,
     )
     .await
     {

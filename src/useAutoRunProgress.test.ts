@@ -71,6 +71,24 @@ describe("useAutoRunProgress", () => {
     );
   });
 
+  it("accepts current-batch auto progress events", async () => {
+    const onProgress = vi.fn();
+    renderHook(() => useAutoRunProgress("novel-1", onProgress));
+    await waitFor(() => expect(progressHandler).toBeDefined());
+
+    act(() => progressHandler?.({
+      payload: progress({
+        id: "batch-job",
+        job_type: "auto_batch",
+        message: "当前批次分析中"
+      })
+    }));
+
+    expect(onProgress).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "batch-job", job_type: "auto_batch" })
+    );
+  });
+
   it("unsubscribes when the component unmounts", async () => {
     const hook = renderHook(() => useAutoRunProgress("novel-1", vi.fn()));
     await waitFor(() => expect(progressHandler).toBeDefined());

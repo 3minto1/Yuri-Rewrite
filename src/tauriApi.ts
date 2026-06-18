@@ -62,6 +62,10 @@ type CommandMap = {
   };
   start_analysis: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
   start_rewrite: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
+  start_analyze_rewrite_batch: {
+    args: { novelId: string; profileId: string; batchId: string };
+    result: Job;
+  };
   start_analyze_rewrite_all: {
     args: { novelId: string; profileId: string; startBatchId: string | null };
     result: Job;

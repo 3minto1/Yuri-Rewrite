@@ -121,12 +121,28 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS auto_run_shard_outputs (
+            novel_id TEXT NOT NULL,
+            batch_index INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            chapter_index INTEGER NOT NULL,
+            title TEXT,
+            content TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(novel_id, batch_index, phase, chapter_id),
+            FOREIGN KEY(novel_id) REFERENCES auto_run_checkpoints(novel_id) ON DELETE CASCADE,
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id, chapter_index);
         CREATE INDEX IF NOT EXISTS idx_jobs_novel ON jobs(novel_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_novel ON ai_logs(novel_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_profile_created ON ai_logs(profile_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_chapter_batches_novel ON chapter_batches(novel_id, batch_index);
+        CREATE INDEX IF NOT EXISTS idx_auto_run_shard_outputs_phase
+            ON auto_run_shard_outputs(novel_id, batch_index, phase, chapter_index);
         "#,
     )?;
     migrations::ensure_column(conn, "model_profiles", "api_key", "TEXT")?;
@@ -243,6 +259,61 @@ mod tests {
             )
             .expect("load checkpoint");
         assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn keeps_partial_auto_run_shard_outputs_until_checkpoint_cleanup() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, created_at)
+             VALUES ('novel-1', '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO chapters (
+                id, novel_id, chapter_index, title, original_text,
+                analysis_status, rewrite_status
+             ) VALUES ('chapter-1', 'novel-1', 1, '第一章', '正文', 'pending', 'pending')",
+            [],
+        )
+        .expect("insert chapter");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (
+                novel_id, start_batch_index, next_batch_index, status,
+                profile_ids, created_at, updated_at
+             ) VALUES ('novel-1', 0, 0, 'paused', '[]', 'now', 'now')",
+            [],
+        )
+        .expect("insert checkpoint");
+        conn.execute(
+            "INSERT INTO auto_run_shard_outputs (
+                novel_id, batch_index, phase, chapter_id, chapter_index, content, created_at
+             ) VALUES ('novel-1', 1, 'analysis', 'chapter-1', 1, '{\"summary\":\"完成\"}', 'now')",
+            [],
+        )
+        .expect("stage shard output");
+
+        init_db(&conn).expect("reopen schema");
+        let staged_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM auto_run_shard_outputs", [], |row| {
+                row.get(0)
+            })
+            .expect("count staged outputs");
+        assert_eq!(staged_count, 1);
+
+        conn.execute(
+            "DELETE FROM auto_run_checkpoints WHERE novel_id = 'novel-1'",
+            [],
+        )
+        .expect("delete checkpoint");
+        let staged_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM auto_run_shard_outputs", [], |row| {
+                row.get(0)
+            })
+            .expect("count staged outputs after cleanup");
+        assert_eq!(staged_count, 0);
     }
 
     #[test]

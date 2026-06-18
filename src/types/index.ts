@@ -98,6 +98,8 @@ export type Job = {
   batch_label?: string;
   shard_completed?: number;
   shard_total?: number;
+  chapter_completed?: number;
+  chapter_total?: number;
   active_shards?: ActiveShardProgress[];
 };
 

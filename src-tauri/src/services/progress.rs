@@ -2,6 +2,7 @@ use crate::domain::{ActiveShardProgress, AppState, Chapter, JobProgress};
 use crate::task_control::AutoRunProgressState;
 use crate::{row_to_job, to_string, update_job};
 use rusqlite::params;
+use std::collections::HashSet;
 use tauri::{Emitter, State};
 
 fn phase_label(phase: &str) -> &'static str {
@@ -50,6 +51,8 @@ pub(crate) fn set_auto_progress_shard_total(
     novel_id: &str,
     phase: &str,
     shard_total: usize,
+    chapter_total: usize,
+    completed_chapter_ids: HashSet<String>,
 ) -> Result<(), String> {
     if !state
         .auto_runs
@@ -64,6 +67,8 @@ pub(crate) fn set_auto_progress_shard_total(
     entry.phase = Some(phase.to_string());
     entry.shard_total = shard_total;
     entry.completed_shards.clear();
+    entry.chapter_total = chapter_total;
+    entry.completed_chapter_ids = completed_chapter_ids;
     entry.active_shards.clear();
     drop(progress);
     emit_auto_runtime_progress(state, novel_id)
@@ -164,6 +169,7 @@ pub(crate) fn report_auto_shard_completed(
     state: &State<'_, AppState>,
     novel_id: &str,
     shard_index: usize,
+    chapters: &[Chapter],
 ) -> Result<(), String> {
     let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
     let Some(entry) = progress.get_mut(novel_id) else {
@@ -171,6 +177,9 @@ pub(crate) fn report_auto_shard_completed(
     };
     entry.active_shards.remove(&shard_index);
     entry.completed_shards.insert(shard_index);
+    entry
+        .completed_chapter_ids
+        .extend(chapters.iter().map(|chapter| chapter.id.clone()));
     drop(progress);
     emit_auto_runtime_progress(state, novel_id)
 }
@@ -209,12 +218,16 @@ fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Re
     let batch_total = progress_state.batch_total.unwrap_or(job.total_chapters);
     let shard_completed = progress_state.completed_shards.len();
     let shard_total = progress_state.shard_total;
+    let chapter_completed = progress_state.completed_chapter_ids.len();
+    let chapter_total = progress_state.chapter_total;
     let message = if shard_total > 0 {
         format!(
-            "第 {}/{} 批 · {} · 分片已完成 {}/{}",
+            "第 {}/{} 批 · {} · 章节已完成 {}/{} · 分片已完成 {}/{}",
             batch_index,
             batch_total,
             phase_label(phase),
+            chapter_completed,
+            chapter_total,
             shard_completed,
             shard_total
         )
@@ -251,6 +264,8 @@ fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Re
         batch_label: progress_state.batch_label,
         shard_completed: Some(shard_completed),
         shard_total: Some(shard_total),
+        chapter_completed: Some(chapter_completed),
+        chapter_total: Some(chapter_total),
         active_shards: Some(progress_state.active_shards.into_values().collect()),
     };
     let _ = state.app.emit("job-progress", payload);

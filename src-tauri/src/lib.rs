@@ -19,7 +19,9 @@ use commands::{
 use credentials::{classify_api_key_storage, read_api_key, write_api_key, ApiKeyStorage};
 use db::init_db;
 use domain::*;
-use futures_util::{stream::FuturesUnordered, StreamExt};
+use futures_util::{stream, StreamExt};
+#[cfg(test)]
+use futures_util::stream::FuturesUnordered;
 use model_support::model_output_truncation_error;
 use rate_limit::RateLimitCoordinator;
 use regex::Regex;
@@ -111,6 +113,7 @@ pub fn run() {
             update_canon_assets,
             start_analysis,
             start_rewrite,
+            start_analyze_rewrite_batch,
             start_analyze_rewrite_all,
             pause_analyze_rewrite_all,
             terminate_analyze_rewrite_all,
@@ -137,7 +140,7 @@ fn restore_auto_run_controls(
         params![now],
     )?;
     conn.execute(
-        "UPDATE jobs SET status = 'paused', message = '检测到上次未完成的一键任务，可点击继续从当前批次重新开始。', updated_at = ?1 WHERE job_type = 'auto' AND status IN ('running', 'pausing', 'terminating') AND id IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
+        "UPDATE jobs SET status = 'paused', message = '检测到上次未完成的一键任务，可点击继续处理当前批次的未完成分片。', updated_at = ?1 WHERE job_type = 'auto' AND status IN ('running', 'pausing', 'terminating') AND id IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
         params![now],
     )?;
     conn.execute(
@@ -162,6 +165,7 @@ fn restore_auto_run_controls(
                 job_id: row.get(3)?,
                 status: row.get(4)?,
                 profile_ids,
+                recoverable: true,
             },
         ))
     })?;
@@ -181,6 +185,7 @@ async fn analyze_chapters_for_auto(
     profile: &ModelProfile,
     api_key: &str,
     chapters: &[Chapter],
+    checkpoint_batch_index: Option<i64>,
 ) -> Result<(), String> {
     mark_empty_source_chapters_skipped(state, chapters)?;
     let chapters = chapters
@@ -192,8 +197,15 @@ async fn analyze_chapters_for_auto(
         ensure_name_mapping_asset_if_settings_available(state, novel_id, profile, api_key).await?;
         return Ok(());
     }
+    let staged_chapter_ids = if let Some(batch_index) = checkpoint_batch_index {
+        load_staged_chapter_ids(state, novel_id, batch_index, "analysis")?
+    } else {
+        HashSet::new()
+    };
     for chapter in &chapters {
-        set_chapter_status(state, &chapter.id, "analysis_status", "running")?;
+        if !staged_chapter_ids.contains(&chapter.id) {
+            set_chapter_status(state, &chapter.id, "analysis_status", "running")?;
+        }
     }
 
     let rewrite_parallelism = {
@@ -207,6 +219,7 @@ async fn analyze_chapters_for_auto(
         api_key,
         &chapters,
         rewrite_parallelism,
+        checkpoint_batch_index,
     )
     .await
     .inspect_err(|error| {
@@ -221,51 +234,95 @@ async fn analyze_chapters_for_auto(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn analyze_batch_with_parallelism(
     state: &State<'_, AppState>,
     novel_id: &str,
     profile: &ModelProfile,
     api_key: &str,
+    all_chapters: &[Chapter],
     chapters: &[Chapter],
     rewrite_parallelism: usize,
+    checkpoint_batch_index: Option<i64>,
 ) -> Result<Vec<ParsedChapterAnalysis>, String> {
     let rewrite_parallelism = state
         .rate_limits
         .effective_parallelism(rewrite_parallelism, &[profile])?;
-    let shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
-    let shard_total = shards.len();
+    let shard_work = build_contiguous_shard_work(all_chapters, chapters, rewrite_parallelism);
+    let shard_total = shard_work.len();
     let batch_label = format_batch_label(chapters);
-    let mut tasks = tokio::task::JoinSet::new();
-    set_auto_progress_shard_total(state, novel_id, "analysis", shard_total)?;
-
-    for (idx, shard) in shards.into_iter().enumerate() {
-        report_auto_shard_started(state, novel_id, "analysis", idx, shard_total, &shard)?;
+    let staged = checkpoint_batch_index
+        .map(|batch_index| load_staged_outputs(state, novel_id, batch_index, "analysis"))
+        .transpose()?
+        .unwrap_or_default();
+    set_auto_progress_shard_total(
+        state,
+        novel_id,
+        "analysis",
+        shard_total,
+        all_chapters.len(),
+        completed_chapter_ids_before_resume(all_chapters, chapters),
+    )?;
+    let tasks = stream::iter(shard_work.into_iter().enumerate().map(|(idx, work)| {
+        let shard = work.chapters.clone();
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
-        let context =
-            format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
+        let readonly_context = build_readonly_adjacent_context(&work, &staged, "analysis");
+        let context = format_shard_context_with_neighbors(
+            idx,
+            shard_total,
+            rewrite_parallelism,
+            &batch_label,
+            &shard,
+            &readonly_context,
+        );
         let prompt = build_batch_analysis_prompt_with_context(&shard, &context);
         let client = state.client.clone();
         let rate_limiter = state.rate_limits.clone();
         let profile_for_task = profile.clone();
         let api_key = api_key.to_string();
-        let shard_for_task = shard.clone();
-        tasks.spawn(async move {
-            let output = generate_text(
-                &client,
-                Some(rate_limiter),
-                &profile_for_task,
-                &api_key,
-                SYSTEM_ANALYSIS_EXPERT,
-                &prompt,
-                true,
-            )
-            .await;
-            (idx, shard_label, context, shard_for_task, output)
-        });
-    }
+        async move {
+            let output = match report_auto_shard_started(
+                state,
+                novel_id,
+                "analysis",
+                idx,
+                shard_total,
+                &shard,
+            ) {
+                Ok(()) => {
+                    generate_text(
+                        &client,
+                        Some(rate_limiter),
+                        &profile_for_task,
+                        &api_key,
+                        SYSTEM_ANALYSIS_EXPERT,
+                        &prompt,
+                        true,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            (idx, shard_label, context, shard, output)
+        }
+    }))
+    .buffer_unordered(rewrite_parallelism);
+    futures_util::pin_mut!(tasks);
 
     let mut parsed_by_shard = Vec::new();
-    while let Some(result) = next_auto_join(&mut tasks, state, novel_id).await? {
+    loop {
+        let result = tokio::select! {
+            result = tasks.next() => result,
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                if let Some(status) = requested_auto_run_stop(state, novel_id)? {
+                    return Err(status);
+                }
+                continue;
+            }
+        };
+        let Some(result) = result else {
+            break;
+        };
         let (idx, shard_label, context, shard, output) = result;
         match output {
             Ok(output) => {
@@ -309,13 +366,21 @@ async fn analyze_batch_with_parallelism(
                         {
                             Ok(parsed) => parsed,
                             Err(retry_error) => {
-                                abort_and_drain_tasks(&mut tasks).await;
                                 return Err(format!("{}：{}", shard_label, retry_error));
                             }
                         }
                     }
                 };
-                report_auto_shard_completed(state, novel_id, idx)?;
+                if let Some(batch_index) = checkpoint_batch_index {
+                    stage_analysis_shard(
+                        state,
+                        novel_id,
+                        batch_index,
+                        &shard,
+                        &parsed,
+                    )?;
+                }
+                report_auto_shard_completed(state, novel_id, idx, &shard)?;
                 parsed_by_shard.push((idx, parsed));
             }
             Err(error) => {
@@ -330,7 +395,6 @@ async fn analyze_batch_with_parallelism(
                     None,
                     None,
                 )?;
-                abort_and_drain_tasks(&mut tasks).await;
                 return Err(format!("{}：{}", shard_label, error));
             }
         }
@@ -404,7 +468,7 @@ async fn retry_analysis_shard_after_parse_error(
                         Some(&output.raw_response),
                     )?;
                     Err(format!(
-                        "分析输出格式多次修复后仍无法解析：{}。任务可以暂停后手动继续，从当前批次重新尝试；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
+                        "分析输出格式多次修复后仍无法解析：{}。任务可以暂停后手动继续，已完成分片会保留，仅重新尝试未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
                         error
                     ))
                 }
@@ -423,7 +487,7 @@ async fn retry_analysis_shard_after_parse_error(
                 None,
             )?;
             Err(format!(
-                "分析输出格式修复重试调用失败：{}。任务可以暂停后手动继续，从当前批次重新尝试；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
+                "分析输出格式修复重试调用失败：{}。任务可以暂停后手动继续，已完成分片会保留，仅重新尝试未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
                 error
             ))
         }
@@ -455,6 +519,129 @@ fn save_parsed_analyses(
     tx.commit().map_err(to_string)?;
     merge_analysis_into_canon_assets(&conn, novel_id).map_err(to_string)?;
     Ok(())
+}
+
+fn load_staged_chapter_ids(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    batch_index: i64,
+    phase: &str,
+) -> Result<HashSet<String>, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT chapter_id FROM auto_run_shard_outputs
+             WHERE novel_id = ?1 AND batch_index = ?2 AND phase = ?3",
+        )
+        .map_err(to_string)?;
+    let ids = stmt
+        .query_map(params![novel_id, batch_index, phase], |row| row.get(0))
+        .map_err(to_string)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(to_string)?;
+    Ok(ids)
+}
+
+fn chapters_without_staged_outputs(
+    chapters: &[Chapter],
+    staged_chapter_ids: &HashSet<String>,
+) -> Vec<Chapter> {
+    chapters
+        .iter()
+        .filter(|chapter| !staged_chapter_ids.contains(&chapter.id))
+        .cloned()
+        .collect()
+}
+
+fn completed_chapter_ids_before_resume(
+    all_chapters: &[Chapter],
+    target_chapters: &[Chapter],
+) -> HashSet<String> {
+    let target_ids = target_chapters
+        .iter()
+        .map(|chapter| chapter.id.as_str())
+        .collect::<HashSet<_>>();
+    all_chapters
+        .iter()
+        .filter(|chapter| !target_ids.contains(chapter.id.as_str()))
+        .map(|chapter| chapter.id.clone())
+        .collect()
+}
+
+fn stage_analysis_shard(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    batch_index: i64,
+    chapters: &[Chapter],
+    analyses: &[ParsedChapterAnalysis],
+) -> Result<(), String> {
+    let analysis_by_id = analyses
+        .iter()
+        .map(|analysis| (analysis.id.as_str(), analysis.json.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let tx = conn.transaction().map_err(to_string)?;
+    let now = Utc::now().to_rfc3339();
+    for chapter in chapters {
+        tx.execute(
+            "INSERT INTO auto_run_shard_outputs (
+                novel_id, batch_index, phase, chapter_id, chapter_index, title, content, created_at
+             ) VALUES (?1, ?2, 'analysis', ?3, ?4, NULL, ?5, ?6)
+             ON CONFLICT(novel_id, batch_index, phase, chapter_id) DO UPDATE SET
+                chapter_index = excluded.chapter_index,
+                content = excluded.content,
+                created_at = excluded.created_at",
+            params![
+                novel_id,
+                batch_index,
+                chapter.id,
+                chapter.index,
+                analysis_by_id.get(chapter.id.as_str()).copied(),
+                now
+            ],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)
+}
+
+fn apply_staged_analyses(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    batch_index: i64,
+    chapters: &[Chapter],
+) -> Result<(), String> {
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let staged = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT chapter_id, content FROM auto_run_shard_outputs
+                 WHERE novel_id = ?1 AND batch_index = ?2 AND phase = 'analysis'",
+            )
+            .map_err(to_string)?;
+        let rows = stmt
+            .query_map(params![novel_id, batch_index], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(to_string)?
+            .collect::<Result<HashMap<_, _>, _>>()
+            .map_err(to_string)?;
+        rows
+    };
+    if chapters.iter().any(|chapter| !staged.contains_key(&chapter.id)) {
+        return Err("分析分片恢复数据不完整，未写入章节结果。".to_string());
+    }
+
+    let tx = conn.transaction().map_err(to_string)?;
+    for chapter in chapters {
+        tx.execute(
+            "UPDATE chapters SET analysis_json = ?1, analysis_status = 'completed' WHERE id = ?2",
+            params![staged.get(&chapter.id).cloned().flatten(), chapter.id],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)?;
+    merge_analysis_into_canon_assets(&conn, novel_id).map_err(to_string)
 }
 
 async fn ensure_name_mapping_asset(
@@ -847,6 +1034,7 @@ async fn rewrite_chapters_for_auto(
     profile: &ModelProfile,
     api_key: &str,
     batch_id: &str,
+    checkpoint_batch_index: Option<i64>,
 ) -> Result<(), String> {
     let (
         all_chapters,
@@ -890,8 +1078,15 @@ async fn rewrite_chapters_for_auto(
         load_canon_assets(&conn, novel_id)?
     };
     let canon_text = build_relevant_canon_text(&canon_assets, &chapters, &settings);
+    let staged_chapter_ids = if let Some(batch_index) = checkpoint_batch_index {
+        load_staged_chapter_ids(state, novel_id, batch_index, "rewrite")?
+    } else {
+        HashSet::new()
+    };
     for chapter in &chapters {
-        set_chapter_status(state, &chapter.id, "rewrite_status", "running")?;
+        if !staged_chapter_ids.contains(&chapter.id) {
+            set_chapter_status(state, &chapter.id, "rewrite_status", "running")?;
+        }
     }
 
     services::rewrite::rewrite_and_save(
@@ -908,6 +1103,7 @@ async fn rewrite_chapters_for_auto(
             review_profile: review_profile.as_ref(),
             review_api_key: review_api_key.as_deref(),
             parallelism: rewrite_parallelism,
+            checkpoint_batch_index,
         },
     )
     .await
@@ -928,6 +1124,7 @@ async fn rewrite_batch_with_parallelism(
     novel_id: &str,
     profile: &ModelProfile,
     api_key: &str,
+    all_chapters: &[Chapter],
     chapters: &[Chapter],
     canon_text: &str,
     settings: &NovelSettings,
@@ -936,6 +1133,7 @@ async fn rewrite_batch_with_parallelism(
     review_profile: Option<&ModelProfile>,
     review_api_key: Option<&str>,
     rewrite_parallelism: usize,
+    checkpoint_batch_index: Option<i64>,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
     let effective_profiles = match review_profile {
         Some(review_profile) => vec![profile, review_profile],
@@ -953,11 +1151,13 @@ async fn rewrite_batch_with_parallelism(
                 rewrite_api_key: api_key,
                 review_profile: review_profile.unwrap_or(profile),
                 review_api_key: review_api_key.unwrap_or(api_key),
+                all_chapters,
                 chapters,
                 canon_text,
                 settings,
                 core_prompt,
                 parallelism: rewrite_parallelism,
+                checkpoint_batch_index,
             },
         )
         .await
@@ -967,12 +1167,14 @@ async fn rewrite_batch_with_parallelism(
             novel_id,
             profile,
             api_key,
+            all_chapters,
             chapters,
             canon_text,
             settings,
             core_prompt,
             false,
             rewrite_parallelism,
+            checkpoint_batch_index,
         )
         .await
     }
@@ -984,25 +1186,51 @@ async fn generate_rewrite_shards(
     novel_id: &str,
     profile: &ModelProfile,
     api_key: &str,
+    all_chapters: &[Chapter],
     chapters: &[Chapter],
     canon_text: &str,
     settings: &NovelSettings,
     core_prompt: &str,
     review_enabled: bool,
     rewrite_parallelism: usize,
+    checkpoint_batch_index: Option<i64>,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
-    let shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
-    let shard_total = shards.len();
+    let shard_work = build_contiguous_shard_work(all_chapters, chapters, rewrite_parallelism);
+    let shard_total = shard_work.len();
     let batch_label = format_batch_label(chapters);
-    let mut tasks = FuturesUnordered::new();
-    set_auto_progress_shard_total(state, novel_id, "rewrite", shard_total)?;
-
-    for (idx, shard) in shards.into_iter().enumerate() {
-        report_auto_shard_started(state, novel_id, "rewrite", idx, shard_total, &shard)?;
+    let staged = checkpoint_batch_index
+        .map(|batch_index| load_staged_outputs(state, novel_id, batch_index, "rewrite"))
+        .transpose()?
+        .unwrap_or_default();
+    set_auto_progress_shard_total(
+        state,
+        novel_id,
+        "rewrite",
+        shard_total,
+        all_chapters.len(),
+        completed_chapter_ids_before_resume(all_chapters, chapters),
+    )?;
+    let tasks = stream::iter(shard_work.into_iter().enumerate().map(|(idx, work)| {
+        let shard = work.chapters.clone();
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
-        let context =
-            format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
-        tasks.push(async move {
+        let readonly_context = build_readonly_adjacent_context(&work, &staged, "rewrite");
+        let context = format_shard_context_with_neighbors(
+            idx,
+            shard_total,
+            rewrite_parallelism,
+            &batch_label,
+            &shard,
+            &readonly_context,
+        );
+        async move {
+            report_auto_shard_started(
+                state,
+                novel_id,
+                "rewrite",
+                idx,
+                shard_total,
+                &shard,
+            )?;
             let parsed = generate_single_rewrite_shard(
                 state,
                 novel_id,
@@ -1013,36 +1241,41 @@ async fn generate_rewrite_shards(
                 settings,
                 core_prompt,
                 &context,
+                &readonly_context,
                 &shard_label,
                 review_enabled,
             )
             .await;
-            (idx, shard_label, parsed)
-        });
-    }
+            Ok::<_, String>((idx, shard_label, shard, parsed))
+        }
+    }))
+    .buffer_unordered(rewrite_parallelism);
+    futures_util::pin_mut!(tasks);
 
     let mut parsed_by_shard = Vec::new();
-    while !tasks.is_empty() {
+    loop {
         let result = tokio::select! {
             result = tasks.next() => result,
             _ = tokio::time::sleep(Duration::from_millis(300)) => {
                 if let Some(status) = requested_auto_run_stop(state, novel_id)? {
-                    drop(tasks);
                     return Err(status);
                 }
                 continue;
             }
         };
-        let Some((idx, shard_label, parsed)) = result else {
+        let Some(result) = result else {
             break;
         };
+        let (idx, shard_label, shard, parsed) = result?;
         match parsed {
             Ok(parsed) => {
-                report_auto_shard_completed(state, novel_id, idx)?;
+                if let Some(batch_index) = checkpoint_batch_index {
+                    stage_rewrite_shard(state, novel_id, batch_index, &parsed)?;
+                }
+                report_auto_shard_completed(state, novel_id, idx, &shard)?;
                 parsed_by_shard.push((idx, parsed))
             }
             Err(error) => {
-                drop(tasks);
                 return Err(format!("{}：{}", shard_label, error));
             }
         }
@@ -1066,6 +1299,7 @@ async fn generate_single_rewrite_shard(
     settings: &NovelSettings,
     core_prompt: &str,
     shard_context: &str,
+    readonly_adjacent_context: &str,
     shard_label: &str,
     review_enabled: bool,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
@@ -1142,6 +1376,7 @@ async fn generate_single_rewrite_shard(
                                 &shard_canon_text,
                                 settings,
                                 core_prompt,
+                                readonly_adjacent_context,
                                 shard_label,
                                 review_enabled,
                                 &retry_error,
@@ -1179,6 +1414,7 @@ async fn recover_rewrite_shard_by_subdivision(
     canon_text: &str,
     settings: &NovelSettings,
     core_prompt: &str,
+    readonly_adjacent_context: &str,
     shard_label: &str,
     review_enabled: bool,
     original_error: &str,
@@ -1215,7 +1451,14 @@ async fn recover_rewrite_shard_by_subdivision(
         }
 
         let batch_label = format_batch_label(&subshard);
-        let context = format_shard_context(0, 1, 1, &batch_label, &subshard);
+        let context = format_shard_context_with_neighbors(
+            0,
+            1,
+            1,
+            &batch_label,
+            &subshard,
+            readonly_adjacent_context,
+        );
         let subshard_canon_text =
             build_relevant_canon_text_from_text(canon_text, &subshard, settings);
         let prompt = build_batch_rewrite_prompt_with_context(
@@ -1347,24 +1590,50 @@ async fn generate_reviewed_rewrite_pipeline(
     rewrite_api_key: &str,
     review_profile: &ModelProfile,
     review_api_key: &str,
+    all_chapters: &[Chapter],
     chapters: &[Chapter],
     canon_text: &str,
     settings: &NovelSettings,
     core_prompt: &str,
     rewrite_parallelism: usize,
+    checkpoint_batch_index: Option<i64>,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
-    let chapter_shards = split_chapters_for_parallelism(chapters, rewrite_parallelism);
-    let shard_total = chapter_shards.len();
+    let shard_work = build_contiguous_shard_work(all_chapters, chapters, rewrite_parallelism);
+    let shard_total = shard_work.len();
     let batch_label = format_batch_label(chapters);
-    let mut tasks = FuturesUnordered::new();
-    set_auto_progress_shard_total(state, novel_id, "rewrite", shard_total)?;
-
-    for (idx, shard) in chapter_shards.into_iter().enumerate() {
-        report_auto_shard_started(state, novel_id, "rewrite", idx, shard_total, &shard)?;
+    let staged = checkpoint_batch_index
+        .map(|batch_index| load_staged_outputs(state, novel_id, batch_index, "rewrite"))
+        .transpose()?
+        .unwrap_or_default();
+    set_auto_progress_shard_total(
+        state,
+        novel_id,
+        "rewrite",
+        shard_total,
+        all_chapters.len(),
+        completed_chapter_ids_before_resume(all_chapters, chapters),
+    )?;
+    let tasks = stream::iter(shard_work.into_iter().enumerate().map(|(idx, work)| {
+        let shard = work.chapters.clone();
         let shard_label = format_shard_label(&batch_label, idx, shard_total, &shard);
-        let context =
-            format_shard_context(idx, shard_total, rewrite_parallelism, &batch_label, &shard);
-        tasks.push(async move {
+        let readonly_context = build_readonly_adjacent_context(&work, &staged, "rewrite");
+        let context = format_shard_context_with_neighbors(
+            idx,
+            shard_total,
+            rewrite_parallelism,
+            &batch_label,
+            &shard,
+            &readonly_context,
+        );
+        async move {
+            report_auto_shard_started(
+                state,
+                novel_id,
+                "rewrite",
+                idx,
+                shard_total,
+                &shard,
+            )?;
             let rewrite_shard = generate_single_rewrite_shard(
                 state,
                 novel_id,
@@ -1375,6 +1644,7 @@ async fn generate_reviewed_rewrite_pipeline(
                 settings,
                 core_prompt,
                 &context,
+                &readonly_context,
                 &shard_label,
                 true,
             )
@@ -1398,17 +1668,18 @@ async fn generate_reviewed_rewrite_pipeline(
                 idx,
             )
             .await?;
-            Ok::<_, String>((idx, shard_label, reviewed))
-        });
-    }
+            Ok::<_, String>((idx, shard_label, shard, reviewed))
+        }
+    }))
+    .buffer_unordered(rewrite_parallelism);
+    futures_util::pin_mut!(tasks);
 
     let mut parsed_by_shard = Vec::new();
-    while !tasks.is_empty() {
+    loop {
         let result = tokio::select! {
             result = tasks.next() => result,
             _ = tokio::time::sleep(Duration::from_millis(300)) => {
                 if let Some(status) = requested_auto_run_stop(state, novel_id)? {
-                    drop(tasks);
                     return Err(status);
                 }
                 continue;
@@ -1418,12 +1689,14 @@ async fn generate_reviewed_rewrite_pipeline(
             break;
         };
         match result {
-            Ok((idx, _, parsed)) => {
-                report_auto_shard_completed(state, novel_id, idx)?;
+            Ok((idx, _, shard, parsed)) => {
+                if let Some(batch_index) = checkpoint_batch_index {
+                    stage_rewrite_shard(state, novel_id, batch_index, &parsed)?;
+                }
+                report_auto_shard_completed(state, novel_id, idx, &shard)?;
                 parsed_by_shard.push((idx, parsed))
             }
             Err(error) => {
-                drop(tasks);
                 return Err(error);
             }
         }
@@ -4340,6 +4613,181 @@ fn split_chapters_for_parallelism(
     shards
 }
 
+#[derive(Debug, Clone)]
+struct ChapterShardWork {
+    chapters: Vec<Chapter>,
+    previous: Option<Chapter>,
+    next: Option<Chapter>,
+}
+
+fn build_contiguous_shard_work(
+    all_chapters: &[Chapter],
+    target_chapters: &[Chapter],
+    rewrite_parallelism: usize,
+) -> Vec<ChapterShardWork> {
+    if target_chapters.is_empty() {
+        return Vec::new();
+    }
+    let target_ids = target_chapters
+        .iter()
+        .map(|chapter| chapter.id.as_str())
+        .collect::<HashSet<_>>();
+    if target_ids.len() == all_chapters.len()
+        && all_chapters
+            .iter()
+            .all(|chapter| target_ids.contains(chapter.id.as_str()))
+    {
+        return split_chapters_for_parallelism(all_chapters, rewrite_parallelism)
+            .into_iter()
+            .map(|chapters| ChapterShardWork {
+                chapters,
+                previous: None,
+                next: None,
+            })
+            .collect();
+    }
+
+    let parallelism = normalize_rewrite_parallelism(rewrite_parallelism).max(1);
+    let target_shard_size = all_chapters.len().div_ceil(parallelism).max(1);
+    let mut work = Vec::new();
+    let mut position = 0usize;
+    while position < all_chapters.len() {
+        if !target_ids.contains(all_chapters[position].id.as_str()) {
+            position += 1;
+            continue;
+        }
+        let run_start = position;
+        while position < all_chapters.len()
+            && target_ids.contains(all_chapters[position].id.as_str())
+        {
+            position += 1;
+        }
+        let run_end = position;
+        let mut chunk_start = run_start;
+        while chunk_start < run_end {
+            let chunk_end = (chunk_start + target_shard_size).min(run_end);
+            work.push(ChapterShardWork {
+                chapters: all_chapters[chunk_start..chunk_end].to_vec(),
+                previous: chunk_start
+                    .checked_sub(1)
+                    .and_then(|index| all_chapters.get(index))
+                    .cloned(),
+                next: all_chapters.get(chunk_end).cloned(),
+            });
+            chunk_start = chunk_end;
+        }
+    }
+    work
+}
+
+#[derive(Debug, Clone)]
+struct StagedChapterOutput {
+    title: Option<String>,
+    content: Option<String>,
+}
+
+fn load_staged_outputs(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    batch_index: i64,
+    phase: &str,
+) -> Result<HashMap<String, StagedChapterOutput>, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT chapter_id, title, content FROM auto_run_shard_outputs
+             WHERE novel_id = ?1 AND batch_index = ?2 AND phase = ?3",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map(params![novel_id, batch_index, phase], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                StagedChapterOutput {
+                    title: row.get(1)?,
+                    content: row.get(2)?,
+                },
+            ))
+        })
+        .map_err(to_string)?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(to_string)?;
+    Ok(rows)
+}
+
+fn format_readonly_neighbor(
+    label: &str,
+    chapter: Option<&Chapter>,
+    staged: &HashMap<String, StagedChapterOutput>,
+    phase: &str,
+    use_tail: bool,
+) -> Option<String> {
+    let chapter = chapter?;
+    let staged_output = staged.get(&chapter.id);
+    let title = staged_output
+        .and_then(|output| output.title.as_deref())
+        .unwrap_or(&chapter.title);
+    let completed_context = staged_output
+        .and_then(|output| output.content.as_deref())
+        .filter(|content| !content.trim().is_empty());
+    let summarize = |content: &str| {
+        if use_tail {
+            truncate_text_tail(content.trim(), 600)
+        } else {
+            truncate_text(content.trim(), 600)
+        }
+    };
+    let context = match (phase, completed_context) {
+        ("rewrite", Some(content)) => format!(
+            "已完成改写摘要：{}",
+            summarize(content)
+        ),
+        ("analysis", Some(content)) => format!(
+            "已完成分析摘要：{}",
+            summarize(content)
+        ),
+        _ => format!(
+            "原文摘要：{}",
+            summarize(&chapter.original_text)
+        ),
+    };
+    Some(format!(
+        "{}：内部索引 {} · 标题：{}\n{}",
+        label, chapter.index, title, context
+    ))
+}
+
+fn build_readonly_adjacent_context(
+    work: &ChapterShardWork,
+    staged: &HashMap<String, StagedChapterOutput>,
+    phase: &str,
+) -> String {
+    let context = [
+        format_readonly_neighbor(
+            "前一相邻章节",
+            work.previous.as_ref(),
+            staged,
+            phase,
+            true,
+        ),
+        format_readonly_neighbor(
+            "后一相邻章节",
+            work.next.as_ref(),
+            staged,
+            phase,
+            false,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if context.is_empty() {
+        "无相邻章节。".to_string()
+    } else {
+        context.join("\n\n")
+    }
+}
+
 fn estimate_requests_for_chapters(
     chapters: &[Chapter],
     rewrite_parallelism: usize,
@@ -4360,6 +4808,36 @@ fn estimate_wait_stages_for_chapters(chapters: &[Chapter], review_enabled: bool)
     } else {
         2
     }
+}
+
+fn estimate_wait_seconds_for_chapters(
+    chapters: &[Chapter],
+    rewrite_parallelism: usize,
+    review_enabled: bool,
+    average_call_seconds: Option<f64>,
+    average_input_chars: Option<usize>,
+) -> Option<f64> {
+    let average_call_seconds = average_call_seconds?;
+    if chapters.is_empty() {
+        return Some(0.0);
+    }
+
+    let shard_count = split_chapters_for_parallelism(chapters, rewrite_parallelism).len();
+    let total_chars = chapters.iter().map(chapter_text_chars).sum::<usize>();
+    let average_shard_chars = total_chars as f64 / shard_count as f64;
+    let size_factor = average_input_chars
+        .filter(|chars| *chars > 0)
+        .map(|chars| {
+            let relative_size = (average_shard_chars / chars as f64).clamp(0.05, 4.0);
+            0.4 + relative_size * 0.6
+        })
+        .unwrap_or(1.0);
+
+    Some(
+        average_call_seconds
+            * estimate_wait_stages_for_chapters(chapters, review_enabled) as f64
+            * size_factor,
+    )
 }
 
 fn chapter_text_chars(chapter: &Chapter) -> usize {
@@ -4496,6 +4974,24 @@ fn format_shard_context(
     _batch_label: &str,
     chapters: &[Chapter],
 ) -> String {
+    format_shard_context_with_neighbors(
+        _shard_index,
+        _shard_total,
+        _rewrite_parallelism,
+        _batch_label,
+        chapters,
+        "无相邻章节。",
+    )
+}
+
+fn format_shard_context_with_neighbors(
+    _shard_index: usize,
+    _shard_total: usize,
+    _rewrite_parallelism: usize,
+    _batch_label: &str,
+    chapters: &[Chapter],
+    readonly_adjacent_context: &str,
+) -> String {
     let chapter_list = chapters
         .iter()
         .map(|chapter| format!("第{}章", chapter.index))
@@ -4507,8 +5003,10 @@ fn format_shard_context(
         _ => "空分片".to_string(),
     };
     format!(
-        "本次输入只包含{}：{}。只能处理和输出这些章节，严禁输出输入外的任何章节、标题、正文或章节边界标记。所有请求共享同一份小说设定、一致性资产、姓名女性化规则和章节边界规则；不得因为只看到当前输入就改变人物设定或重置关系进展。",
-        chapter_range, chapter_list
+        "本次目标只包含{}：{}。只能处理和输出这些目标章节，严禁输出输入外的任何章节、标题、正文或章节边界标记。所有请求共享同一份小说设定、一致性资产、姓名女性化规则和章节边界规则；不得因为只看到当前输入就改变人物设定或重置关系进展。\n\n相邻章节只读上下文（仅用于判断人物、场景、称谓和剧情连续性；不得分析为本次结果，不得输出、改写或覆盖）：\n{}",
+        chapter_range,
+        chapter_list,
+        readonly_adjacent_context.trim()
     )
 }
 
@@ -4825,6 +5323,92 @@ fn save_parsed_rewrites(
     }
     tx.commit().map_err(to_string)?;
     Ok(())
+}
+
+fn stage_rewrite_shard(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    batch_index: i64,
+    rewrites: &[ParsedChapterRewrite],
+) -> Result<(), String> {
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let tx = conn.transaction().map_err(to_string)?;
+    let now = Utc::now().to_rfc3339();
+    for rewrite in rewrites {
+        tx.execute(
+            "INSERT INTO auto_run_shard_outputs (
+                novel_id, batch_index, phase, chapter_id, chapter_index, title, content, created_at
+             ) VALUES (?1, ?2, 'rewrite', ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(novel_id, batch_index, phase, chapter_id) DO UPDATE SET
+                chapter_index = excluded.chapter_index,
+                title = excluded.title,
+                content = excluded.content,
+                created_at = excluded.created_at",
+            params![
+                novel_id,
+                batch_index,
+                rewrite.id,
+                rewrite.index,
+                rewrite.title.trim(),
+                rewrite.text.trim(),
+                now
+            ],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)
+}
+
+fn apply_staged_rewrites(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    batch_index: i64,
+    chapters: &[Chapter],
+) -> Result<(), String> {
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let staged = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT chapter_id, title, content FROM auto_run_shard_outputs
+                 WHERE novel_id = ?1 AND batch_index = ?2 AND phase = 'rewrite'",
+            )
+            .map_err(to_string)?;
+        let rows = stmt
+            .query_map(params![novel_id, batch_index], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ),
+                ))
+            })
+            .map_err(to_string)?
+            .collect::<Result<HashMap<_, _>, _>>()
+            .map_err(to_string)?;
+        rows
+    };
+    if chapters.iter().any(|chapter| {
+        staged
+            .get(&chapter.id)
+            .is_none_or(|(title, content)| title.is_none() || content.is_none())
+    }) {
+        return Err("改写分片恢复数据不完整，未写入章节结果。".to_string());
+    }
+
+    let tx = conn.transaction().map_err(to_string)?;
+    for chapter in chapters {
+        let (title, content) = staged
+            .get(&chapter.id)
+            .expect("validated staged rewrite");
+        tx.execute(
+            "UPDATE chapters SET title = ?1, rewrite_text = ?2, ai_rewrite_text = ?2,
+                rewrite_edited_at = NULL, rewrite_status = 'completed' WHERE id = ?3",
+            params![title, content, chapter.id],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)
 }
 
 fn mark_chapters_analysis_failed(
@@ -5215,6 +5799,7 @@ fn prepare_auto_run(
             completed_batches: resume_from,
             job_id: None,
             profile_ids,
+            recoverable: true,
         },
     );
     let control = runs.get(novel_id).cloned().expect("inserted auto run");
@@ -5239,6 +5824,7 @@ fn register_auto_run_job(
             completed_batches,
             job_id: None,
             profile_ids: HashSet::new(),
+            recoverable: true,
         });
     control.status = "running".to_string();
     control.start_batch_index = start_batch_index;
@@ -5268,6 +5854,12 @@ fn set_auto_run_completed(
             Some("export"),
             Some(completed_batches),
         )?;
+        let conn = state.conn.lock().map_err(to_string)?;
+        conn.execute(
+            "DELETE FROM auto_run_shard_outputs WHERE novel_id = ?1 AND batch_index = ?2",
+            params![novel_id, completed_batches],
+        )
+        .map_err(to_string)?;
     }
     Ok(())
 }
@@ -5280,6 +5872,9 @@ fn persist_auto_run_checkpoint(
     phase: Option<&str>,
     batch_index: Option<i64>,
 ) -> Result<(), String> {
+    if !control.recoverable {
+        return Ok(());
+    }
     let profile_ids =
         serde_json::to_string(&control.profile_ids.iter().cloned().collect::<Vec<_>>())
             .map_err(to_string)?;
@@ -5381,7 +5976,7 @@ fn request_auto_run_stop(
         let message = if status == "terminate_requested" {
             "正在终止一键分析改写，当前未输出批次将不会保存。"
         } else {
-            "正在暂停一键分析改写，当前未输出批次将从头重跑。"
+            "正在暂停一键分析改写，已完成分片会保留，继续时仅处理未完成分片。"
         };
         let job_status = if status == "terminate_requested" {
             "terminating"
@@ -5445,7 +6040,7 @@ fn finish_stopped_auto_run(
         clear_auto_run(state, &job.novel_id)?;
     } else {
         let message = format!(
-            "一键分析改写已暂停。继续后将从第 {} 批重新开始。",
+            "一键分析改写已暂停。继续后将处理第 {} 批的未完成分片。",
             completed_batches + 1
         );
         update_job(state, &job.id, "paused", completed_in_range, &message)?;
@@ -5473,7 +6068,7 @@ fn pause_auto_run_after_rate_limit(
 ) -> Result<Job, String> {
     let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
-        "服务商限流重试已耗尽，任务已暂停。请降低并发、等待额度恢复或更换模型后点击继续；继续后将从第 {} 批重新开始。\n\n{}",
+        "服务商限流重试已耗尽，任务已暂停。请降低并发、等待额度恢复或更换模型后点击继续；已完成分片已保留，将继续处理第 {} 批的未完成分片。\n\n{}",
         completed_batches + 1,
         error
     );
@@ -5501,7 +6096,7 @@ fn pause_auto_run_after_network_error(
 ) -> Result<Job, String> {
     let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
-        "网络连接异常，任务已暂停。请检查网络、代理或服务商连接状态后点击继续；继续后将从第 {} 批重新开始。\n\n{}",
+        "网络连接异常，任务已暂停。请检查网络、代理或服务商连接状态后点击继续；已完成分片已保留，将继续处理第 {} 批的未完成分片。\n\n{}",
         completed_batches + 1,
         error
     );
@@ -5529,7 +6124,7 @@ fn pause_auto_run_after_temporary_gateway_error(
 ) -> Result<Job, String> {
     let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
-        "模型服务或反向代理暂时不可用，任务已暂停。可以调整并发或模型后点击继续；继续后将从第 {} 批重新开始。\n\n{}",
+        "模型服务或反向代理暂时不可用，任务已暂停。可以调整并发或模型后点击继续；已完成分片已保留，将继续处理第 {} 批的未完成分片。\n\n{}",
         completed_batches + 1,
         error
     );
@@ -5557,7 +6152,7 @@ fn pause_auto_run_after_model_format_error(
 ) -> Result<Job, String> {
     let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
-        "模型输出格式多次修复后仍无法解析，任务已暂停。可以点击继续从第 {} 批重新开始；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。\n\n{}",
+        "模型输出格式多次修复后仍无法解析，任务已暂停。已完成分片已保留，可以点击继续处理第 {} 批的未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。\n\n{}",
         completed_batches + 1,
         error
     );
@@ -5593,29 +6188,6 @@ fn clear_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<(), Str
     Ok(())
 }
 
-async fn next_auto_join<T: Send + 'static>(
-    tasks: &mut tokio::task::JoinSet<T>,
-    state: &State<'_, AppState>,
-    novel_id: &str,
-) -> Result<Option<T>, String> {
-    loop {
-        tokio::select! {
-            result = tasks.join_next() => {
-                return match result {
-                    Some(result) => result.map(Some).map_err(to_string),
-                    None => Ok(None),
-                };
-            }
-            _ = tokio::time::sleep(Duration::from_millis(300)) => {
-                if let Some(status) = requested_auto_run_stop(state, novel_id)? {
-                    abort_and_drain_tasks(tasks).await;
-                    return Err(status);
-                }
-            }
-        }
-    }
-}
-
 fn emit_job_progress(
     app: &AppHandle,
     job: &Job,
@@ -5637,6 +6209,8 @@ fn emit_job_progress(
         batch_label: None,
         shard_completed: None,
         shard_total: None,
+        chapter_completed: None,
+        chapter_total: None,
         active_shards: None,
     };
     let _ = app.emit("job-progress", progress);
@@ -5952,6 +6526,7 @@ fn read_stored_api_key(state: &State<'_, AppState>, profile_id: &str) -> Result<
     Ok(db_api_key)
 }
 
+#[cfg(test)]
 async fn abort_and_drain_tasks<T: 'static>(tasks: &mut tokio::task::JoinSet<T>) {
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
@@ -6148,6 +6723,19 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     }
     value
 }
+
+fn truncate_text_tail(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    let tail = text
+        .chars()
+        .skip(char_count.saturating_sub(max_chars))
+        .collect::<String>();
+    format!("[由于上下文限制，本章前文已截断。]\n\n{}", tail)
+}
+
 /// Extract the trailing JSON object or array from a text such as reasoning / thinking content.
 /// When a model puts all output into reasoning_content and leaves content empty, the actual
 /// structured output (review decision, analysis result, etc.) often appears as the last JSON block
@@ -6985,6 +7573,44 @@ mod tests {
     }
 
     #[test]
+    fn estimated_wait_accounts_for_larger_shards_at_lower_parallelism() {
+        let body = "原".repeat(1_000);
+        let chapters = (1..=50)
+            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), &body))
+            .collect::<Vec<_>>();
+
+        let low_parallelism =
+            estimate_wait_seconds_for_chapters(&chapters, 6, false, Some(60.0), Some(10_000))
+                .expect("estimate low parallelism");
+        let high_parallelism =
+            estimate_wait_seconds_for_chapters(&chapters, 50, false, Some(60.0), Some(10_000))
+                .expect("estimate high parallelism");
+
+        assert!(low_parallelism > high_parallelism);
+        assert_eq!(
+            estimate_wait_seconds_for_chapters(&[], 6, false, Some(60.0), Some(10_000)),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn estimated_wait_distinguishes_twenty_five_and_fifty_way_shards() {
+        let body = "原".repeat(3_000);
+        let chapters = (1..=100)
+            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), &body))
+            .collect::<Vec<_>>();
+
+        let twenty_five =
+            estimate_wait_seconds_for_chapters(&chapters, 25, false, Some(90.0), Some(27_000))
+                .expect("estimate 25-way shards");
+        let fifty =
+            estimate_wait_seconds_for_chapters(&chapters, 50, false, Some(90.0), Some(27_000))
+                .expect("estimate 50-way shards");
+
+        assert!(twenty_five > fifty);
+    }
+
+    #[test]
     fn review_warning_file_appends_per_novel() {
         let temp_dir = env::temp_dir().join(format!("yuri-rewrite-warning-{}", Uuid::new_v4()));
         let app_dir = temp_dir.join("app");
@@ -7128,6 +7754,84 @@ mod tests {
         );
         assert_eq!(uneven[0][0].index, 1);
         assert_eq!(uneven[9][1].index, 24);
+    }
+
+    #[test]
+    fn resumed_auto_run_skips_staged_chapters_after_parallelism_changes() {
+        let chapters = (1..=100)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "正文"))
+            .collect::<Vec<_>>();
+        let staged = chapters
+            .iter()
+            .filter(|chapter| matches!(chapter.index % 5, 0 | 1))
+            .map(|chapter| chapter.id.clone())
+            .collect::<HashSet<_>>();
+
+        let pending = chapters_without_staged_outputs(&chapters, &staged);
+        let twenty_five = build_contiguous_shard_work(&chapters, &pending, 25);
+        let one = build_contiguous_shard_work(&chapters, &pending, 1);
+
+        assert_eq!(staged.len(), 40);
+        assert_eq!(pending.len(), 60);
+        assert_eq!(twenty_five.len(), 20);
+        assert_eq!(one.len(), 20);
+        for work in twenty_five.iter().chain(one.iter()) {
+            assert!(work
+                .chapters
+                .windows(2)
+                .all(|pair| pair[1].index == pair[0].index + 1));
+        }
+        assert_eq!(
+            twenty_five
+                .iter()
+                .flat_map(|work| work.chapters.iter())
+                .count(),
+            pending.len()
+        );
+        assert_eq!(
+            one.iter()
+                .flat_map(|work| work.chapters.iter())
+                .map(|chapter| chapter.id.as_str())
+                .collect::<HashSet<_>>(),
+            pending
+                .iter()
+                .map(|chapter| chapter.id.as_str())
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn resumed_shards_include_completed_neighbors_as_read_only_context() {
+        let chapters = (1..=5)
+            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文正文"))
+            .collect::<Vec<_>>();
+        let target = vec![chapters[2].clone()];
+        let work = build_contiguous_shard_work(&chapters, &target, 1);
+        let staged = HashMap::from([
+            (
+                chapters[1].id.clone(),
+                StagedChapterOutput {
+                    title: Some("第二章改写".to_string()),
+                    content: Some("前文已完成改写".to_string()),
+                },
+            ),
+            (
+                chapters[3].id.clone(),
+                StagedChapterOutput {
+                    title: None,
+                    content: Some("后文已完成改写".to_string()),
+                },
+            ),
+        ]);
+
+        let context = build_readonly_adjacent_context(&work[0], &staged, "rewrite");
+
+        assert!(context.contains("前一相邻章节"));
+        assert!(context.contains("第二章改写"));
+        assert!(context.contains("前文已完成改写"));
+        assert!(context.contains("后一相邻章节"));
+        assert!(context.contains("后文已完成改写"));
+        assert!(!context.contains("YURI_REWRITE_CHAPTER_START"));
     }
 
     #[test]

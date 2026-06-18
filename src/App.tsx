@@ -307,6 +307,7 @@ export default function App() {
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [showQuickStart, setShowQuickStart] = useState(false);
   const [autoRunRecoveries, setAutoRunRecoveries] = useState<AutoRunRecovery[]>([]);
+  const [autoRunMode, setAutoRunMode] = useState<"range" | "batch" | null>(null);
   const [autoRunMenuOpen, setAutoRunMenuOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLDivElement | null>(null);
@@ -323,7 +324,18 @@ export default function App() {
   const autoRunMenuRef = useRef<HTMLDivElement | null>(null);
 
   const autoProgressPercent = useMemo(() => {
-    if (!job || job.job_type !== "auto" || job.total_chapters <= 0) return 0;
+    if (!job || !["auto", "auto_batch"].includes(job.job_type) || job.total_chapters <= 0) return 0;
+    if (job.job_type === "auto_batch" && job.status === "running") {
+      const stageRatio = job.chapter_total
+        ? (job.chapter_completed ?? 0) / job.chapter_total
+        : job.shard_total
+          ? (job.shard_completed ?? 0) / job.shard_total
+        : 0;
+      if (job.phase === "analysis") return Math.round(stageRatio * 50);
+      if (["rewrite", "review", "revision", "final_review"].includes(job.phase ?? "")) {
+        return Math.round(50 + stageRatio * 50);
+      }
+    }
     return Math.min(100, Math.max(0, Math.round((job.current_chapter / job.total_chapters) * 100)));
   }, [job]);
 
@@ -338,8 +350,11 @@ export default function App() {
   const pausedAutoRun = autoRunState === "paused";
   const adjustableWhilePaused = processingTaskActive && !pausedAutoRun;
 
-  const refreshJobEstimate = useCallback(async () => {
-    const novelId = detail?.novel.id;
+  const requestJobEstimate = useCallback(async (
+    novelId: string | null | undefined,
+    batchId: string | null,
+    profileId: string | null
+  ) => {
     const requestId = ++estimateRequestIdRef.current;
     if (!novelId) {
       setJobEstimate(null);
@@ -348,14 +363,22 @@ export default function App() {
     try {
       const estimate = await invoke("estimate_job_cost", {
         novelId,
-        batchId: selectedBatchId || null,
-        profileId: selectedProfileId || null
+        batchId,
+        profileId
       });
       if (estimateRequestIdRef.current === requestId) setJobEstimate(estimate);
     } catch {
       if (estimateRequestIdRef.current === requestId) setJobEstimate(null);
     }
-  }, [detail?.novel.id, selectedBatchId, selectedProfileId]);
+  }, []);
+
+  const refreshJobEstimate = useCallback(async () => {
+    await requestJobEstimate(
+      detail?.novel.id,
+      selectedBatchId || null,
+      selectedProfileId || null
+    );
+  }, [detail?.novel.id, requestJobEstimate, selectedBatchId, selectedProfileId]);
 
   useEffect(() => {
     void refreshAll();
@@ -445,6 +468,7 @@ export default function App() {
 
   useAutoRunProgress(detail?.novel.id ?? null, (progress: AutoRunProgress) => {
       setJob(progress);
+      setAutoRunMode(progress.job_type === "auto_batch" ? "batch" : "range");
       if (progress.status === "running") {
         setAutoRunState("running");
         if (progress.current_chapter > lastAutoExportedBatchRef.current) {
@@ -457,6 +481,7 @@ export default function App() {
         setAutoRunState("stopping");
       } else if (["completed", "failed", "terminated"].includes(progress.status)) {
         setAutoRunState("idle");
+        setAutoRunMode(null);
         lastAutoExportedBatchRef.current = 0;
       }
       if (["completed", "paused", "failed"].includes(progress.status)) {
@@ -533,7 +558,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshJobEstimate();
-  }, [refreshJobEstimate, settings.chapter_batch_size, settings.review_enabled, settings.rewrite_parallelism]);
+  }, [refreshJobEstimate]);
 
   async function refreshAll() {
     const [novelRows, profileRows, appSettings, recoveryRows] = await Promise.all([
@@ -571,11 +596,12 @@ export default function App() {
       return;
     }
     setAutoRunState("paused");
+    setAutoRunMode("range");
     if (recovery.job) {
       setJob({
         ...recovery.job,
         status: "paused",
-        message: `检测到上次未完成的一键任务，将从第 ${recovery.next_batch_index + 1} 批重新开始。${recovery.pause_reason ? ` ${recovery.pause_reason}` : ""}`
+        message: `检测到上次未完成的一键任务，将继续处理第 ${recovery.next_batch_index + 1} 批的未完成分片。${recovery.pause_reason ? ` ${recovery.pause_reason}` : ""}`
       });
     }
   }
@@ -1012,36 +1038,27 @@ export default function App() {
       )
     )) return;
     setBusy("auto-batch");
+    setAutoRunState("running");
+    setAutoRunMode("batch");
     setNotice("");
     try {
-      const analysisResult = await invoke("start_analysis", {
+      const result = await invoke("start_analyze_rewrite_batch", {
         novelId,
         profileId: selectedProfileId,
         batchId
       });
-      setJob(analysisResult);
-      if (analysisResult.status !== "completed") {
-        await loadNovel(novelId, { preserveBatchId: batchId, preserveChapterId: selectedChapterId });
-        await refreshLogs(novelId);
-        showNotice(`${analysisResult.status}：${analysisResult.message}`);
-        return;
-      }
-
-      const rewriteResult = await invoke("start_rewrite", {
-        novelId,
-        profileId: selectedProfileId,
-        batchId
-      });
-      setJob(rewriteResult);
+      setJob(result);
       await loadNovel(novelId, { preserveBatchId: batchId, preserveChapterId: selectedChapterId });
       await refreshLogs(novelId);
-      if (rewriteResult.status === "completed") {
+      if (result.status === "completed") {
         setActiveView("compare");
       }
-      showNotice(rewriteResult.status === "completed" ? rewriteResult.message : `${rewriteResult.status}：${rewriteResult.message}`);
+      showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
       showNotice(String(error));
     } finally {
+      setAutoRunState("idle");
+      setAutoRunMode(null);
       setBusy("");
     }
   }
@@ -1066,6 +1083,7 @@ export default function App() {
     if (!confirmRewriteOverwrite(detail.chapters.filter((chapter) => chapter.index >= firstIncludedChapter))) return;
     setBusy("auto");
     setAutoRunState("running");
+    setAutoRunMode("range");
     setAutoRunMenuOpen(false);
     setNotice("");
     try {
@@ -1082,15 +1100,18 @@ export default function App() {
       await refreshLogs(detail.novel.id);
       if (result.status === "completed") {
         setAutoRunState("idle");
+        setAutoRunMode(null);
         setActiveView("compare");
       } else if (result.status === "paused") {
         setAutoRunState("paused");
       } else if (result.status === "terminated" || result.status === "failed") {
         setAutoRunState("idle");
+        setAutoRunMode(null);
       }
       showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
       setAutoRunState("idle");
+      setAutoRunMode(null);
       showNotice(String(error));
     } finally {
       setBusy("");
@@ -1119,9 +1140,11 @@ export default function App() {
       const result = await invoke("terminate_analyze_rewrite_all", { novelId: detail.novel.id });
       setJob(result);
       setAutoRunState("idle");
+      setAutoRunMode(null);
       showNotice(result.message);
     } catch (error) {
       setAutoRunState("idle");
+      setAutoRunMode(null);
       showNotice(String(error));
     } finally {
       setAutoControlBusy(false);
@@ -1201,6 +1224,7 @@ export default function App() {
         settings: appSettingsPayload({ review_enabled: nextEnabled })
       });
       setSettings(saved);
+      await refreshJobEstimate();
       showNotice(nextEnabled ? "已开启改写复检。" : "已关闭改写复检。");
     } catch (error) {
       showNotice(String(error));
@@ -1219,14 +1243,21 @@ export default function App() {
         settings: appSettingsPayload({ chapter_batch_size: value })
       });
       setSettings(saved);
+      let nextBatchId = selectedBatchId || null;
       if (detail) {
         const next = await invoke("get_novel_detail", { novelId: detail.novel.id });
         setDetail(next);
         const nextChapterId = next.chapters.some((chapter) => chapter.id === preservedChapterId)
           ? preservedChapterId
           : next.chapters[0]?.id ?? "";
+        nextBatchId = batchIdContainingChapter(next, nextChapterId) || null;
         setSelectedChapterId(nextChapterId);
-        setSelectedBatchId(batchIdContainingChapter(next, nextChapterId));
+        setSelectedBatchId(nextBatchId ?? "");
+        await requestJobEstimate(
+          next.novel.id,
+          nextBatchId,
+          selectedProfileId || null
+        );
       }
       const clamped = saved.rewrite_parallelism !== previousParallelism;
       showNotice(
@@ -1249,6 +1280,7 @@ export default function App() {
         settings: appSettingsPayload({ rewrite_parallelism: value })
       });
       setSettings(saved);
+      await refreshJobEstimate();
       showNotice(value === 1 ? "已切换为不并发处理。" : `已设置分析/改写并发请求数：${value}。`);
     } catch (error) {
       showNotice(String(error));
@@ -1635,20 +1667,22 @@ export default function App() {
             <div className="topbar-actions">
               {autoRunState !== "idle" && (
                 <>
-                  <button
-                    onClick={autoRunState === "paused" ? () => void runAnalyzeRewriteAll() : pauseAnalyzeRewriteAll}
-                    disabled={autoControlBusy || autoRunState === "stopping"}
-                    title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
-                  >
-                    {autoControlBusy || autoRunState === "stopping" ? (
-                      <Loader2 className="spin" size={17} />
-                    ) : autoRunState === "paused" ? (
-                      <Play size={17} />
-                    ) : (
-                      <Pause size={17} />
-                    )}
-                    {autoRunState === "paused" ? "继续" : "暂停"}
-                  </button>
+                  {autoRunMode !== "batch" && (
+                    <button
+                      onClick={autoRunState === "paused" ? () => void runAnalyzeRewriteAll() : pauseAnalyzeRewriteAll}
+                      disabled={autoControlBusy || autoRunState === "stopping"}
+                      title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
+                    >
+                      {autoControlBusy || autoRunState === "stopping" ? (
+                        <Loader2 className="spin" size={17} />
+                      ) : autoRunState === "paused" ? (
+                        <Play size={17} />
+                      ) : (
+                        <Pause size={17} />
+                      )}
+                      {autoRunState === "paused" ? "继续" : "暂停"}
+                    </button>
+                  )}
                   <button onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy} title="终止一键分析改写">
                     {autoControlBusy ? <Loader2 className="spin" size={17} /> : <Square size={17} />}
                     终止
@@ -1762,13 +1796,13 @@ export default function App() {
             <CheckCircle2 size={17} />
             <div className="job-content">
               <span>
-                {job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/{job.total_chapters} ·{" "}
+                {job.job_type === "auto_batch" ? "当前批次一键任务" : job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/{job.total_chapters} ·{" "}
                 {job.message}
                 {job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running"
                   ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}`
                   : ""}
               </span>
-              {job.job_type === "auto" && (
+              {["auto", "auto_batch"].includes(job.job_type) && (
                 <>
                   <div className="job-progress-row" aria-label={`一键分析改写进度 ${autoProgressPercent}%`}>
                     <div className="job-progress-bar">
@@ -1782,12 +1816,28 @@ export default function App() {
                         <span>
                           第 {job.batch_index ?? "—"}/{job.batch_total ?? job.total_chapters} 批
                           {job.phase ? ` · ${jobPhaseText[job.phase] ?? job.phase}` : ""}
+                          {job.chapter_total !== undefined
+                            ? ` · 章节 ${job.chapter_completed ?? 0}/${job.chapter_total}`
+                            : ""}
                           {` · 分片 ${job.shard_completed ?? 0}/${job.shard_total}`}
                         </span>
-                        <div className="job-stage-bar" aria-label={`当前阶段分片进度 ${job.shard_completed ?? 0}/${job.shard_total}`}>
+                        <div
+                          className="job-stage-bar"
+                          aria-label={
+                            job.chapter_total !== undefined
+                              ? `当前阶段章节进度 ${job.chapter_completed ?? 0}/${job.chapter_total}`
+                              : `当前阶段分片进度 ${job.shard_completed ?? 0}/${job.shard_total}`
+                          }
+                        >
                           <div
                             className="job-stage-fill"
-                            style={{ width: `${Math.round(((job.shard_completed ?? 0) / job.shard_total) * 100)}%` }}
+                            style={{
+                              width: `${Math.round(
+                                job.chapter_total
+                                  ? ((job.chapter_completed ?? 0) / job.chapter_total) * 100
+                                  : ((job.shard_completed ?? 0) / job.shard_total) * 100
+                              )}%`
+                            }}
                           />
                         </div>
                       </div>

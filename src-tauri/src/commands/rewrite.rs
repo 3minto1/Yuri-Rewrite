@@ -115,6 +115,7 @@ pub(crate) async fn start_rewrite(
             review_profile: review_profile.as_ref(),
             review_api_key: review_api_key.as_deref(),
             parallelism: rewrite_parallelism,
+            checkpoint_batch_index: None,
         },
     )
     .await

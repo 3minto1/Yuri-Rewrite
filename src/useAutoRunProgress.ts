@@ -26,7 +26,11 @@ export function useAutoRunProgress(
     let unlisten: (() => void) | undefined;
     void listen<AutoRunProgress>("job-progress", (event) => {
       const progress = event.payload;
-      if (!novelId || progress.job_type !== "auto" || progress.novel_id !== novelId) return;
+      if (
+        !novelId
+        || !["auto", "auto_batch"].includes(progress.job_type)
+        || progress.novel_id !== novelId
+      ) return;
       if (terminalJobIdRef.current === progress.id) return;
       if (activeJobIdRef.current && activeJobIdRef.current !== progress.id) return;
       activeJobIdRef.current = progress.id;

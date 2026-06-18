@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
-import type { AiLog, AppSettings, AutoRunRecovery, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
+import type { AiLog, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -161,7 +161,7 @@ describe("App feature behavior", () => {
     render(<App />);
 
     expect(await screen.findByRole("button", { name: "继续" })).toBeEnabled();
-    expect(screen.getByText(/检测到上次未完成的一键任务，将从第 2 批重新开始/)).toBeInTheDocument();
+    expect(screen.getByText(/检测到上次未完成的一键任务，将继续处理第 2 批的未完成分片/)).toBeInTheDocument();
     expect(screen.getByText("未完成")).toBeInTheDocument();
   });
 
@@ -245,6 +245,90 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("combobox", { name: "当前批次" })).toBeEnabled();
   });
 
+  it("shows detailed progress and terminate-only controls for the current-batch auto task", async () => {
+    let resolveBatchJob!: (job: Job) => void;
+    const batchJob = new Promise<Job>((resolve) => {
+      resolveBatchJob = resolve;
+    });
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "start_analyze_rewrite_batch") return batchJob;
+      if (command === "check_for_updates") {
+        return { current_version: "0.3.1", latest_version: "0.3.1", latest_tag: "v0.3.1", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "一键分析改写当前批次" }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_analyze_rewrite_batch", {
+        novelId: "novel-1",
+        profileId: "profile-1",
+        batchId: "batch-1"
+      })
+    );
+    expect(screen.getByRole("button", { name: "终止" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续" })).not.toBeInTheDocument();
+
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-batch-1",
+        novel_id: "novel-1",
+        job_type: "auto_batch",
+        status: "running",
+        current_chapter: 0,
+        total_chapters: 1,
+        message: "第 1/1 批 · 分析 · 分片已完成 1/6",
+        phase: "analysis",
+        batch_index: 1,
+        batch_total: 1,
+        shard_completed: 1,
+        shard_total: 6,
+        chapter_completed: 40,
+        chapter_total: 100,
+        active_shards: [{
+          index: 2,
+          total: 6,
+          start_chapter: 2,
+          end_chapter: 2,
+          phase: "analysis"
+        }]
+      });
+    });
+
+    expect(await screen.findByLabelText("一键分析改写进度 20%")).toBeInTheDocument();
+    expect(screen.getByText(/章节 40\/100 · 分片 1\/6/)).toBeInTheDocument();
+    expect(screen.getByText("2/6 第2章（分析）")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveBatchJob({
+        id: "auto-batch-1",
+        novel_id: "novel-1",
+        job_type: "auto_batch",
+        status: "terminated",
+        current_chapter: 0,
+        total_chapters: 1,
+        message: "当前批次任务已终止"
+      });
+      await batchJob;
+    });
+    expect(await screen.findByText("terminated：当前批次任务已终止")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "终止" })).not.toBeInTheDocument()
+    );
+  });
+
   it("allows parallelism changes while an auto job is paused", async () => {
     mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
       if (command === "list_novels") return novels;
@@ -313,6 +397,78 @@ describe("App feature behavior", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("save_app_settings", {
       settings: expect.objectContaining({ chapter_batch_size: 100 })
     });
+  });
+
+  it("refreshes the estimate immediately after parallelism and batch size changes", async () => {
+    let currentSettings = { ...settings };
+    let currentDetail = detail;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return currentSettings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return currentDetail;
+      if (command === "list_ai_logs") return [];
+      if (command === "save_app_settings") {
+        const requested = (args as { settings: AppSettings }).settings;
+        currentSettings = { ...currentSettings, ...requested };
+        if (requested.chapter_batch_size === 50) {
+          currentDetail = {
+            ...detail,
+            batches: [{
+              ...detail.batches[0],
+              id: "batch-rebuilt",
+              label: "重新分批"
+            }]
+          };
+        }
+        return currentSettings;
+      }
+      if (command === "estimate_job_cost") {
+        return {
+          ...estimate,
+          parallelism: currentSettings.rewrite_parallelism ?? 6,
+          novel_batches: currentDetail.batches.length,
+          estimated_current_batch_seconds:
+            currentSettings.rewrite_parallelism === 10 ? 45 : 90
+        };
+      }
+      if (command === "check_for_updates") {
+        return { current_version: "0.3.1", latest_version: "0.3.1", latest_tag: "v0.3.1", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("radio", { name: "10" }));
+    await waitFor(() => {
+      const saveIndex = mocks.invoke.mock.calls.findIndex(
+        ([command, args]) =>
+          command === "save_app_settings"
+          && (args as { settings: AppSettings }).settings.rewrite_parallelism === 10
+      );
+      expect(saveIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        mocks.invoke.mock.calls
+          .slice(saveIndex + 1)
+          .some(([command]) => command === "estimate_job_cost")
+      ).toBe(true);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    expect(await screen.findByText("并发 10 · 复检关闭")).toBeInTheDocument();
+    expect(screen.getByText("当前 45.0 秒 · 全文 2 分 0 秒")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("radio", { name: "50 章" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("estimate_job_cost", {
+        novelId: "novel-1",
+        batchId: "batch-rebuilt",
+        profileId: "profile-1"
+      })
+    );
   });
 
   it("refreshes rewritten chapters after an auto batch finishes without changing pages", async () => {
@@ -411,6 +567,8 @@ describe("App feature behavior", () => {
         batch_total: 10,
         shard_completed: 3,
         shard_total: 6,
+        chapter_completed: 40,
+        chapter_total: 100,
         active_shards: [{
           index: 4,
           total: 6,
@@ -421,7 +579,7 @@ describe("App feature behavior", () => {
       });
     });
 
-    expect(await screen.findByText(/第 2\/10 批 · 审查 · 分片 3\/6/)).toBeInTheDocument();
+    expect(await screen.findByText(/第 2\/10 批 · 审查 · 章节 40\/100 · 分片 3\/6/)).toBeInTheDocument();
     expect(screen.getByText(/4\/6 第40-42章（审查）/)).toBeInTheDocument();
   });
 
