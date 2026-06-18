@@ -26,15 +26,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CompareView } from "./components/Compare/CompareView";
 import { DeleteNovelDialog } from "./components/common/DeleteNovelDialog";
 import { Modal } from "./components/common/Modal";
-import { AppSettingsView } from "./components/Settings/AppSettings";
 import { ModelProfiles } from "./components/Settings/ModelProfiles";
 import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/NovelSettings";
+import { LogsPage } from "./components/pages/LogsPage";
+import { SettingsPage } from "./components/pages/SettingsPage";
 import { BatchPanel } from "./components/Workspace/BatchPanel";
 import { ChapterList } from "./components/Workspace/ChapterList";
 import { ModelConfig } from "./components/Workspace/ModelConfig";
 import { TaskEstimate } from "./components/Workspace/TaskEstimate";
+import {
+  emptyProfile as defaultProfile,
+  getModelSuggestions as detectModelSuggestions,
+  thinkingModeTooltip as modelThinkingModeTooltip
+} from "./config/modelRecommendations";
 import { useModelProfiles } from "./hooks/useModelProfiles";
 import { useNovels } from "./hooks/useNovels";
+import { useNotice } from "./hooks/useNotice";
 import { useTaskState } from "./hooks/useTaskState";
 import { invokeCommand as invoke } from "./tauriApi";
 import type {
@@ -278,7 +285,7 @@ export default function App() {
   const {
     profiles, setProfiles, profileDraft, setProfileDraft,
     selectedProfileId, setSelectedProfileId, selectedProfile
-  } = useModelProfiles(emptyProfile);
+  } = useModelProfiles(defaultProfile);
   const {
     busy, setBusy, autoRunState, setAutoRunState, autoControlBusy,
     setAutoControlBusy, job, setJob, processingTaskActive
@@ -295,9 +302,8 @@ export default function App() {
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "settings">("workspace");
-  const [notice, setNotice] = useState("");
-  const [noticeDuration, setNoticeDuration] = useState(5000);
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
+  const { notice, setNotice, showNotice } = useNotice(setPendingUpdate);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [showQuickStart, setShowQuickStart] = useState(false);
   const [autoRunRecoveries, setAutoRunRecoveries] = useState<AutoRunRecovery[]>([]);
@@ -322,7 +328,7 @@ export default function App() {
   }, [job]);
 
   const detectedModelSuggestions = useMemo(
-    () => getModelSuggestions(profileDraft),
+    () => detectModelSuggestions(profileDraft),
     [profileDraft.provider, profileDraft.base_url, profileDraft.model]
   );
 
@@ -487,12 +493,6 @@ export default function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(""), noticeDuration);
-    return () => window.clearTimeout(timer);
-  }, [notice, noticeDuration]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -690,12 +690,6 @@ export default function App() {
     }
   }
 
-  const showNotice = useCallback((message: string, duration = 5000, keepPendingUpdate = false) => {
-    if (!keepPendingUpdate) setPendingUpdate(null);
-    setNoticeDuration(duration);
-    setNotice(message);
-  }, []);
-
   function isTxtFilePath(filePath: string) {
     return filePath.trim().toLowerCase().endsWith(".txt");
   }
@@ -865,7 +859,7 @@ export default function App() {
 
   function createNewModelProfile() {
     setSelectedProfileId("");
-    setProfileDraft(emptyProfile);
+    setProfileDraft(defaultProfile);
     setOpenModelMenu(false);
     void persistSelectedProfileId("");
     showNotice("已切换为新建模型配置，填写后点击保存。");
@@ -892,7 +886,7 @@ export default function App() {
       setSelectedProfileId(nextSelected);
       setOpenModelMenu(false);
       await persistSelectedProfileId(nextSelected);
-      if (!nextSelected) setProfileDraft(emptyProfile);
+      if (!nextSelected) setProfileDraft(defaultProfile);
       await refreshLogs();
       showNotice(`已删除模型配置「${profile.model}」。`);
     } catch (error) {
@@ -1826,55 +1820,13 @@ export default function App() {
         )}
 
         {activeView === "logs" && (
-          <div className="page-panel">
-            <div className="page-heading">
-              <h2>AI 调用日志</h2>
-              <div className="panel-actions">
-                <button onClick={() => setActiveView("workspace")}>
-                  <ArrowLeft size={16} />
-                  返回
-                </button>
-                <button onClick={clearLogs} disabled={busy !== "" || logs.length === 0}>
-                  <Trash2 size={16} />
-                  清空
-                </button>
-                <button onClick={() => refreshLogs()} disabled={busy !== ""}>
-                  <RefreshCw size={16} />
-                  刷新
-                </button>
-              </div>
-            </div>
-            <div className="full-log-list">
-              {logs.map((log) => (
-                <article className={`full-log-item ${log.status}`} key={log.id}>
-                  <header>
-                    <div>
-                      <strong>{log.action}</strong>
-                      <span>
-                        {log.chapter_title || "全局调用"} · {new Date(log.created_at).toLocaleString()}
-                      </span>
-                    </div>
-                    <span className="log-status">{log.status}</span>
-                  </header>
-                  {log.reasoning && (
-                    <section>
-                      <h3>思考过程</h3>
-                      <pre>{log.reasoning}</pre>
-                    </section>
-                  )}
-                  <section>
-                    <h3>输出文本</h3>
-                    <pre>{log.content || "无正文内容。"}</pre>
-                  </section>
-                  <section>
-                    <h3>原始响应</h3>
-                    <pre>{log.raw_response || log.content || "无原始响应。"}</pre>
-                  </section>
-                </article>
-              ))}
-              {logs.length === 0 && <p className="muted">暂无 AI 调用日志。</p>}
-            </div>
-          </div>
+          <LogsPage
+            logs={logs}
+            busy={busy}
+            onBack={() => setActiveView("workspace")}
+            onClear={clearLogs}
+            onRefresh={() => refreshLogs()}
+          />
         )}
 
         {activeView === "novel-settings" && (
@@ -1926,12 +1878,12 @@ export default function App() {
         )}
 
         {activeView === "settings" && (
-          <AppSettingsView
+          <SettingsPage
             settings={settings}
             profiles={profiles}
             busy={busy}
             processing={processingTaskActive}
-            allowPausedTaskAdjustments={pausedAutoRun}
+            pausedAutoRun={pausedAutoRun}
             onBack={() => setActiveView("workspace")}
             onChooseExportDir={chooseExportDir}
             onClearExportDir={clearExportDir}
@@ -1983,7 +1935,7 @@ export default function App() {
               busy={busy}
               processing={adjustableWhilePaused}
               savedApiKeyMask={savedApiKeyMask}
-              thinkingModeTooltip={thinkingModeTooltip}
+              thinkingModeTooltip={modelThinkingModeTooltip}
               onSuggestionsOpenChange={setOpenModelSuggestions}
               onCreate={createNewModelProfile}
               onDiagnose={diagnoseProfile}
