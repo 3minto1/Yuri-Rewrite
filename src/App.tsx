@@ -1,7 +1,6 @@
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  ArrowLeft,
   BookOpen,
   CheckCircle2,
   ChevronDown,
@@ -28,6 +27,7 @@ import { DeleteNovelDialog } from "./components/common/DeleteNovelDialog";
 import { Modal } from "./components/common/Modal";
 import { ModelProfiles } from "./components/Settings/ModelProfiles";
 import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/NovelSettings";
+import { CoreSettingsPage } from "./components/pages/CoreSettingsPage";
 import { LogsPage } from "./components/pages/LogsPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
 import { BatchPanel } from "./components/Workspace/BatchPanel";
@@ -1842,39 +1842,14 @@ export default function App() {
         )}
 
         {activeView === "core-settings" && (
-          <div className="page-panel">
-            <div className="page-heading">
-              <h2>核心设定</h2>
-              <div className="panel-actions">
-                <button onClick={() => setActiveView("workspace")}>
-                  <ArrowLeft size={16} />
-                  返回
-                </button>
-                <button onClick={saveCoreSettings} disabled={busy === "core-settings" || processingTaskActive}>
-                  {busy === "core-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-                  保存
-                </button>
-              </div>
-            </div>
-            <section className="settings-section core-settings-section">
-              <h3>全局改写风格</h3>
-              <p className="settings-note">
-                核心设定不随小说变化，会在每一次改写和打回重写时发送给 AI，并作为最高优先级的写作要求。建议主要填写文风、叙述节奏、描写密度、语气、对白风格、情绪氛围等全局写法；不要写某一本小说的主角姓名、剧情设定、章节内容或临时任务，避免影响其他小说。
-              </p>
-              <textarea
-                className="core-settings-input"
-                disabled={processingTaskActive}
-                value={corePromptDraft}
-                onChange={(event) => setCorePromptDraft(event.target.value)}
-                placeholder="例如：保持原文轻小说风格，句子自然流畅；减少机械替换感；动作描写细腻但不过度堆砌；对白保留角色原本语气；百合互动要循序渐进，不要突然强行亲密。"
-              />
-              {!corePromptDraft.trim() && (
-                <p className="settings-empty-hint">
-                  当前未填写核心设定。留空也可以正常改写；如果填写，建议只写长期通用的文风和描写偏好。
-                </p>
-              )}
-            </section>
-          </div>
+          <CoreSettingsPage
+            value={corePromptDraft}
+            busy={busy === "core-settings"}
+            disabled={processingTaskActive}
+            onChange={setCorePromptDraft}
+            onBack={() => setActiveView("workspace")}
+            onSave={saveCoreSettings}
+          />
         )}
 
         {activeView === "settings" && (
