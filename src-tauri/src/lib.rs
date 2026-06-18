@@ -944,18 +944,20 @@ async fn rewrite_batch_with_parallelism(
         .rate_limits
         .effective_parallelism(rewrite_parallelism, &effective_profiles)?;
     if review_enabled {
-        generate_reviewed_rewrite_pipeline(
+        services::review::run_review_pipeline(
             state,
-            novel_id,
-            profile,
-            api_key,
-            review_profile.unwrap_or(profile),
-            review_api_key.unwrap_or(api_key),
-            chapters,
-            canon_text,
-            settings,
-            core_prompt,
-            rewrite_parallelism,
+            services::review::ReviewPipelineContext {
+                novel_id,
+                rewrite_profile: profile,
+                rewrite_api_key: api_key,
+                review_profile: review_profile.unwrap_or(profile),
+                review_api_key: review_api_key.unwrap_or(api_key),
+                chapters,
+                canon_text,
+                settings,
+                core_prompt,
+                parallelism: rewrite_parallelism,
+            },
         )
         .await
     } else {
@@ -1481,19 +1483,21 @@ async fn review_rewrite_shard_strict(
         None,
         None,
     )?;
-    let revised = revise_rewrite_shard_after_review(
+    let revised = services::repair::repair_reviewed_shard(
         state,
-        novel_id,
-        rewrite_profile,
-        rewrite_api_key,
-        shard,
-        &rewrite_shard,
-        canon_text,
-        settings,
-        core_prompt,
-        shard_context,
-        shard_label,
-        &first_decision,
+        services::repair::ReviewRepairContext {
+            novel_id,
+            profile: rewrite_profile,
+            api_key: rewrite_api_key,
+            shard,
+            rewrites: &rewrite_shard,
+            canon_text,
+            settings,
+            core_prompt,
+            shard_context,
+            shard_label,
+            decision: &first_decision,
+        },
     )
     .await?;
     let second_label = format!("{} · 第二次审查", shard_label);
@@ -1527,19 +1531,21 @@ async fn review_rewrite_shard_strict(
         None,
         None,
     )?;
-    let second_revised = revise_rewrite_shard_after_review(
+    let second_revised = services::repair::repair_reviewed_shard(
         state,
-        novel_id,
-        rewrite_profile,
-        rewrite_api_key,
-        shard,
-        &revised,
-        canon_text,
-        settings,
-        core_prompt,
-        shard_context,
-        shard_label,
-        &second_decision,
+        services::repair::ReviewRepairContext {
+            novel_id,
+            profile: rewrite_profile,
+            api_key: rewrite_api_key,
+            shard,
+            rewrites: &revised,
+            canon_text,
+            settings,
+            core_prompt,
+            shard_context,
+            shard_label,
+            decision: &second_decision,
+        },
     )
     .await?;
     let third_label = format!("{} · 第三次审查", shard_label);
@@ -1629,15 +1635,17 @@ async fn review_shard_decision(
                 Some(&output.raw_response),
             )?;
             match parse_review_decision_output(&output.text, settings) {
-                Ok(decision) => finalize_review_decision(
+                Ok(decision) => services::validation::validate_review_decision(
                     state,
-                    novel_id,
-                    &profile.id,
-                    shard_label,
                     decision,
-                    shard,
-                    rewrites,
-                    settings,
+                    services::validation::ReviewValidationContext {
+                        novel_id,
+                        profile_id: &profile.id,
+                        shard_label,
+                        shard,
+                        rewrites,
+                        settings,
+                    },
                 ),
                 Err(error) => {
                     append_ai_log(
@@ -1680,15 +1688,17 @@ async fn review_shard_decision(
                                 Some(&repair_output.raw_response),
                             )?;
                             match parse_review_decision_output(&repair_output.text, settings) {
-                                Ok(decision) => finalize_review_decision(
+                                Ok(decision) => services::validation::validate_review_decision(
                                     state,
-                                    novel_id,
-                                    &profile.id,
-                                    shard_label,
                                     decision,
-                                    shard,
-                                    rewrites,
-                                    settings,
+                                    services::validation::ReviewValidationContext {
+                                        novel_id,
+                                        profile_id: &profile.id,
+                                        shard_label,
+                                        shard,
+                                        rewrites,
+                                        settings,
+                                    },
                                 ),
                                 Err(repair_error) => {
                                     append_ai_log(
