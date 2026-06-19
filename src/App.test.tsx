@@ -70,6 +70,7 @@ const detail: NovelDetail = {
   settings: {
     novel_id: "novel-1",
     protagonist_name: "林明",
+    protagonist_aliases: "",
     rewritten_protagonist_name: "林茗",
     additional_feminize_names: "",
     bust: "平胸",
@@ -143,6 +144,54 @@ describe("App feature behavior", () => {
     expect(await screen.findByRole("heading", { name: "测试小说" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-1");
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+  });
+
+  it("switches the workspace content between the main panels and canon assets", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(screen.getByRole("heading", { name: "模型配置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "章节" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "一致性资产" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "一致性资产" }));
+    expect(screen.getByRole("heading", { name: "一致性资产" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "模型配置" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
+    expect(screen.getByRole("heading", { name: "模型配置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "章节" })).toBeInTheDocument();
+  });
+
+  it("shows and saves protagonist aliases in novel settings", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "save_novel_settings") {
+        return {
+          ...detail.settings,
+          protagonist_aliases: (args as { protagonistAliases: string }).protagonistAliases
+        };
+      }
+      if (command === "check_for_updates") {
+        return { current_version: "0.3.3", latest_version: "0.3.3", latest_tag: "v0.3.3", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "设定" }));
+    fireEvent.change(screen.getByLabelText("主角别名（选填）"), {
+      target: { value: "小明，林公子" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确定" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_novel_settings", expect.objectContaining({
+      protagonistAliases: "小明，林公子"
+    })));
   });
 
   it("restores an interrupted auto run as paused on startup", async () => {
@@ -502,7 +551,7 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
     fireEvent.click(screen.getByRole("button", { name: "对比" }));
-    fireEvent.click(screen.getByRole("button", { name: "重写本章" }));
+    fireEvent.click(screen.getByRole("button", { name: "重写本章（原文）" }));
     fireEvent.change(screen.getByRole("textbox", { name: "单章重写补充要求" }), {
       target: { value: "强化情绪互动" }
     });
@@ -511,7 +560,8 @@ describe("App feature behavior", () => {
       novelId: "novel-1",
       profileId: "profile-1",
       chapterId: "chapter-1",
-      instructions: "强化情绪互动"
+      instructions: "强化情绪互动",
+      sourceMode: "original"
     }));
     await waitFor(() => expect(useAppStore.getState().detail?.chapters[0].rewrite_text).toBe("单章重新生成后的正文"));
     await waitFor(() => expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("单章重新生成后的正文"));
@@ -522,7 +572,7 @@ describe("App feature behavior", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("restore_single_chapter_rewrite", {
       chapterId: "chapter-1"
     }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "重写本章" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "重写本章（原文）" })).toBeInTheDocument());
     expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("改写内容");
     expect(screen.getByText("已恢复《第一章》的初稿。")).toBeInTheDocument();
   });

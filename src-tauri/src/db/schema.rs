@@ -87,6 +87,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS novel_settings (
             novel_id TEXT PRIMARY KEY,
             protagonist_name TEXT NOT NULL,
+            protagonist_aliases TEXT NOT NULL DEFAULT '',
             rewritten_protagonist_name TEXT NOT NULL DEFAULT '',
             additional_feminize_names TEXT NOT NULL,
             bust TEXT NOT NULL,
@@ -193,6 +194,12 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     migrations::ensure_column(
         conn,
         "novel_settings",
+        "protagonist_aliases",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    migrations::ensure_column(
+        conn,
+        "novel_settings",
         "rewritten_protagonist_name",
         "TEXT NOT NULL DEFAULT ''",
     )?;
@@ -252,6 +259,41 @@ fn backfill_ai_log_token_usage(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_adds_empty_protagonist_aliases_to_existing_settings() {
+        let conn = Connection::open_in_memory().expect("open database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE novel_settings (
+                novel_id TEXT PRIMARY KEY,
+                protagonist_name TEXT NOT NULL,
+                rewritten_protagonist_name TEXT NOT NULL DEFAULT '',
+                additional_feminize_names TEXT NOT NULL,
+                bust TEXT NOT NULL,
+                body_type TEXT NOT NULL,
+                rewrite_mode TEXT NOT NULL DEFAULT 'strict',
+                advanced_settings TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO novel_settings VALUES (
+                'novel-1', '萧炎', '萧妍', '', '平胸', '少女', 'strict', '', 'now'
+            );
+            "#,
+        )
+        .expect("seed previous settings schema");
+
+        init_db(&conn).expect("migrate schema");
+
+        let aliases: String = conn
+            .query_row(
+                "SELECT protagonist_aliases FROM novel_settings WHERE novel_id = 'novel-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load aliases");
+        assert!(aliases.is_empty());
+    }
 
     #[test]
     fn migration_preserves_existing_rewrite_as_ai_baseline() {

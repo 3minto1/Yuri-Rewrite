@@ -26,6 +26,7 @@ pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
+- 主角原文别名：{}
 - 主角改写后姓名：{}
 - 其他需要女性化的人物姓名：{}
 - 身材：{}
@@ -37,8 +38,36 @@ pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
 3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
 4. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
 5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。"#,
-        settings.protagonist_name, rewritten_name, additional, settings.bust, settings.body_type
+        settings.protagonist_name,
+        aliases_or_none(settings),
+        rewritten_name,
+        additional,
+        settings.bust,
+        settings.body_type
     )
+}
+
+pub(crate) fn build_analysis_identity_context(settings: &NovelSettings) -> String {
+    if settings.protagonist_aliases.trim().is_empty() {
+        return String::new();
+    }
+    format!(
+        "已知原文人物身份提示（仅用于识别同一人物，不代表改写要求）：主角“{}”在原文中还可能以这些姓名或别名出现：{}。分析时应把这些称呼归属于同一人物，并记录原文实际使用方式；不得据此改变姓名、性别、关系或剧情。",
+        settings.protagonist_name.trim(),
+        settings.protagonist_aliases.lines().collect::<Vec<_>>().join("、")
+    )
+}
+
+fn aliases_or_none(settings: &NovelSettings) -> String {
+    if settings.protagonist_aliases.trim().is_empty() {
+        "无".to_string()
+    } else {
+        settings
+            .protagonist_aliases
+            .lines()
+            .collect::<Vec<_>>()
+            .join("、")
+    }
 }
 
 pub(crate) fn format_batch_label(chapters: &[Chapter]) -> String {
@@ -213,6 +242,9 @@ fn relevant_canon_keywords(chapters: &[Chapter], settings: &NovelSettings) -> Ha
     ] {
         insert_keyword(&mut keywords, value);
     }
+    for value in settings.protagonist_aliases.lines() {
+        insert_keyword(&mut keywords, value);
+    }
     for value in settings
         .additional_feminize_names
         .split(['\n', ',', '，', ';', '；'])
@@ -323,6 +355,10 @@ fn is_core_canon_section(section: &str, settings: &NovelSettings) -> bool {
     let rewritten = settings.rewritten_protagonist_name.trim();
     (!protagonist.is_empty() && section.contains(protagonist))
         || (!rewritten.is_empty() && section.contains(rewritten))
+        || settings
+            .protagonist_aliases
+            .lines()
+            .any(|alias| !alias.trim().is_empty() && section.contains(alias.trim()))
 }
 
 fn section_matches_keywords(section: &str, keywords: &HashSet<String>) -> bool {
@@ -389,6 +425,7 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
+- 主角原文别名：{}
 - 主角改写后姓名：{}
 - 其他需要女性化的人物姓名：{}
 - 身材：{}
@@ -406,10 +443,11 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
 3. 如果用户未指定主角改写后姓名，优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字；如果用户已指定，则以用户指定姓名为最高优先级。
 4. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
 5. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
-6. 一致性资产中的“姓名映射表”优先级最高；凡是映射表中已有 `source -> target`，标题和正文都必须统一替换为 target，不得自行生成同一人物的其他女性化姓名。
-7. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致；并发分片和后续批次也必须继续使用同一份映射表。
-8. 不要因为 NPC 名字与主角原名共享某个字，就把该 NPC 当作主角改名。例如主角“石昊”改为“石念昔”时，未被指定或映射的 NPC“秦昊”仍应保持“秦昊”，不能改成“秦念昔”或其他主角映射名。
-9. 涉及主角姓名来源、同名关系、名字含义、旧名对比、以某字为名等句子，必须随主角改名同步调整逻辑。不能在主角已改名后仍写“她原本同名”“都曾以主角原名中的某字为名”等让读者看出旧男主姓名的矛盾表达。
+6. 主角原文别名与主角是同一人物；每个别名都必须按一致性资产中的固定映射同步女性化，不能把别名误判为另一名角色，也不能只修改主姓名而遗漏别名。
+7. 一致性资产中的“姓名映射表”优先级最高；凡是映射表中已有 `source -> target`，标题和正文都必须统一替换为 target，不得自行生成同一人物的其他女性化姓名。
+8. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致；并发分片和后续批次也必须继续使用同一份映射表。
+9. 不要因为 NPC 名字与主角原名共享某个字，就把该 NPC 当作主角改名。例如主角“石昊”改为“石念昔”时，未被指定或映射的 NPC“秦昊”仍应保持“秦昊”，不能改成“秦念昔”或其他主角映射名。
+10. 涉及主角姓名来源、同名关系、名字含义、旧名对比、以某字为名等句子，必须随主角改名同步调整逻辑。不能在主角已改名后仍写“她原本同名”“都曾以主角原名中的某字为名”等让读者看出旧男主姓名的矛盾表达。
 
 核心目标：
 让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。
@@ -430,6 +468,7 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
 4. 称谓、代词、身份和旁人态度必须统一。主角已经女性化后，旁人对她的称呼、视线、互动距离、社会评价也要自然匹配女性身份，不能在不同章节反复摇摆。
 5. 新增女性化细节必须服务当前剧情和人物状态，不得为了强调性别而制造与原文战力、性格、伏笔、剧情逻辑冲突的描写。"#,
         settings.protagonist_name,
+        aliases_or_none(settings),
         rewritten_name,
         additional_names,
         settings.bust,
@@ -682,6 +721,64 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
     )
 }
 
+pub(crate) fn build_single_chapter_rewrite_from_draft_prompt(
+    chapter: &Chapter,
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    adjacent_context: &str,
+    instructions: &str,
+) -> String {
+    let instructions = if instructions.trim().is_empty() {
+        "无额外要求；在保持当前改写稿整体写法和内容的基础上进行必要优化。"
+    } else {
+        instructions.trim()
+    };
+    format!(
+        r#"{}
+
+{}
+
+{}
+
+任务说明：
+1. 当前改写稿是本次修改的主要底稿。必须在当前改写稿基础上依照用户要求修改，不能抛弃现稿、退回原文重新生成，也不能无理由重写整体结构和文风。
+2. 原文仅用于核对事实、人物、事件顺序、伏笔和剧情逻辑；原文与当前改写稿表达不同时，除非当前改写稿明显违背事实或用户明确要求，否则应保留当前改写稿的处理。
+3. 默认保留当前改写标题；只有用户明确要求修改标题，或标题与正文事实明显冲突时才可调整。
+4. 相邻章节是只读上下文，只用于判断人物、场景、称谓和剧情连续性，不得输出、改写或覆盖。
+5. 只输出当前章节的一组完整 marker、标题和非空正文，不要解释、不要 Markdown。
+
+本次用户要求：
+{}
+
+相关一致性资产：
+{}
+
+相邻章节只读上下文：
+{}
+
+参考原文：
+标题：{}
+正文：
+{}
+
+当前改写稿（主要底稿）：
+{}
+
+{}"#,
+        rewrite_marker_format_guard("当前章节"),
+        build_core_prompt_section(core_prompt),
+        build_rewrite_settings_prompt(settings),
+        instructions,
+        canon_text,
+        prompt_context_or_none(adjacent_context),
+        chapter.title,
+        truncate_text(&chapter.original_text, 30_000),
+        build_batch_chapter_text(std::slice::from_ref(chapter), true),
+        rewrite_marker_final_reminder("当前章节")
+    )
+}
+
 #[allow(dead_code)]
 pub(crate) fn build_batch_review_prompt_with_settings(
     chapters: &[Chapter],
@@ -791,6 +888,14 @@ pub(crate) fn build_batch_analysis_prompt_with_context(
     chapters: &[Chapter],
     shard_context: &str,
 ) -> String {
+    build_batch_analysis_prompt_with_identity(chapters, shard_context, "")
+}
+
+pub(crate) fn build_batch_analysis_prompt_with_identity(
+    chapters: &[Chapter],
+    shard_context: &str,
+    identity_context: &str,
+) -> String {
     let (start_index, end_index) = match (chapters.first(), chapters.last()) {
         (Some(first), Some(last)) => (first.index, last.index),
         _ => (0, 0),
@@ -824,6 +929,9 @@ pub(crate) fn build_batch_analysis_prompt_with_context(
 6. JSON 字符串内部如果需要换行，必须写成 `\n`，不要在字符串里输出真实换行或其他控制字符。
 7. 只输出 JSON，不要解释、不要 Markdown。
 
+人物身份提示：
+{}
+
 处理范围约束：
 {}
 
@@ -832,6 +940,7 @@ pub(crate) fn build_batch_analysis_prompt_with_context(
         start_index,
         end_index,
         chapters.len(),
+        prompt_context_or_none(identity_context),
         shard_context,
         build_batch_analysis_chapter_text(chapters)
     )

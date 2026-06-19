@@ -17,7 +17,11 @@ function Harness({
   initialChapters = chapters
 }: {
   onBack?: () => void;
-  onRewriteChapter?: (chapterId: string, instructions: string) => Promise<void>;
+  onRewriteChapter?: (
+    chapterId: string,
+    instructions: string,
+    sourceMode: "original" | "rewrite"
+  ) => Promise<void>;
   onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
   initialChapters?: Chapter[];
 }) {
@@ -106,17 +110,41 @@ describe("CompareView", () => {
   it("collects optional instructions before rewriting the current chapter", async () => {
     const onRewriteChapter = vi.fn(async () => undefined);
     render(<Harness onRewriteChapter={onRewriteChapter} />);
-    fireEvent.click(screen.getByRole("button", { name: "重写本章" }));
-    const dialog = screen.getByRole("dialog", { name: "重新改写《第一章》" });
+    expect(screen.getByRole("button", { name: "恢复初稿" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "重写本章（原文）" }));
+    const dialog = screen.getByRole("dialog", { name: "根据原文重新改写《第一章》" });
     fireEvent.change(within(dialog).getByRole("textbox", { name: "单章重写补充要求" }), {
       target: { value: "加强双女主互动，但不要改变伏笔。" }
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "确定改写" }));
     await waitFor(() => expect(onRewriteChapter).toHaveBeenCalledWith(
       "c1",
-      "加强双女主互动，但不要改变伏笔。"
+      "加强双女主互动，但不要改变伏笔。",
+      "original"
     ));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "重新改写《第一章》" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "根据原文重新改写《第一章》" })).not.toBeInTheDocument());
+  });
+
+  it("can rewrite from the current draft without hiding the initial-draft restore action", async () => {
+    const onRewriteChapter = vi.fn(async () => undefined);
+    render(
+      <Harness
+        initialChapters={[
+          { ...chapters[0], single_rewrite_original_available: true },
+          chapters[1]
+        ]}
+        onRewriteChapter={onRewriteChapter}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "恢复初稿" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重写本章（原文）" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "重写本章选项" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "重写本章（改写稿）" }));
+    const dialog = screen.getByRole("dialog", { name: "基于改写稿继续修改《第一章》" });
+    expect(within(dialog).getByText(/当前改写稿为主要底稿/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "确定改写" }));
+    await waitFor(() => expect(onRewriteChapter).toHaveBeenCalledWith("c1", "", "rewrite"));
   });
 
   it("offers to restore the initial draft after a single-chapter rewrite", async () => {
@@ -132,7 +160,7 @@ describe("CompareView", () => {
       />
     );
 
-    expect(screen.queryByRole("button", { name: "重写本章" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重写本章（原文）" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "恢复初稿" }));
     await waitFor(() => expect(onRestoreInitialRewrite).toHaveBeenCalledWith("c1"));
     expect(window.confirm).toHaveBeenCalledWith(

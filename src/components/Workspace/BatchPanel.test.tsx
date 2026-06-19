@@ -30,7 +30,7 @@ describe("BatchPanel", () => {
   afterEach(cleanup);
 
   it("shows the batch number before the chapter range", () => {
-    render(<BatchPanel batches={batches} selectedBatch={batches[0]} selectedBatchId="batch-1" onSelect={vi.fn()} />);
+    render(<BatchPanel batches={batches} selectedBatch={batches[0]} selectedBatchId="batch-1" onSelect={vi.fn()} onOpenCanon={vi.fn()} />);
 
     expect(screen.getByRole("option", { name: "第1批：1-30章" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "第2批：31-60章" })).toBeInTheDocument();

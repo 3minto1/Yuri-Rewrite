@@ -472,7 +472,7 @@ pub(crate) fn save_selected_profile_id(
 }
 
 pub(crate) fn default_rewrite_parallelism() -> usize {
-    6
+    10
 }
 
 pub(crate) fn normalize_rewrite_parallelism(value: usize) -> usize {
@@ -577,6 +577,7 @@ pub(crate) fn get_novel_settings(
 pub(crate) fn save_novel_settings(
     novel_id: String,
     protagonist_name: String,
+    protagonist_aliases: Option<String>,
     rewritten_protagonist_name: String,
     additional_feminize_names: String,
     bust: String,
@@ -595,6 +596,10 @@ pub(crate) fn save_novel_settings(
         return Err("当前小说任务运行中，不能修改小说设定。".to_string());
     }
     let protagonist_name = protagonist_name.trim();
+    let protagonist_aliases = normalize_protagonist_aliases(
+        protagonist_aliases.as_deref().unwrap_or(""),
+        protagonist_name,
+    );
     let rewritten_protagonist_name = rewritten_protagonist_name.trim();
     let additional_feminize_names = normalize_name_list(&additional_feminize_names);
     let bust = bust.trim();
@@ -617,6 +622,7 @@ pub(crate) fn save_novel_settings(
     let settings = NovelSettings {
         novel_id: novel_id.clone(),
         protagonist_name: protagonist_name.to_string(),
+        protagonist_aliases,
         rewritten_protagonist_name: rewritten_protagonist_name.to_string(),
         additional_feminize_names,
         bust: bust.to_string(),
@@ -628,10 +634,11 @@ pub(crate) fn save_novel_settings(
     let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
         r#"
-        INSERT INTO novel_settings (novel_id, protagonist_name, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        INSERT INTO novel_settings (novel_id, protagonist_name, protagonist_aliases, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(novel_id) DO UPDATE SET
             protagonist_name = excluded.protagonist_name,
+            protagonist_aliases = excluded.protagonist_aliases,
             rewritten_protagonist_name = excluded.rewritten_protagonist_name,
             additional_feminize_names = excluded.additional_feminize_names,
             bust = excluded.bust,
@@ -643,6 +650,7 @@ pub(crate) fn save_novel_settings(
         params![
             settings.novel_id,
             settings.protagonist_name,
+            settings.protagonist_aliases,
             settings.rewritten_protagonist_name,
             settings.additional_feminize_names,
             settings.bust,
@@ -654,6 +662,14 @@ pub(crate) fn save_novel_settings(
     )
     .map_err(to_string)?;
     Ok(settings)
+}
+
+fn normalize_protagonist_aliases(input: &str, protagonist_name: &str) -> String {
+    normalize_name_list(input)
+        .lines()
+        .filter(|alias| *alias != protagonist_name)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -675,6 +691,14 @@ mod tests {
     }
 
     #[test]
+    fn protagonist_aliases_are_normalized_deduplicated_and_exclude_primary_name() {
+        assert_eq!(
+            normalize_protagonist_aliases("炎儿，岩枭\n炎儿；萧炎", "萧炎"),
+            "炎儿\n岩枭"
+        );
+    }
+
+    #[test]
     fn analysis_profile_defaults_to_current_model_and_can_be_saved() {
         let conn = Connection::open_in_memory().expect("open database");
         init_db(&conn).expect("initialize schema");
@@ -682,8 +706,7 @@ mod tests {
             load_analysis_profile_id(&conn).expect("load default analysis profile"),
             None
         );
-        save_analysis_profile_id(&conn, Some(" analysis-profile "))
-            .expect("save analysis profile");
+        save_analysis_profile_id(&conn, Some(" analysis-profile ")).expect("save analysis profile");
         assert_eq!(
             load_analysis_profile_id(&conn).expect("load analysis profile"),
             Some("analysis-profile".to_string())

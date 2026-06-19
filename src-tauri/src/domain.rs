@@ -78,6 +78,7 @@ pub(crate) struct ChapterBatch {
 pub(crate) struct NovelSettings {
     pub(crate) novel_id: String,
     pub(crate) protagonist_name: String,
+    pub(crate) protagonist_aliases: String,
     pub(crate) rewritten_protagonist_name: String,
     pub(crate) additional_feminize_names: String,
     pub(crate) bust: String,

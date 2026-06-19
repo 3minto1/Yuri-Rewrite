@@ -623,6 +623,16 @@ pre {
   padding: 14px 22px 22px;
 }
 
+.workspace-main-grid {
+  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.workspace-main-grid > .model-panel,
+.workspace-main-grid > .chapter-list-panel {
+  min-height: 0;
+}
+
 .hidden {
   display: none;
 }
@@ -945,6 +955,38 @@ pre {
 .batch-strip span {
   color: #6e675d;
   font-size: 13px;
+}
+
+.batch-canon-button {
+  margin-left: auto;
+}
+
+.canon-workspace-page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  margin: 14px 22px 22px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.canon-workspace-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.canon-workspace-heading h2 {
+  margin: 0;
+}
+
+.canon-workspace-page .asset-stack {
+  overflow: auto;
+}
+
+.canon-workspace-page textarea {
+  line-height: 1.65;
+  min-height: 180px;
 }
 
 .estimate-panel {
@@ -1330,6 +1372,19 @@ pre {
     grid-template-rows: repeat(3, minmax(0, 1fr));
   }
 
+  .workspace-main-grid {
+    grid-template-columns: minmax(280px, 1fr);
+    grid-template-rows: repeat(2, minmax(360px, 1fr));
+  }
+
+  .batch-strip {
+    flex-wrap: wrap;
+  }
+
+  .batch-canon-button {
+    margin-left: 0;
+  }
+
   .settings-rewritten-name-field,
   .settings-additional-names-field {
     grid-column: auto;
@@ -1707,6 +1762,10 @@ label {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.compare-rewrite-split {
+  flex: 0 0 auto;
 }
 
 .compare-page-toolbar button.active,

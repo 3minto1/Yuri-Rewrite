@@ -1,6 +1,7 @@
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  ArrowLeft,
   BookOpen,
   ChartNoAxesCombined,
   CheckCircle2,
@@ -93,6 +94,7 @@ const emptyProfile: ProfileDraft = {
 
 const emptyNovelSettings: NovelSettingsDraft = {
   protagonist_name: "",
+  protagonist_aliases: "",
   rewritten_protagonist_name: "",
   additional_feminize_names: "",
   bust: "平胸",
@@ -314,6 +316,7 @@ export default function App() {
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "token-stats" | "settings">("workspace");
+  const [workspaceSection, setWorkspaceSection] = useState<"main" | "canon">("main");
   const [tokenStats, setTokenStats] = useState<TokenUsageReport | null>(null);
   const [tokenStatsStartDate, setTokenStatsStartDate] = useState(() => {
     const date = new Date();
@@ -649,6 +652,7 @@ export default function App() {
       next.settings
         ? {
             protagonist_name: next.settings.protagonist_name,
+            protagonist_aliases: next.settings.protagonist_aliases ?? "",
             rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
             additional_feminize_names: next.settings.additional_feminize_names,
             bust: next.settings.bust,
@@ -659,6 +663,7 @@ export default function App() {
         : emptyNovelSettings
     );
     setOpenNovelMenuId("");
+    setWorkspaceSection("main");
     setActiveView("workspace");
     applyRecoveryForNovel(novelId, options.recoveries);
     await refreshLogs(next.novel.id);
@@ -683,6 +688,7 @@ export default function App() {
       if (next.settings) {
         setNovelSettingsDraft({
           protagonist_name: next.settings.protagonist_name,
+          protagonist_aliases: next.settings.protagonist_aliases ?? "",
           rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
           additional_feminize_names: next.settings.additional_feminize_names,
           bust: next.settings.bust,
@@ -781,6 +787,7 @@ export default function App() {
       const saved = await invoke("save_novel_settings", {
         novelId: detail.novel.id,
         protagonistName: novelSettingsDraft.protagonist_name,
+        protagonistAliases: novelSettingsDraft.protagonist_aliases,
         rewrittenProtagonistName: novelSettingsDraft.rewritten_protagonist_name,
         additionalFeminizeNames: novelSettingsDraft.additional_feminize_names,
         bust: novelSettingsDraft.bust,
@@ -791,6 +798,7 @@ export default function App() {
       setDetail({ ...detail, settings: saved });
       setNovelSettingsDraft({
         protagonist_name: saved.protagonist_name,
+        protagonist_aliases: saved.protagonist_aliases ?? "",
         rewritten_protagonist_name: saved.rewritten_protagonist_name ?? "",
         additional_feminize_names: saved.additional_feminize_names,
         bust: saved.bust,
@@ -1218,7 +1226,7 @@ export default function App() {
       analysis_profile_id: settings.analysis_profile_id ?? null,
       selected_profile_id: selectedProfileId || null,
       chapter_batch_size: settings.chapter_batch_size ?? 30,
-      rewrite_parallelism: settings.rewrite_parallelism ?? 6,
+      rewrite_parallelism: settings.rewrite_parallelism ?? 10,
       ...overrides
     };
   }
@@ -1279,7 +1287,7 @@ export default function App() {
     setBusy("batch-size-setting");
     setNotice("");
     try {
-      const previousParallelism = settings.rewrite_parallelism ?? 6;
+      const previousParallelism = settings.rewrite_parallelism ?? 10;
       const preservedChapterId = selectedChapterId;
       const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ chapter_batch_size: value })
@@ -1539,7 +1547,11 @@ export default function App() {
     }
   }, [showNotice, updateChapterFromBackend]);
 
-  const rewriteSingleChapter = useCallback(async (chapterId: string, instructions: string) => {
+  const rewriteSingleChapter = useCallback(async (
+    chapterId: string,
+    instructions: string,
+    sourceMode: "original" | "rewrite"
+  ) => {
     const currentDetail = detailRef.current;
     const chapter = currentDetail?.chapters.find((item) => item.id === chapterId);
     if (!currentDetail || !chapter || !selectedProfileId) {
@@ -1552,7 +1564,8 @@ export default function App() {
         novelId: currentDetail.novel.id,
         profileId: selectedProfileId,
         chapterId,
-        instructions
+        instructions,
+        sourceMode
       });
       updateChapterFromBackend(updated);
       await refreshLogs(currentDetail.novel.id);
@@ -2072,7 +2085,15 @@ export default function App() {
 
         {activeView === "workspace" && (
           <>
-          {detail && <BatchPanel batches={detail.batches} selectedBatch={selectedBatch} selectedBatchId={selectedBatchId} onSelect={setSelectedBatchId} />}
+          {detail && (
+            <BatchPanel
+              batches={detail.batches}
+              selectedBatch={selectedBatch}
+              selectedBatchId={selectedBatchId}
+              onSelect={setSelectedBatchId}
+              onOpenCanon={() => setWorkspaceSection("canon")}
+            />
+          )}
           {detail && jobEstimate && (
             <TaskEstimate
               estimate={jobEstimate}
@@ -2082,27 +2103,41 @@ export default function App() {
               formatSeconds={formatSeconds}
             />
           )}
-          <div className="content-grid">
-            <ModelConfig
-              draft={profileDraft}
-              setDraft={setProfileDraft}
-              selectedProfile={selectedProfile}
-              selectedProfileId={selectedProfileId}
-              suggestions={detectedModelSuggestions}
-              suggestionsOpen={openModelSuggestions}
-              busy={busy}
-              processing={adjustableWhilePaused}
-              savedApiKeyMask={savedApiKeyMask}
-              thinkingModeTooltip={modelThinkingModeTooltip}
-              onSuggestionsOpenChange={setOpenModelSuggestions}
-              onCreate={createNewModelProfile}
-              onDiagnose={diagnoseProfile}
-              onSave={saveProfile}
-            />
-
-            <section className="panel canon-panel">
+          {workspaceSection === "main" ? (
+            <div className="content-grid workspace-main-grid">
+              <ModelConfig
+                draft={profileDraft}
+                setDraft={setProfileDraft}
+                selectedProfile={selectedProfile}
+                selectedProfileId={selectedProfileId}
+                suggestions={detectedModelSuggestions}
+                suggestionsOpen={openModelSuggestions}
+                busy={busy}
+                processing={adjustableWhilePaused}
+                savedApiKeyMask={savedApiKeyMask}
+                thinkingModeTooltip={modelThinkingModeTooltip}
+                onSuggestionsOpenChange={setOpenModelSuggestions}
+                onCreate={createNewModelProfile}
+                onDiagnose={diagnoseProfile}
+                onSave={saveProfile}
+              />
+              <ChapterList
+                chapters={detail?.chapters ?? []}
+                selectedChapterId={selectedChapter?.id}
+                onSelect={setSelectedChapterId}
+                displayTitle={displayChapterTitle}
+                statusText={statusText}
+              />
+            </div>
+          ) : (
+            <section className="panel canon-workspace-page">
               <div className="panel-heading">
-                <h2>一致性资产</h2>
+                <div className="canon-workspace-heading">
+                  <button type="button" onClick={() => setWorkspaceSection("main")}>
+                    <ArrowLeft size={16} />返回工作台
+                  </button>
+                  <h2>一致性资产</h2>
+                </div>
                 <button onClick={saveCanonAssets} disabled={!detail || busy === "canon" || processingTaskActive}>
                   {busy === "canon" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
                   保存
@@ -2120,19 +2155,9 @@ export default function App() {
                     />
                   </label>
                 ))}
-                {!detail && <p className="muted">导入小说后显示人物卡、关系、地点、伏笔和术语表。</p>}
               </div>
             </section>
-
-            <ChapterList
-              chapters={detail?.chapters ?? []}
-              selectedChapterId={selectedChapter?.id}
-              onSelect={setSelectedChapterId}
-              displayTitle={displayChapterTitle}
-              statusText={statusText}
-            />
-
-          </div>
+          )}
           </>
         )}
       </section>

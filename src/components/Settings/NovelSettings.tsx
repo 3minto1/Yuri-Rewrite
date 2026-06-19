@@ -12,6 +12,7 @@ export function NovelSettingsFields({ draft, setDraft, disabled }: NovelSettings
   return (
     <fieldset className="form-grid" disabled={disabled}>
       <label>主角姓名（必填）<input value={draft.protagonist_name} onChange={(event) => setDraft({ ...draft, protagonist_name: event.target.value })} placeholder="例如：萧炎" /></label>
+      <label>主角别名（选填）<input value={draft.protagonist_aliases} onChange={(event) => setDraft({ ...draft, protagonist_aliases: event.target.value })} placeholder="支持逗号或换行分隔" /></label>
       <label className="settings-rewritten-name-field">改写后姓名（选填）<input value={draft.rewritten_protagonist_name} onChange={(event) => setDraft({ ...draft, rewritten_protagonist_name: event.target.value })} placeholder="留空则让AI生成改写后姓名" /></label>
       <label className="settings-additional-names-field">其他需要女性化的人名（选填）<textarea value={draft.additional_feminize_names} onChange={(event) => setDraft({ ...draft, additional_feminize_names: event.target.value })} placeholder="支持逗号或换行分隔" /></label>
       <label>身材<select value={draft.bust} onChange={(event) => setDraft({ ...draft, bust: event.target.value })}><option value="平胸">平胸</option><option value="巨乳">巨乳</option></select></label>

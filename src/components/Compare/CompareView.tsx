@@ -21,7 +21,11 @@ type CompareViewProps = {
   editDisabledReason?: string;
   onSaveRewrite?: (chapterId: string, rewriteText: string) => Promise<void>;
   onRestoreRewrite?: (chapterId: string) => Promise<void>;
-  onRewriteChapter?: (chapterId: string, instructions: string) => Promise<void>;
+  onRewriteChapter?: (
+    chapterId: string,
+    instructions: string,
+    sourceMode: "original" | "rewrite"
+  ) => Promise<void>;
   onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
 };
 
@@ -159,6 +163,8 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [editBusy, setEditBusy] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(false);
   const [rewriteDialogOpen, setRewriteDialogOpen] = useState(false);
+  const [rewriteSourceMode, setRewriteSourceMode] = useState<"original" | "rewrite">("original");
+  const [rewriteMenuOpen, setRewriteMenuOpen] = useState(false);
   const [rewriteInstructions, setRewriteInstructions] = useState("");
   const [rewriteBusy, setRewriteBusy] = useState(false);
   const pendingNavigationRef = useRef<(() => void) | null>(null);
@@ -221,7 +227,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     if (!selectedChapter) return;
     setRewriteBusy(true);
     try {
-      await onRewriteChapter(selectedChapter.id, rewriteInstructions);
+      await onRewriteChapter(selectedChapter.id, rewriteInstructions, rewriteSourceMode);
       setRewriteDialogOpen(false);
       setRewriteInstructions("");
       setEditing(false);
@@ -322,6 +328,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   useEffect(() => {
     setEditing(false);
     setEditDraft(selectedChapter?.rewrite_text ?? "");
+    setRewriteMenuOpen(false);
     pendingNavigationRef.current = null;
     setPendingNavigation(false);
   }, [selectedChapterId]);
@@ -336,25 +343,68 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
           </select>
         </label>
         <div className="compare-toolbar-actions">
+          <button
+            onClick={() => runOrConfirmNavigation(() => void restoreInitialRewrite())}
+            disabled={
+              !selectedChapter?.single_rewrite_original_available
+              || !rewriteText.trim()
+              || !editingAllowed
+              || rewriteBusy
+              || busy !== ""
+            }
+            title={
+              !selectedChapter?.single_rewrite_original_available
+                ? "当前章节没有可恢复的单章重写初稿"
+                : editingAllowed
+                  ? "恢复到第一次单章重新改写前的初稿"
+                  : editDisabledReason
+            }
+          >
+            <RotateCcw size={17} />恢复初稿
+          </button>
           <button className={searchOpen ? "active" : ""} aria-pressed={searchOpen} onClick={() => searchOpen ? closeSearch() : setSearchOpen(true)}><Search size={17} />查找</button>
           <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
-          {selectedChapter?.single_rewrite_original_available ? (
+          <div className="split-button compare-rewrite-split">
             <button
-              onClick={() => runOrConfirmNavigation(() => void restoreInitialRewrite())}
-              disabled={!editingAllowed || rewriteBusy || busy !== ""}
-              title={editingAllowed ? "恢复到单章重新改写前的初稿" : editDisabledReason}
-            >
-              <RotateCcw size={17} />恢复初稿
-            </button>
-          ) : (
-            <button
-              onClick={() => runOrConfirmNavigation(() => setRewriteDialogOpen(true))}
+              className="split-button-main"
+              onClick={() => runOrConfirmNavigation(() => {
+                setRewriteSourceMode("original");
+                setRewriteDialogOpen(true);
+              })}
               disabled={!editingAllowed || !rewriteText.trim() || busy !== ""}
-              title={editingAllowed ? "使用当前改写模型重新生成本章并覆盖现有改写稿" : editDisabledReason}
+              title={editingAllowed ? "以原文为主要输入重新生成本章" : editDisabledReason}
             >
-              <RefreshCw size={17} />重写本章
+              <RefreshCw size={17} />重写本章（原文）
             </button>
-          )}
+            <button
+              className="split-button-toggle"
+              type="button"
+              aria-label="重写本章选项"
+              aria-expanded={rewriteMenuOpen}
+              onClick={() => setRewriteMenuOpen((open) => !open)}
+              disabled={!editingAllowed || !rewriteText.trim() || busy !== ""}
+              title="选择单章重写来源"
+            >
+              <ChevronDown size={16} />
+            </button>
+            {rewriteMenuOpen && (
+              <div className="split-button-menu" role="menu">
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => {
+                    setRewriteMenuOpen(false);
+                    runOrConfirmNavigation(() => {
+                      setRewriteSourceMode("rewrite");
+                      setRewriteDialogOpen(true);
+                    });
+                  }}
+                >
+                  重写本章（改写稿）
+                </button>
+              </div>
+            )}
+          </div>
           <button onClick={() => runOrConfirmNavigation(onBack)}><ArrowLeft size={17} />返回</button>
           <button onClick={onExport} disabled={busy !== ""}><Download size={17} />TXT</button>
         </div>
@@ -509,11 +559,18 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
       {rewriteDialogOpen && selectedChapter && (
         <Modal className="settings-dialog rewrite-chapter-dialog" labelledBy="rewrite-chapter-title">
           <header className="dialog-titlebar">
-            <h2 id="rewrite-chapter-title">重新改写《{selectedChapter.title}》</h2>
+            <h2 id="rewrite-chapter-title">
+              {rewriteSourceMode === "original" ? "根据原文重新改写" : "基于改写稿继续修改"}《{selectedChapter.title}》
+            </h2>
             <button className="icon-button" type="button" aria-label="关闭单章重写" onClick={() => setRewriteDialogOpen(false)} disabled={rewriteBusy}><X size={17} /></button>
           </header>
           <div className="dialog-body">
-            <p>可填写只适用于本章的补充要求。程序会复用现有分析、一致性资产、姓名映射和复检设置，完成后覆盖当前 AI 改写稿。</p>
+            <p>
+              {rewriteSourceMode === "original"
+                ? "以本章原文为基础重新生成，并复用现有分析、一致性资产、姓名映射和复检设置。"
+                : "以当前改写稿为主要底稿，原文、设定、相关一致性资产和相邻章节仅用于辅助理解；本模式不调用审查模型。"}
+              完成后会覆盖当前 AI 改写稿，但仍可恢复第一次单章重写前的初稿。
+            </p>
             <label className="field">
               <span>本章补充要求（可选）</span>
               <textarea

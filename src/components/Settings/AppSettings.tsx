@@ -84,10 +84,10 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <div className="mode-toggle mode-toggle-six setting-parallelism" role="radiogroup" aria-label="分析和改写并发请求数">
             {([1, 3, 6, 10, 25, 50] as const).map((value) => {
               const unavailable = value > maxParallelism;
-              return <button key={value} type="button" className={(settings.rewrite_parallelism ?? 6) === value ? "active" : ""} aria-checked={(settings.rewrite_parallelism ?? 6) === value} role="radio" disabled={busy === "parallelism-setting" || adjustmentDisabled || unavailable} title={unavailable ? `每批 ${batchSize} 章时最高可选并发 ${maxParallelism}` : undefined} onClick={() => onParallelismChange(value)}>{value === 1 ? "不并发" : value}</button>;
+              return <button key={value} type="button" className={(settings.rewrite_parallelism ?? 10) === value ? "active" : ""} aria-checked={(settings.rewrite_parallelism ?? 10) === value} role="radio" disabled={busy === "parallelism-setting" || adjustmentDisabled || unavailable} title={unavailable ? `每批 ${batchSize} 章时最高可选并发 ${maxParallelism}` : undefined} onClick={() => onParallelismChange(value)}>{value === 1 ? "不并发" : value}</button>;
             })}
           </div>
-          <span>默认 6。并发 25 需要每批至少 50 章；并发 50 需要每批 100 章。</span>
+          <span>默认 10。并发 25 需要每批至少 50 章；并发 50 需要每批 100 章。</span>
         </div>
       </section>
     </div>

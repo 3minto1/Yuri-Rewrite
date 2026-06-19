@@ -42,6 +42,7 @@ export type ChapterBatch = {
 export type NovelSettings = {
   novel_id: string;
   protagonist_name: string;
+  protagonist_aliases: string;
   rewritten_protagonist_name: string;
   additional_feminize_names: string;
   bust: string;
@@ -222,6 +223,7 @@ export type ModelDiagnosis = {
 
 export type NovelSettingsDraft = {
   protagonist_name: string;
+  protagonist_aliases: string;
   rewritten_protagonist_name: string;
   additional_feminize_names: string;
   bust: string;

@@ -43,6 +43,7 @@ type CommandMap = {
     args: {
       novelId: string;
       protagonistName: string;
+      protagonistAliases?: string;
       rewrittenProtagonistName: string;
       additionalFeminizeNames: string;
       bust: string;
@@ -66,7 +67,13 @@ type CommandMap = {
     result: import("./types").Chapter;
   };
   rewrite_single_chapter: {
-    args: { novelId: string; profileId: string; chapterId: string; instructions: string };
+    args: {
+      novelId: string;
+      profileId: string;
+      chapterId: string;
+      instructions: string;
+      sourceMode?: "original" | "rewrite";
+    };
     result: import("./types").Chapter;
   };
   restore_single_chapter_rewrite: {

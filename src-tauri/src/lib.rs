@@ -248,6 +248,12 @@ async fn analyze_batch_with_parallelism(
     rewrite_parallelism: usize,
     checkpoint_batch_index: Option<i64>,
 ) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    let analysis_identity_context = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_novel_settings(&conn, novel_id)?
+            .map(|settings| build_analysis_identity_context(&settings))
+            .unwrap_or_default()
+    };
     let rewrite_parallelism = state
         .rate_limits
         .effective_parallelism(rewrite_parallelism, &[profile])?;
@@ -278,7 +284,8 @@ async fn analyze_batch_with_parallelism(
             &shard,
             &readonly_context,
         );
-        let prompt = build_batch_analysis_prompt_with_context(&shard, &context);
+        let prompt =
+            build_batch_analysis_prompt_with_identity(&shard, &context, &analysis_identity_context);
         let client = state.client.clone();
         let rate_limiter = state.rate_limits.clone();
         let profile_for_task = profile.clone();
@@ -426,7 +433,14 @@ async fn retry_analysis_shard_after_parse_error(
         "{}\n\n只输出当前输入级一致性资产 JSON 对象；不要输出 Markdown、解释、空内容或 chapters 数组；JSON 字符串内换行必须写成 \\n。",
         shard_context.trim()
     );
-    let base_prompt = build_batch_analysis_prompt_with_context(shard, retry_context.trim());
+    let identity_context = {
+        let conn = state.conn.lock().map_err(to_string)?;
+        load_novel_settings(&conn, novel_id)?
+            .map(|settings| build_analysis_identity_context(&settings))
+            .unwrap_or_default()
+    };
+    let base_prompt =
+        build_batch_analysis_prompt_with_identity(shard, retry_context.trim(), &identity_context);
     let prompt = format!(
         "{}\n\n上一次无法解析的输出如下，仅供你避开格式错误，不要照抄：\n{}",
         base_prompt,
@@ -880,6 +894,9 @@ fn parse_generated_name_mapping_entries(
 fn required_feminized_name_sources(settings: &NovelSettings) -> Vec<String> {
     let mut names = Vec::new();
     push_unique_name(&mut names, settings.protagonist_name.trim());
+    for name in settings.protagonist_aliases.lines() {
+        push_unique_name(&mut names, name.trim());
+    }
     for name in settings.additional_feminize_names.lines() {
         push_unique_name(&mut names, name.trim());
     }
@@ -2701,8 +2718,8 @@ fn detect_protagonist_derived_name_residue(
     rewrites: &[ParsedChapterRewrite],
     settings: &NovelSettings,
 ) -> Vec<ReviewIssue> {
-    let source_name = settings.protagonist_name.trim();
-    if source_name.is_empty() {
+    let source_names = protagonist_source_names(settings);
+    if source_names.is_empty() {
         return Vec::new();
     }
     let rewrite_by_id = rewrites
@@ -2714,7 +2731,12 @@ fn detect_protagonist_derived_name_residue(
         let Some(rewrite) = rewrite_by_id.get(chapter.id.as_str()) else {
             continue;
         };
-        let candidates = protagonist_residue_candidates_from_original(chapter, source_name);
+        let candidates = source_names
+            .iter()
+            .flat_map(|source_name| {
+                protagonist_residue_candidates_from_original(chapter, source_name)
+            })
+            .collect::<Vec<_>>();
         if candidates.is_empty() {
             continue;
         }
@@ -2740,7 +2762,7 @@ fn detect_protagonist_derived_name_residue(
             ),
             required_fix: format!(
                 "这些称呼来自原文主角“{}”，必须按姓名映射或改写名统一女性化；不要保留完整原名、原名派生昵称或男性化称谓。",
-                source_name
+                source_names.join("、")
             ),
         });
     }
@@ -2767,8 +2789,12 @@ fn detect_protagonist_name_logic_inconsistency(
             continue;
         };
         let rewrite_text = format!("{}\n{}", rewrite.title, rewrite.text);
-        let evidence =
-            protagonist_name_logic_conflict_evidence(&rewrite_text, source_name, rewritten_name);
+        let evidence = protagonist_source_names(settings)
+            .iter()
+            .flat_map(|source| {
+                protagonist_name_logic_conflict_evidence(&rewrite_text, source, rewritten_name)
+            })
+            .collect::<Vec<_>>();
         if evidence.is_empty() {
             continue;
         }
@@ -3080,6 +3106,19 @@ fn references_target_protagonist(text: &str, settings: &NovelSettings) -> bool {
     contains_any(text, &["主角", "女主", "男主"])
         || (!source_name.is_empty() && text.contains(source_name))
         || (!rewritten_name.is_empty() && text.contains(rewritten_name))
+        || settings
+            .protagonist_aliases
+            .lines()
+            .any(|alias| !alias.trim().is_empty() && text.contains(alias.trim()))
+}
+
+fn protagonist_source_names(settings: &NovelSettings) -> Vec<String> {
+    let mut names = Vec::new();
+    push_unique_name(&mut names, settings.protagonist_name.trim());
+    for alias in settings.protagonist_aliases.lines() {
+        push_unique_name(&mut names, alias.trim());
+    }
+    names
 }
 
 fn contains_non_human_reference(text: &str) -> bool {
@@ -5218,7 +5257,7 @@ fn load_chapter_batches(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter
 
 fn load_novel_settings(conn: &Connection, novel_id: &str) -> Result<Option<NovelSettings>, String> {
     let result = conn.query_row(
-        "SELECT novel_id, protagonist_name, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
+        "SELECT novel_id, protagonist_name, protagonist_aliases, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
         params![novel_id],
         row_to_novel_settings,
     );
@@ -6612,13 +6651,14 @@ fn row_to_novel_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<NovelSetti
     Ok(NovelSettings {
         novel_id: row.get(0)?,
         protagonist_name: row.get(1)?,
-        rewritten_protagonist_name: row.get(2)?,
-        additional_feminize_names: row.get(3)?,
-        bust: row.get(4)?,
-        body_type: row.get(5)?,
-        rewrite_mode: row.get(6)?,
-        advanced_settings: row.get(7)?,
-        updated_at: row.get(8)?,
+        protagonist_aliases: row.get(2)?,
+        rewritten_protagonist_name: row.get(3)?,
+        additional_feminize_names: row.get(4)?,
+        bust: row.get(5)?,
+        body_type: row.get(6)?,
+        rewrite_mode: row.get(7)?,
+        advanced_settings: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -6845,12 +6885,11 @@ fn escape_unescaped_json_control_chars(input: &str) -> String {
 }
 
 fn normalize_name_list(input: &str) -> String {
-    input
-        .split(['\n', '\r', ',', '，', '、', ';', '；'])
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut names = Vec::new();
+    for value in input.split(['\n', '\r', ',', '，', '、', ';', '；']) {
+        push_unique_name(&mut names, value.trim());
+    }
+    names.join("\n")
 }
 
 fn sanitize_file_name(input: &str) -> String {
@@ -6917,6 +6956,7 @@ mod tests {
         NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
@@ -7469,6 +7509,59 @@ mod tests {
     }
 
     #[test]
+    fn analysis_identity_context_links_protagonist_aliases_without_rewrite_rules() {
+        let mut settings = sample_novel_settings();
+        settings.protagonist_aliases = "炎儿\n岩枭".to_string();
+        let identity = build_analysis_identity_context(&settings);
+        let chapter = sample_chapter(1, "第一章", "炎儿以岩枭之名进入大厅。");
+        let prompt = build_batch_analysis_prompt_with_identity(&[chapter], "", &identity);
+
+        assert!(prompt.contains("炎儿"));
+        assert!(prompt.contains("岩枭"));
+        assert!(prompt.contains("归属于同一人物"));
+        for forbidden in ["百合", "女性化", "双女主", "改写后姓名"] {
+            assert!(
+                !prompt.contains(forbidden),
+                "prompt contains forbidden term: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn protagonist_aliases_join_name_mapping_and_rewrite_context() {
+        let mut settings = sample_novel_settings();
+        settings.protagonist_aliases = "炎儿\n岩枭".to_string();
+        let required = required_feminized_name_sources(&settings);
+        assert_eq!(required, vec!["萧炎", "炎儿", "岩枭"]);
+
+        let prompt = build_rewrite_settings_prompt(&settings);
+        assert!(prompt.contains("主角原文别名：炎儿、岩枭"));
+        assert!(prompt.contains("每个别名都必须按一致性资产中的固定映射同步女性化"));
+    }
+
+    #[test]
+    fn draft_based_single_rewrite_prompt_keeps_draft_primary_and_original_reference_only() {
+        let settings = sample_novel_settings();
+        let mut chapter = sample_chapter(2, "第二章", "原文事件顺序。");
+        chapter.rewrite_text = Some("当前改写稿正文。".to_string());
+        let prompt = build_single_chapter_rewrite_from_draft_prompt(
+            &chapter,
+            "## 人物卡\n萧炎 -> 萧妍",
+            &settings,
+            "保持简洁文风",
+            "前一章已完成改写摘要。",
+            "加强情绪互动",
+        );
+
+        assert!(prompt.contains("当前改写稿是本次修改的主要底稿"));
+        assert!(prompt.contains("不能抛弃现稿、退回原文重新生成"));
+        assert!(prompt.contains("当前改写稿正文"));
+        assert!(prompt.contains("原文仅用于核对事实"));
+        assert!(prompt.contains("前一章已完成改写摘要"));
+        assert!(prompt.contains("加强情绪互动"));
+    }
+
+    #[test]
     fn app_review_setting_defaults_off_and_can_be_enabled() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         init_db(&conn).expect("init db");
@@ -7476,7 +7569,7 @@ mod tests {
         assert!(!load_review_enabled(&conn).expect("load default review setting"));
         assert_eq!(
             load_rewrite_parallelism(&conn).expect("load default parallelism"),
-            6
+            10
         );
         assert_eq!(
             load_chapter_batch_size(&conn).expect("load default batch size"),
@@ -7497,7 +7590,7 @@ mod tests {
         save_rewrite_parallelism(&conn, 2).expect("normalize invalid parallelism");
         assert_eq!(
             load_rewrite_parallelism(&conn).expect("load normalized parallelism"),
-            6
+            10
         );
         save_chapter_batch_size(&conn, 100).expect("save batch size");
         save_rewrite_parallelism(&conn, 50).expect("save high parallelism");
@@ -7970,6 +8063,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
             additional_feminize_names: "小医仙".to_string(),
             bust: "平胸".to_string(),
@@ -8091,6 +8185,7 @@ mod tests {
         let strict_settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
@@ -8137,6 +8232,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
@@ -8181,6 +8277,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
@@ -8203,6 +8300,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
             additional_feminize_names: "林动\n唐三".to_string(),
             bust: "平胸".to_string(),
@@ -8248,6 +8346,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
@@ -8283,6 +8382,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
