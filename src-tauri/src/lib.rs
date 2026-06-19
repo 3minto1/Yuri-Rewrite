@@ -104,6 +104,7 @@ pub fn run() {
             estimate_job_cost,
             list_ai_logs,
             clear_ai_logs,
+            get_token_usage_stats,
             get_app_settings,
             save_app_settings,
             save_selected_profile_id,
@@ -113,6 +114,7 @@ pub fn run() {
             update_canon_assets,
             start_analysis,
             start_rewrite,
+            rewrite_single_chapter,
             start_analyze_rewrite_batch,
             start_analyze_rewrite_all,
             pause_analyze_rewrite_all,
@@ -121,6 +123,7 @@ pub fn run() {
             list_auto_run_recoveries,
             save_chapter_rewrite_edit,
             restore_chapter_rewrite_edit,
+            restore_single_chapter_rewrite,
             export_novel,
             open_github_url,
             check_for_updates,
@@ -5076,6 +5079,11 @@ async fn start_rewrite_legacy(
                 )?;
                 let conn = state.conn.lock().map_err(to_string)?;
                 conn.execute(
+                    "DELETE FROM chapter_rewrite_snapshots WHERE chapter_id = ?1",
+                    params![chapter.id],
+                )
+                .map_err(to_string)?;
+                conn.execute(
             "UPDATE chapters SET rewrite_text = ?1, ai_rewrite_text = ?1, rewrite_edited_at = NULL, rewrite_status = 'completed' WHERE id = ?2",
                     params![output.text.trim(), chapter.id],
                 )
@@ -5316,6 +5324,11 @@ fn save_parsed_rewrites(
     let tx = conn.transaction().map_err(to_string)?;
     for rewrite in rewrites {
         tx.execute(
+            "DELETE FROM chapter_rewrite_snapshots WHERE chapter_id = ?1",
+            params![rewrite.id],
+        )
+        .map_err(to_string)?;
+        tx.execute(
             "UPDATE chapters SET title = ?1, rewrite_text = ?2, ai_rewrite_text = ?2, rewrite_edited_at = NULL, rewrite_status = 'completed' WHERE id = ?3",
             params![rewrite.title.trim(), rewrite.text.trim(), rewrite.id],
         )
@@ -5401,6 +5414,11 @@ fn apply_staged_rewrites(
         let (title, content) = staged
             .get(&chapter.id)
             .expect("validated staged rewrite");
+        tx.execute(
+            "DELETE FROM chapter_rewrite_snapshots WHERE chapter_id = ?1",
+            params![chapter.id],
+        )
+        .map_err(to_string)?;
         tx.execute(
             "UPDATE chapters SET title = ?1, rewrite_text = ?2, ai_rewrite_text = ?2,
                 rewrite_edited_at = NULL, rewrite_status = 'completed' WHERE id = ?3",
@@ -6571,8 +6589,9 @@ fn row_to_chapter(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chapter> {
         analysis_json: row.get(5)?,
         rewrite_text: row.get(6)?,
         rewrite_edited: row.get(7)?,
-        analysis_status: row.get(8)?,
-        rewrite_status: row.get(9)?,
+        single_rewrite_original_available: row.get(8)?,
+        analysis_status: row.get(9)?,
+        rewrite_status: row.get(10)?,
     })
 }
 
@@ -6888,6 +6907,7 @@ mod tests {
             analysis_json: None,
             rewrite_text: None,
             rewrite_edited: false,
+            single_rewrite_original_available: false,
             analysis_status: "completed".to_string(),
             rewrite_status: "pending".to_string(),
         }

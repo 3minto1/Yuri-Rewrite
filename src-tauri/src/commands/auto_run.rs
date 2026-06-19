@@ -4,8 +4,9 @@ use crate::task_control::{AutoRunCleanup, AutoRunControl};
 use crate::{
     analyze_chapters_for_auto, begin_auto_batch_progress, build_rewritten_export_body,
     chinese_batch_label, clear_auto_run, create_job, emit_job_progress, finish_stopped_auto_run,
-    load_chapter_batches, load_chapters_for_batch, load_job, load_model_profile,
-    load_review_enabled, load_review_profile_for_run, load_review_profile_id,
+    load_analysis_profile_for_run, load_analysis_profile_id, load_chapter_batches,
+    load_chapters_for_batch, load_job, load_model_profile, load_review_enabled,
+    load_review_profile_for_run, load_review_profile_id,
     pause_auto_run_after_model_format_error, pause_auto_run_after_network_error,
     pause_auto_run_after_rate_limit, pause_auto_run_after_temporary_gateway_error,
     prepare_auto_run, read_stored_api_key, register_auto_run_job, request_auto_run_stop,
@@ -44,7 +45,7 @@ pub(crate) async fn start_analyze_rewrite_batch(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (batch, chapters, review_enabled, review_profile_id) = {
+    let (batch, chapters, review_enabled, review_profile_id, analysis_profile_id) = {
         let conn = state.conn.lock().map_err(to_string)?;
         require_novel_settings(&conn, &novel_id)?;
         let batch = load_chapter_batches(&conn, &novel_id)?
@@ -57,6 +58,7 @@ pub(crate) async fn start_analyze_rewrite_batch(
             chapters,
             load_review_enabled(&conn)?,
             load_review_profile_id(&conn)?,
+            load_analysis_profile_id(&conn)?,
         )
     };
     if chapters.is_empty() {
@@ -69,9 +71,14 @@ pub(crate) async fn start_analyze_rewrite_batch(
         review_enabled,
         review_profile_id.as_deref(),
     )?;
+    let (analysis_profile, analysis_api_key) =
+        load_analysis_profile_for_run(&state, &profile, analysis_profile_id.as_deref())?;
     let mut active_profile_ids = vec![profile.id.as_str()];
+    if analysis_profile.id != profile.id {
+        active_profile_ids.push(analysis_profile.id.as_str());
+    }
     if let Some(review_profile) = review_profile.as_ref() {
-        if review_profile.id != profile.id {
+        if !active_profile_ids.contains(&review_profile.id.as_str()) {
             active_profile_ids.push(review_profile.id.as_str());
         }
     }
@@ -115,7 +122,15 @@ pub(crate) async fn start_analyze_rewrite_batch(
 
     begin_auto_batch_progress(&state, &novel_id, "analysis", 1, 1, &batch.label)?;
     if let Err(error) =
-        analyze_chapters_for_auto(&state, &novel_id, &profile, &api_key, &chapters, None).await
+        analyze_chapters_for_auto(
+            &state,
+            &novel_id,
+            &analysis_profile,
+            &analysis_api_key,
+            &chapters,
+            None,
+        )
+        .await
     {
         if error == AUTO_RUN_TERMINATED {
             return finish_stopped_auto_run(&state, &app, job, 0, 0, &error);
@@ -174,7 +189,7 @@ pub(crate) async fn start_analyze_rewrite_all(
 ) -> Result<Job, String> {
     let profile = load_model_profile(&state, &profile_id)?;
     let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (novel, batches, review_enabled, review_profile_id) = {
+    let (novel, batches, review_enabled, review_profile_id, analysis_profile_id) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let novel = conn
             .query_row(
@@ -189,6 +204,7 @@ pub(crate) async fn start_analyze_rewrite_all(
             load_chapter_batches(&conn, &novel_id)?,
             load_review_enabled(&conn)?,
             load_review_profile_id(&conn)?,
+            load_analysis_profile_id(&conn)?,
         )
     };
     if batches.is_empty() {
@@ -203,14 +219,19 @@ pub(crate) async fn start_analyze_rewrite_all(
         review_enabled,
         review_profile_id.as_deref(),
     )?;
+    let (analysis_profile, analysis_api_key) =
+        load_analysis_profile_for_run(&state, &profile, analysis_profile_id.as_deref())?;
     let output_dir = {
         let conn = state.conn.lock().map_err(to_string)?;
         resolve_rewrite_export_dir(&conn, &state.data_dir)?
     };
     fs::create_dir_all(&output_dir).map_err(to_string)?;
     let mut active_profile_ids = vec![profile.id.as_str()];
+    if analysis_profile.id != profile.id {
+        active_profile_ids.push(analysis_profile.id.as_str());
+    }
     if let Some(review_profile) = review_profile.as_ref() {
-        if review_profile.id != profile.id {
+        if !active_profile_ids.contains(&review_profile.id.as_str()) {
             active_profile_ids.push(review_profile.id.as_str());
         }
     }
@@ -307,8 +328,8 @@ pub(crate) async fn start_analyze_rewrite_all(
             analyze_chapters_for_auto(
                 &state,
                 &novel_id,
-                &profile,
-                &api_key,
+                &analysis_profile,
+                &analysis_api_key,
                 &chapters,
                 Some(current),
             )

@@ -15,6 +15,7 @@ import type {
   NovelDetail,
   NovelSettings,
   ProfileDraft,
+  TokenUsageReport,
   UpdateCheckResult,
   UpdateDownloadResult
 } from "./types";
@@ -31,6 +32,10 @@ type CommandMap = {
   diagnose_model_profile: { args: { profileId: string }; result: ModelDiagnosis };
   list_ai_logs: { args: { novelId: string | null }; result: AiLog[] };
   clear_ai_logs: { args: { novelId: string | null }; result: void };
+  get_token_usage_stats: {
+    args: { startDate: string; endDate: string };
+    result: TokenUsageReport;
+  };
   get_app_settings: { args?: undefined; result: AppSettings };
   save_app_settings: { args: { settings: AppSettings }; result: AppSettings };
   save_selected_profile_id: { args: { profileId: string | null }; result: AppSettings };
@@ -57,6 +62,14 @@ type CommandMap = {
     result: import("./types").Chapter;
   };
   restore_chapter_rewrite_edit: {
+    args: { chapterId: string };
+    result: import("./types").Chapter;
+  };
+  rewrite_single_chapter: {
+    args: { novelId: string; profileId: string; chapterId: string; instructions: string };
+    result: import("./types").Chapter;
+  };
+  restore_single_chapter_rewrite: {
     args: { chapterId: string };
     result: import("./types").Chapter;
   };

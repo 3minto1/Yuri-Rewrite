@@ -23,6 +23,7 @@ pub(crate) fn get_app_settings(state: State<AppState>) -> Result<AppSettings, St
         .filter(|value| !value.trim().is_empty());
     let review_enabled = load_review_enabled(&conn)?;
     let review_profile_id = load_review_profile_id(&conn)?;
+    let analysis_profile_id = load_analysis_profile_id(&conn)?;
     let selected_profile_id = load_selected_profile_id(&conn)?;
     let chapter_batch_size = load_chapter_batch_size(&conn)?;
     let rewrite_parallelism = load_rewrite_parallelism(&conn)?;
@@ -32,6 +33,7 @@ pub(crate) fn get_app_settings(state: State<AppState>) -> Result<AppSettings, St
         core_prompt,
         review_enabled,
         review_profile_id,
+        analysis_profile_id,
         selected_profile_id,
         chapter_batch_size,
         rewrite_parallelism,
@@ -79,6 +81,9 @@ pub(crate) fn save_app_settings(
         core_prompt: settings.core_prompt.trim().to_string(),
         review_enabled: settings.review_enabled,
         review_profile_id: normalize_review_profile_id(settings.review_profile_id.as_deref()),
+        analysis_profile_id: normalize_analysis_profile_id(
+            settings.analysis_profile_id.as_deref(),
+        ),
         selected_profile_id: normalize_profile_id(settings.selected_profile_id.as_deref()),
         chapter_batch_size,
         rewrite_parallelism,
@@ -105,6 +110,7 @@ fn load_app_settings(conn: &Connection) -> Result<AppSettings, String> {
         core_prompt: load_core_prompt(conn)?,
         review_enabled: load_review_enabled(conn)?,
         review_profile_id: load_review_profile_id(conn)?,
+        analysis_profile_id: load_analysis_profile_id(conn)?,
         selected_profile_id: load_selected_profile_id(conn)?,
         chapter_batch_size: load_chapter_batch_size(conn)?,
         rewrite_parallelism: load_rewrite_parallelism(conn)?,
@@ -126,6 +132,7 @@ fn save_app_settings_values(conn: &Connection, settings: &AppSettings) -> Result
     save_chapter_batch_size(conn, settings.chapter_batch_size)?;
     save_rewrite_parallelism(conn, settings.rewrite_parallelism)?;
     save_review_profile_id(conn, settings.review_profile_id.as_deref())?;
+    save_analysis_profile_id(conn, settings.analysis_profile_id.as_deref())?;
     save_selected_profile_id_value(conn, settings.selected_profile_id.as_deref())?;
     save_core_prompt(conn, &settings.core_prompt)
 }
@@ -346,6 +353,10 @@ pub(crate) fn normalize_review_profile_id(value: Option<&str>) -> Option<String>
     normalize_profile_id(value)
 }
 
+pub(crate) fn normalize_analysis_profile_id(value: Option<&str>) -> Option<String> {
+    normalize_profile_id(value)
+}
+
 fn normalize_profile_id(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -378,6 +389,38 @@ pub(crate) fn save_review_profile_id(
     } else {
         conn.execute(
             "DELETE FROM app_settings WHERE key = 'review_profile_id'",
+            [],
+        )
+        .map_err(to_string)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn load_analysis_profile_id(conn: &Connection) -> Result<Option<String>, String> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'analysis_profile_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(normalize_analysis_profile_id(value.as_deref()))
+}
+
+pub(crate) fn save_analysis_profile_id(
+    conn: &Connection,
+    profile_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(profile_id) = normalize_analysis_profile_id(profile_id) {
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('analysis_profile_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![profile_id],
+        )
+        .map_err(to_string)?;
+    } else {
+        conn.execute(
+            "DELETE FROM app_settings WHERE key = 'analysis_profile_id'",
             [],
         )
         .map_err(to_string)?;
@@ -624,10 +667,32 @@ mod tests {
             core_prompt: String::new(),
             review_enabled: false,
             review_profile_id: None,
+            analysis_profile_id: None,
             selected_profile_id: None,
             chapter_batch_size: batch_size,
             rewrite_parallelism: parallelism,
         }
+    }
+
+    #[test]
+    fn analysis_profile_defaults_to_current_model_and_can_be_saved() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        assert_eq!(
+            load_analysis_profile_id(&conn).expect("load default analysis profile"),
+            None
+        );
+        save_analysis_profile_id(&conn, Some(" analysis-profile "))
+            .expect("save analysis profile");
+        assert_eq!(
+            load_analysis_profile_id(&conn).expect("load analysis profile"),
+            Some("analysis-profile".to_string())
+        );
+        save_analysis_profile_id(&conn, None).expect("clear analysis profile");
+        assert_eq!(
+            load_analysis_profile_id(&conn).expect("load cleared analysis profile"),
+            None
+        );
     }
 
     fn seed_detected_novel(conn: &Connection, data_dir: &Path) {

@@ -1,4 +1,5 @@
 use super::migrations;
+use crate::repositories::logs::extract_token_usage;
 use rusqlite::Connection;
 
 pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
@@ -73,6 +74,8 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             content TEXT NOT NULL,
             reasoning TEXT,
             raw_response TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
             created_at TEXT NOT NULL
         );
 
@@ -104,6 +107,16 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             file_path TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS chapter_rewrite_snapshots (
+            chapter_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            rewrite_text TEXT NOT NULL,
+            ai_rewrite_text TEXT,
+            rewrite_edited_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS auto_run_checkpoints (
@@ -154,6 +167,9 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     migrations::ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
+    migrations::ensure_column(conn, "ai_logs", "input_tokens", "INTEGER")?;
+    migrations::ensure_column(conn, "ai_logs", "output_tokens", "INTEGER")?;
+    backfill_ai_log_token_usage(conn)?;
     migrations::ensure_column(conn, "chapters", "ai_rewrite_text", "TEXT")?;
     migrations::ensure_column(conn, "chapters", "rewrite_edited_at", "TEXT")?;
     migrations::ensure_column(
@@ -196,6 +212,43 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn backfill_ai_log_token_usage(conn: &Connection) -> rusqlite::Result<()> {
+    let already_completed = conn
+        .query_row(
+            "SELECT 1 FROM app_settings WHERE key = 'token_usage_backfill_v1'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if already_completed {
+        return Ok(());
+    }
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT id, raw_response FROM ai_logs
+             WHERE input_tokens IS NULL AND output_tokens IS NULL AND raw_response IS NOT NULL",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, raw_response) in rows {
+        if let Some((input_tokens, output_tokens)) = extract_token_usage(Some(&raw_response)) {
+            conn.execute(
+                "UPDATE ai_logs SET input_tokens = ?1, output_tokens = ?2 WHERE id = ?3",
+                rusqlite::params![input_tokens as i64, output_tokens as i64, id],
+            )?;
+        }
+    }
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('token_usage_backfill_v1', 'completed')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +288,45 @@ mod tests {
             .expect("load migrated chapter");
         assert_eq!(baseline.as_deref(), Some("已有改写"));
         assert!(edited_at.is_none());
+    }
+
+    #[test]
+    fn migration_backfills_token_usage_from_existing_raw_responses() {
+        let conn = Connection::open_in_memory().expect("open database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ai_logs (
+                id TEXT PRIMARY KEY,
+                novel_id TEXT,
+                profile_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                chapter_title TEXT,
+                status TEXT NOT NULL,
+                content TEXT NOT NULL,
+                reasoning TEXT,
+                raw_response TEXT,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO ai_logs (
+                id, novel_id, profile_id, action, chapter_title, status,
+                content, raw_response, created_at
+            ) VALUES (
+                'log-1', NULL, 'profile-1', '分析', NULL, 'success', 'ok',
+                '{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":321,"completion_tokens":54}}',
+                '2026-06-19T00:00:00Z'
+            );
+            "#,
+        )
+        .expect("seed legacy logs");
+        init_db(&conn).expect("migrate schema");
+        let usage: (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens FROM ai_logs WHERE id = 'log-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load token usage");
+        assert_eq!(usage, (Some(321), Some(54)));
     }
 
     #[test]

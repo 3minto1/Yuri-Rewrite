@@ -39,6 +39,8 @@ pub(crate) struct Chapter {
     pub(crate) rewrite_text: Option<String>,
     #[serde(default)]
     pub(crate) rewrite_edited: bool,
+    #[serde(default)]
+    pub(crate) single_rewrite_original_available: bool,
     pub(crate) analysis_status: String,
     pub(crate) rewrite_status: String,
 }
@@ -208,6 +210,35 @@ pub(crate) struct AiLog {
     pub(crate) created_at: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct TokenUsageDay {
+    pub(crate) date: String,
+    pub(crate) requests: usize,
+    pub(crate) input_tokens: usize,
+    pub(crate) output_tokens: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TokenUsageModel {
+    pub(crate) profile_id: String,
+    pub(crate) profile_name: String,
+    pub(crate) model: String,
+    pub(crate) requests: usize,
+    pub(crate) input_tokens: usize,
+    pub(crate) output_tokens: usize,
+    pub(crate) days: Vec<TokenUsageDay>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TokenUsageReport {
+    pub(crate) start_date: String,
+    pub(crate) end_date: String,
+    pub(crate) requests: usize,
+    pub(crate) input_tokens: usize,
+    pub(crate) output_tokens: usize,
+    pub(crate) models: Vec<TokenUsageModel>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct AppSettings {
     pub(crate) export_dir: Option<String>,
@@ -217,6 +248,8 @@ pub(crate) struct AppSettings {
     pub(crate) review_enabled: bool,
     #[serde(default)]
     pub(crate) review_profile_id: Option<String>,
+    #[serde(default)]
+    pub(crate) analysis_profile_id: Option<String>,
     #[serde(default)]
     pub(crate) selected_profile_id: Option<String>,
     #[serde(default = "crate::default_chapter_batch_size")]

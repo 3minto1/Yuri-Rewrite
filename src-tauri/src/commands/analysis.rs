@@ -2,9 +2,10 @@ use crate::domain::{AppState, Job};
 use crate::services::analysis::analyze_and_save;
 use crate::{
     chapter_has_source_body, create_job, ensure_name_mapping_asset, format_batch_label,
-    load_chapters_for_batch, load_job, load_model_profile, load_rewrite_parallelism,
-    mark_chapters_analysis_failed, mark_empty_source_chapters_skipped, read_stored_api_key,
-    require_novel_settings, set_chapter_status, to_string, update_job,
+    load_analysis_profile_for_run, load_analysis_profile_id, load_chapters_for_batch, load_job,
+    load_model_profile, load_rewrite_parallelism, mark_chapters_analysis_failed,
+    mark_empty_source_chapters_skipped, require_novel_settings, set_chapter_status, to_string,
+    update_job,
 };
 use tauri::State;
 
@@ -15,17 +16,19 @@ pub(crate) async fn start_analysis(
     batch_id: String,
     state: State<'_, AppState>,
 ) -> Result<Job, String> {
-    let profile = load_model_profile(&state, &profile_id)?;
-    let api_key = read_stored_api_key(&state, &profile.id)?;
-    let (all_chapters, settings, rewrite_parallelism) = {
+    let rewrite_profile = load_model_profile(&state, &profile_id)?;
+    let (all_chapters, settings, rewrite_parallelism, analysis_profile_id) = {
         let conn = state.conn.lock().map_err(to_string)?;
         let settings = require_novel_settings(&conn, &novel_id)?;
         (
             load_chapters_for_batch(&conn, &novel_id, &batch_id)?,
             settings,
             load_rewrite_parallelism(&conn)?,
+            load_analysis_profile_id(&conn)?,
         )
     };
+    let (profile, api_key) =
+        load_analysis_profile_for_run(&state, &rewrite_profile, analysis_profile_id.as_deref())?;
     if all_chapters.is_empty() {
         return Err("当前批次没有可分析的内容。".to_string());
     }

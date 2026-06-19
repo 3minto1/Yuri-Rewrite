@@ -2,6 +2,7 @@ import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   BookOpen,
+  ChartNoAxesCombined,
   CheckCircle2,
   ChevronDown,
   ClipboardList,
@@ -30,6 +31,7 @@ import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/No
 import { CoreSettingsPage } from "./components/pages/CoreSettingsPage";
 import { LogsPage } from "./components/pages/LogsPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
+import { TokenStatsPage } from "./components/pages/TokenStatsPage";
 import { BatchPanel } from "./components/Workspace/BatchPanel";
 import { ChapterList } from "./components/Workspace/ChapterList";
 import { ModelConfig } from "./components/Workspace/ModelConfig";
@@ -43,6 +45,7 @@ import { useModelProfiles } from "./hooks/useModelProfiles";
 import { useNovels } from "./hooks/useNovels";
 import { useNotice } from "./hooks/useNotice";
 import { useTaskState } from "./hooks/useTaskState";
+import { useAppStore } from "./store/appStore";
 import { invokeCommand as invoke } from "./tauriApi";
 import type {
   AiLog,
@@ -60,6 +63,7 @@ import type {
   NovelSettings,
   NovelSettingsDraft,
   ProfileDraft,
+  TokenUsageReport,
   UpdateCheckResult
 } from "./types";
 import { type AutoRunProgress, useAutoRunProgress } from "./useAutoRunProgress";
@@ -276,6 +280,14 @@ const jobPhaseText: Record<string, string> = {
   export: "导出"
 };
 
+function localDateString(date: Date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
 export default function App() {
   const {
     novels, setNovels, detail, setDetail, selectedChapterId, setSelectedChapterId,
@@ -301,7 +313,14 @@ export default function App() {
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "settings">("workspace");
+  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "token-stats" | "settings">("workspace");
+  const [tokenStats, setTokenStats] = useState<TokenUsageReport | null>(null);
+  const [tokenStatsStartDate, setTokenStatsStartDate] = useState(() => {
+    const date = new Date();
+    date.setDate(date.getDate() - 29);
+    return localDateString(date);
+  });
+  const [tokenStatsEndDate, setTokenStatsEndDate] = useState(() => localDateString(new Date()));
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const { notice, setNotice, showNotice } = useNotice(setPendingUpdate);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
@@ -683,6 +702,28 @@ export default function App() {
   async function refreshLogs(novelId = detail?.novel.id) {
     const rows = await invoke("list_ai_logs", { novelId: novelId ?? null });
     setLogs(rows);
+  }
+
+  async function refreshTokenStats() {
+    if (!tokenStatsStartDate || !tokenStatsEndDate) return;
+    setBusy("token-stats");
+    setNotice("");
+    try {
+      const report = await invoke("get_token_usage_stats", {
+        startDate: tokenStatsStartDate,
+        endDate: tokenStatsEndDate
+      });
+      setTokenStats(report);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function openTokenStats() {
+    setActiveView("token-stats");
+    void refreshTokenStats();
   }
 
   async function persistSelectedProfileId(profileId: string) {
@@ -1174,6 +1215,7 @@ export default function App() {
       core_prompt: settings.core_prompt ?? "",
       review_enabled: settings.review_enabled ?? false,
       review_profile_id: settings.review_profile_id ?? null,
+      analysis_profile_id: settings.analysis_profile_id ?? null,
       selected_profile_id: selectedProfileId || null,
       chapter_batch_size: settings.chapter_batch_size ?? 30,
       rewrite_parallelism: settings.rewrite_parallelism ?? 6,
@@ -1298,6 +1340,23 @@ export default function App() {
       });
       setSettings(saved);
       showNotice(value ? "已设置审查专家模型。" : "已恢复使用当前改写模型审查。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function setAnalysisProfileId(value: string) {
+    setBusy("analysis-profile-setting");
+    setNotice("");
+    try {
+      const saved = await invoke("save_app_settings", {
+        settings: appSettingsPayload({ analysis_profile_id: value || null })
+      });
+      setSettings(saved);
+      await refreshJobEstimate();
+      showNotice(value ? "已设置独立分析模型。" : "已恢复使用当前改写模型分析。");
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -1448,12 +1507,13 @@ export default function App() {
   }, [exportNovel]);
 
   const updateChapterFromBackend = useCallback((chapter: Chapter) => {
-    const current = detailRef.current;
+    const current = detailRef.current ?? useAppStore.getState().detail;
     if (!current || current.novel.id !== chapter.novel_id) return;
     const next = {
       ...current,
       chapters: current.chapters.map((item) => item.id === chapter.id ? chapter : item)
     };
+    detailRef.current = next;
     setDetail(next);
   }, [setDetail]);
 
@@ -1478,6 +1538,51 @@ export default function App() {
       throw error;
     }
   }, [showNotice, updateChapterFromBackend]);
+
+  const rewriteSingleChapter = useCallback(async (chapterId: string, instructions: string) => {
+    const currentDetail = detailRef.current;
+    const chapter = currentDetail?.chapters.find((item) => item.id === chapterId);
+    if (!currentDetail || !chapter || !selectedProfileId) {
+      throw new Error("当前小说、章节或改写模型不可用。");
+    }
+    setBusy("rewrite-chapter");
+    setNotice(`正在重新改写《${chapter.title}》…`);
+    try {
+      const updated = await invoke("rewrite_single_chapter", {
+        novelId: currentDetail.novel.id,
+        profileId: selectedProfileId,
+        chapterId,
+        instructions
+      });
+      updateChapterFromBackend(updated);
+      await refreshLogs(currentDetail.novel.id);
+      showNotice(`已重新改写完成《${updated.title}》。`);
+    } catch (error) {
+      showNotice(String(error));
+      throw error;
+    } finally {
+      setBusy("");
+    }
+  }, [selectedProfileId, setBusy, setNotice, showNotice, updateChapterFromBackend]);
+
+  const restoreSingleChapterRewrite = useCallback(async (chapterId: string) => {
+    const currentDetail = detailRef.current;
+    const chapter = currentDetail?.chapters.find((item) => item.id === chapterId);
+    if (!currentDetail || !chapter) {
+      throw new Error("当前小说或章节不可用。");
+    }
+    setBusy("restore-rewrite-chapter");
+    try {
+      const restored = await invoke("restore_single_chapter_rewrite", { chapterId });
+      updateChapterFromBackend(restored);
+      showNotice(`已恢复《${restored.title}》的初稿。`);
+    } catch (error) {
+      showNotice(String(error));
+      throw error;
+    } finally {
+      setBusy("");
+    }
+  }, [setBusy, showNotice, updateChapterFromBackend]);
 
   function diagnosisStatusText(status: DiagnosisStatus) {
     if (status === "ok") return "通过";
@@ -1599,7 +1704,7 @@ export default function App() {
         </div>
 
         <div className="side-section">
-          <div className="section-label">模型</div>
+          <div className="section-label">改写模型</div>
           <ModelProfiles
             profiles={profiles}
             selectedProfileId={selectedProfileId}
@@ -1620,6 +1725,14 @@ export default function App() {
             <ClipboardList size={17} />
             日志
           </button>
+          <button
+            className={activeView === "token-stats" ? "nav-button active" : "nav-button"}
+            onClick={openTokenStats}
+            disabled={busy !== ""}
+          >
+            <ChartNoAxesCombined size={17} />
+            Token统计
+          </button>
         </div>
 
         <div className="sidebar-spacer" />
@@ -1639,6 +1752,8 @@ export default function App() {
             <h1>
               {activeView === "logs"
                 ? "日志"
+                : activeView === "token-stats"
+                  ? "Token统计"
                 : activeView === "settings"
                   ? "设置"
                   : activeView === "novel-settings"
@@ -1650,6 +1765,8 @@ export default function App() {
             <p>
               {activeView === "logs"
                 ? "查看 AI 调用的思考过程与原始输出"
+                : activeView === "token-stats"
+                  ? "按模型和日期查看请求次数、输入与输出 Token"
                 : activeView === "settings"
                   ? ""
                   : activeView === "novel-settings"
@@ -1879,6 +1996,19 @@ export default function App() {
           />
         )}
 
+        {activeView === "token-stats" && (
+          <TokenStatsPage
+            report={tokenStats}
+            startDate={tokenStatsStartDate}
+            endDate={tokenStatsEndDate}
+            busy={busy === "token-stats"}
+            onStartDateChange={setTokenStatsStartDate}
+            onEndDateChange={setTokenStatsEndDate}
+            onRefresh={refreshTokenStats}
+            onBack={() => setActiveView("workspace")}
+          />
+        )}
+
         {activeView === "novel-settings" && (
           <NovelSettingsView
             draft={novelSettingsDraft}
@@ -1914,6 +2044,7 @@ export default function App() {
             onClearExportDir={clearExportDir}
             onToggleReview={toggleReviewEnabled}
             onReviewProfileChange={setReviewProfileId}
+            onAnalysisProfileChange={setAnalysisProfileId}
             onBatchSizeChange={setChapterBatchSize}
             onParallelismChange={setRewriteParallelism}
           />
@@ -1934,6 +2065,8 @@ export default function App() {
             editDisabledReason={compareEditDisabledReason}
             onSaveRewrite={saveChapterRewriteEdit}
             onRestoreRewrite={restoreChapterRewriteEdit}
+            onRewriteChapter={rewriteSingleChapter}
+            onRestoreInitialRewrite={restoreSingleChapterRewrite}
           />
         )}
 

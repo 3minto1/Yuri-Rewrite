@@ -1846,6 +1846,223 @@ label {
   max-width: 520px;
 }
 
+.rewrite-chapter-dialog {
+  max-width: 640px;
+}
+
+.rewrite-chapter-dialog textarea {
+  min-height: 160px;
+  resize: vertical;
+}
+
+.token-stats-page .page-heading p {
+  color: #776f65;
+  margin: 5px 0 0;
+}
+
+.token-date-filter {
+  align-items: end;
+  background: #fff;
+  border: 1px solid #ded9ce;
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+}
+
+.token-date-filter label {
+  color: #665e54;
+  display: grid;
+  font-size: 12px;
+  gap: 5px;
+}
+
+.token-date-filter input {
+  min-width: 150px;
+}
+
+.token-overview {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  margin-bottom: 14px;
+}
+
+.token-overview > div {
+  background: #fff;
+  border: 1px solid #ded9ce;
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+}
+
+.token-overview span {
+  color: #776f65;
+  font-size: 12px;
+}
+
+.token-overview strong {
+  font-size: 22px;
+}
+
+.token-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.token-model-card {
+  background: #fff;
+  border: 1px solid #ded9ce;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.token-model-card > header {
+  align-items: flex-start;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+}
+
+.token-model-card > header strong,
+.token-model-card > header span {
+  display: block;
+}
+
+.token-model-card > header strong {
+  font-size: 17px;
+}
+
+.token-model-card > header > div:first-child span {
+  color: #81786c;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.token-model-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  justify-content: flex-end;
+}
+
+.token-model-totals span {
+  color: #776f65;
+  font-size: 12px;
+}
+
+.token-model-totals b {
+  color: #2e2a25;
+  display: inline;
+  font-size: 13px;
+  margin-left: 4px;
+}
+
+.token-chart-grid {
+  display: grid;
+  gap: 22px;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 14px;
+}
+
+.token-chart {
+  min-width: 0;
+}
+
+.token-chart-title {
+  color: #5d554b;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.token-chart svg {
+  height: 220px;
+  overflow: visible;
+  width: 100%;
+}
+
+.token-chart svg text {
+  fill: #8a8176;
+  font-size: 4px;
+}
+
+.chart-axis,
+.chart-grid-line {
+  stroke: #d8d2c8;
+  stroke-width: 0.4;
+}
+
+.chart-grid-line {
+  stroke-dasharray: 1.4 1.4;
+}
+
+.request-area {
+  fill: rgb(58 130 246 / 22%);
+}
+
+.request-line {
+  fill: none;
+  stroke: #2477d4;
+  stroke-linejoin: round;
+  stroke-width: 1;
+}
+
+.input-token-bar {
+  fill: #4c9eed;
+}
+
+.output-token-bar {
+  fill: #9bd3f5;
+}
+
+.token-chart-legend {
+  color: #776f65;
+  display: flex;
+  font-size: 11px;
+  gap: 14px;
+  justify-content: flex-end;
+  margin-top: -10px;
+}
+
+.token-chart-legend span {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.token-chart-legend i {
+  border-radius: 2px;
+  height: 9px;
+  width: 9px;
+}
+
+.input-token-dot {
+  background: #4c9eed;
+}
+
+.output-token-dot {
+  background: #9bd3f5;
+}
+
+@media (max-width: 980px) {
+  .token-overview,
+  .token-chart-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .token-model-card > header {
+    flex-direction: column;
+  }
+
+  .token-model-totals {
+    justify-content: flex-start;
+  }
+}
+
 .diff-removed {
   background: #fde2df;
   color: #8d3126;

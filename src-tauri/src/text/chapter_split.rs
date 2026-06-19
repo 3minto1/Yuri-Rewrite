@@ -33,6 +33,7 @@ pub(crate) fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
             analysis_json: None,
             rewrite_text: None,
             rewrite_edited: false,
+            single_rewrite_original_available: false,
             analysis_status: "pending".to_string(),
             rewrite_status: "pending".to_string(),
         });
@@ -829,6 +830,7 @@ pub(crate) fn chunk_without_headings(novel_id: &str, text: &str) -> Vec<Chapter>
             analysis_json: None,
             rewrite_text: None,
             rewrite_edited: false,
+            single_rewrite_original_available: false,
             analysis_status: "pending".to_string(),
             rewrite_status: "pending".to_string(),
         })

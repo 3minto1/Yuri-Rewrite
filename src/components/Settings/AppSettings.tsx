@@ -12,12 +12,13 @@ type AppSettingsViewProps = {
   onClearExportDir: () => void;
   onToggleReview: () => void;
   onReviewProfileChange: (profileId: string) => void;
+  onAnalysisProfileChange: (profileId: string) => void;
   onBatchSizeChange: (value: 30 | 50 | 100) => void;
   onParallelismChange: (value: 1 | 3 | 6 | 10 | 25 | 50) => void;
 };
 
 export function AppSettingsView(props: AppSettingsViewProps) {
-  const { settings, profiles, busy, processing, allowPausedTaskAdjustments = false, onBack, onChooseExportDir, onClearExportDir, onToggleReview, onReviewProfileChange, onBatchSizeChange, onParallelismChange } = props;
+  const { settings, profiles, busy, processing, allowPausedTaskAdjustments = false, onBack, onChooseExportDir, onClearExportDir, onToggleReview, onReviewProfileChange, onAnalysisProfileChange, onBatchSizeChange, onParallelismChange } = props;
   const adjustmentDisabled = processing && !allowPausedTaskAdjustments;
   const batchSize = settings.chapter_batch_size ?? 30;
   const maxParallelism = batchSize === 100 ? 50 : batchSize === 50 ? 25 : 10;
@@ -30,6 +31,19 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <input readOnly value={settings.export_dir || "默认应用数据目录"} />
           <button onClick={onChooseExportDir} disabled={busy === "choose-export-dir" || processing}><FolderOpen size={16} />选择目录</button>
           <button onClick={onClearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir" || processing}>恢复默认</button>
+        </div>
+      </section>
+      <section className="settings-section">
+        <div className="settings-section-heading">
+          <h3>分析模型选择</h3>
+          <span className="setting-help" tabIndex={0} aria-label="分析模型选择说明"><HelpCircle size={16} /><span className="setting-help-tooltip" role="tooltip">左侧模型下拉框选择的是改写模型。这里可以单独指定分析模型，用于章节分析、原著一致性资产提取和姓名映射候选生成；留空时继续使用当前改写模型分析。</span></span>
+        </div>
+        <div className="setting-row">
+          <select value={settings.analysis_profile_id ?? ""} onChange={(event) => onAnalysisProfileChange(event.target.value)} disabled={busy === "analysis-profile-setting" || adjustmentDisabled} title="选择独立分析模型；留空则使用左侧当前改写模型">
+            <option value="">默认使用当前模型分析</option>
+            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.model}</option>)}
+          </select>
+          <span>左侧当前模型仍作为改写模型；一键任务会分别使用这里的分析模型和当前改写模型。</span>
         </div>
       </section>
       <section className="settings-section">

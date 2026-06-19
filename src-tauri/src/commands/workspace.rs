@@ -42,7 +42,11 @@ fn chapter_edit_is_allowed(
 
 fn load_chapter_by_id(conn: &rusqlite::Connection, chapter_id: &str) -> Result<Chapter, String> {
     conn.query_row(
-        "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, rewrite_edited_at IS NOT NULL, analysis_status, rewrite_status FROM chapters WHERE id = ?1",
+        "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text,
+            rewrite_edited_at IS NOT NULL,
+            EXISTS (SELECT 1 FROM chapter_rewrite_snapshots WHERE chapter_id = chapters.id),
+            analysis_status, rewrite_status
+         FROM chapters WHERE id = ?1",
         params![chapter_id],
         row_to_chapter,
     )
@@ -92,6 +96,58 @@ pub(crate) fn restore_chapter_rewrite_edit(
         return Err("当前章节没有可恢复的 AI 改写稿。".to_string());
     }
     load_chapter_by_id(&conn, &chapter_id)
+}
+
+#[tauri::command]
+pub(crate) fn restore_single_chapter_rewrite(
+    chapter_id: String,
+    state: State<AppState>,
+) -> Result<Chapter, String> {
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let chapter = load_chapter_by_id(&conn, &chapter_id)?;
+    chapter_edit_is_allowed(&state, &conn, &chapter)?;
+    restore_single_chapter_snapshot(&mut conn, &chapter_id)?;
+    load_chapter_by_id(&conn, &chapter_id)
+}
+
+fn restore_single_chapter_snapshot(
+    conn: &mut rusqlite::Connection,
+    chapter_id: &str,
+) -> Result<(), String> {
+    let snapshot = conn
+        .query_row(
+            "SELECT title, rewrite_text, ai_rewrite_text, rewrite_edited_at
+             FROM chapter_rewrite_snapshots WHERE chapter_id = ?1",
+            params![chapter_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "当前章节没有可恢复的初稿。".to_string(),
+            other => to_string(other),
+        })?;
+    let tx = conn.transaction().map_err(to_string)?;
+    tx.execute(
+        "UPDATE chapters
+         SET title = ?1, rewrite_text = ?2, ai_rewrite_text = ?3,
+             rewrite_edited_at = ?4, rewrite_status = 'completed'
+         WHERE id = ?5",
+        params![snapshot.0, snapshot.1, snapshot.2, snapshot.3, chapter_id],
+    )
+    .map_err(to_string)?;
+    tx.execute(
+        "DELETE FROM chapter_rewrite_snapshots WHERE chapter_id = ?1",
+        params![chapter_id],
+    )
+    .map_err(to_string)?;
+    tx.commit().map_err(to_string)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -220,4 +276,67 @@ pub(crate) fn update_canon_assets(
         .map_err(to_string)?;
     }
     load_canon_assets(&conn, &novel_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_db;
+    use rusqlite::Connection;
+
+    #[test]
+    fn restoring_single_chapter_snapshot_restores_exact_initial_state() {
+        let mut conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO novels (
+                id, title, source_path, encoding, status, detected_chapters, created_at
+             ) VALUES ('novel-1', '测试', '', 'utf-8', 'ready', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO chapters (
+                id, novel_id, chapter_index, title, original_text, analysis_json,
+                rewrite_text, ai_rewrite_text, rewrite_edited_at, analysis_status, rewrite_status
+             ) VALUES (
+                'chapter-1', 'novel-1', 1, '新标题', '原文', NULL,
+                '重新改写稿', '重新改写稿', NULL, 'completed', 'completed'
+             )",
+            [],
+        )
+        .expect("insert chapter");
+        conn.execute(
+            "INSERT INTO chapter_rewrite_snapshots (
+                chapter_id, title, rewrite_text, ai_rewrite_text, rewrite_edited_at, created_at
+             ) VALUES (
+                'chapter-1', '初始标题', '人工修改过的初稿', '最初 AI 稿', 'edited-at', 'now'
+             )",
+            [],
+        )
+        .expect("insert snapshot");
+
+        restore_single_chapter_snapshot(&mut conn, "chapter-1").expect("restore snapshot");
+
+        let restored: (String, String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT title, rewrite_text, ai_rewrite_text, rewrite_edited_at
+                 FROM chapters WHERE id = 'chapter-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load restored chapter");
+        assert_eq!(restored.0, "初始标题");
+        assert_eq!(restored.1, "人工修改过的初稿");
+        assert_eq!(restored.2.as_deref(), Some("最初 AI 稿"));
+        assert_eq!(restored.3.as_deref(), Some("edited-at"));
+        let snapshot_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chapter_rewrite_snapshots WHERE chapter_id = 'chapter-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count snapshots");
+        assert_eq!(snapshot_count, 0);
+    }
 }

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { clearDiffCache } from "./components/Compare/compareDiffCache";
 import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
 import type { AiLog, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
@@ -104,6 +105,9 @@ function installDefaultCommands() {
     if (command === "list_auto_run_recoveries") return recoveryRows;
     if (command === "get_novel_detail") return detail;
     if (command === "list_ai_logs") return [];
+    if (command === "get_token_usage_stats") {
+      return { start_date: "2026-05-21", end_date: "2026-06-19", requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
+    }
     if (command === "estimate_job_cost") return estimate;
     if (command === "check_for_updates") {
       return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
@@ -125,6 +129,7 @@ describe("App feature behavior", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
+    clearDiffCache();
     useAppStore.getState().reset();
     mocks.invoke.mockReset();
     mocks.progressCallback = undefined;
@@ -397,6 +402,129 @@ describe("App feature behavior", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("save_app_settings", {
       settings: expect.objectContaining({ chapter_batch_size: 100 })
     });
+  });
+
+  it("saves a separate analysis model while keeping the sidebar model as rewrite model", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile, secondProfile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "save_app_settings") return { ...settings, ...(args as { settings: AppSettings }).settings };
+      if (command === "check_for_updates") return { current_version: "0.3.2", latest_version: "0.3.2", latest_tag: "v0.3.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(screen.getByText("改写模型")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.change(screen.getByTitle("选择独立分析模型；留空则使用左侧当前改写模型"), {
+      target: { value: "profile-2" }
+    });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_app_settings", {
+      settings: expect.objectContaining({ analysis_profile_id: "profile-2" })
+    }));
+    expect(screen.getByText("已设置独立分析模型。")).toBeInTheDocument();
+  });
+
+  it("opens token statistics below logs and loads the selected date range", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "get_token_usage_stats") {
+        return {
+          start_date: "2026-05-21",
+          end_date: "2026-06-19",
+          requests: 2,
+          input_tokens: 1000,
+          output_tokens: 250,
+          models: [{
+            profile_id: "profile-1",
+            profile_name: "测试模型",
+            model: "test-model",
+            requests: 2,
+            input_tokens: 1000,
+            output_tokens: 250,
+            days: [{ date: "2026-06-19", requests: 2, input_tokens: 1000, output_tokens: 250 }]
+          }]
+        };
+      }
+      if (command === "check_for_updates") return { current_version: "0.3.2", latest_version: "0.3.2", latest_tag: "v0.3.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    expect(await screen.findByRole("heading", { name: "Token 统计" })).toBeInTheDocument();
+    expect(screen.getAllByText("test-model").length).toBeGreaterThan(0);
+    expect(mocks.invoke).toHaveBeenCalledWith("get_token_usage_stats", expect.objectContaining({
+      startDate: expect.any(String),
+      endDate: expect.any(String)
+    }));
+  });
+
+  it("rewrites one completed chapter from the compare page and replaces its text", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "rewrite_single_chapter") {
+        return {
+          ...detail.chapters[0],
+          rewrite_text: "单章重新生成后的正文",
+          single_rewrite_original_available: true
+        };
+      }
+      if (command === "restore_single_chapter_rewrite") {
+        return {
+          ...detail.chapters[0],
+          single_rewrite_original_available: false
+        };
+      }
+      if (command === "check_for_updates") return { current_version: "0.3.2", latest_version: "0.3.2", latest_tag: "v0.3.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    fireEvent.click(screen.getByRole("button", { name: "重写本章" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "单章重写补充要求" }), {
+      target: { value: "强化情绪互动" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确定改写" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("rewrite_single_chapter", {
+      novelId: "novel-1",
+      profileId: "profile-1",
+      chapterId: "chapter-1",
+      instructions: "强化情绪互动"
+    }));
+    await waitFor(() => expect(useAppStore.getState().detail?.chapters[0].rewrite_text).toBe("单章重新生成后的正文"));
+    await waitFor(() => expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("单章重新生成后的正文"));
+    expect(screen.getByText("已重新改写完成《第一章》。")).toBeInTheDocument();
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "恢复初稿" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("restore_single_chapter_rewrite", {
+      chapterId: "chapter-1"
+    }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "重写本章" })).toBeInTheDocument());
+    expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("改写内容");
+    expect(screen.getByText("已恢复《第一章》的初稿。")).toBeInTheDocument();
   });
 
   it("refreshes the estimate immediately after parallelism and batch size changes", async () => {

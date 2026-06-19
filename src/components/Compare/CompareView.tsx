@@ -1,4 +1,4 @@
-import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RotateCcw, Save, Search, X } from "lucide-react";
+import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RefreshCw, RotateCcw, Save, Search, X } from "lucide-react";
 import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { Chapter } from "../../types";
 import { Modal } from "../common/Modal";
@@ -21,6 +21,8 @@ type CompareViewProps = {
   editDisabledReason?: string;
   onSaveRewrite?: (chapterId: string, rewriteText: string) => Promise<void>;
   onRestoreRewrite?: (chapterId: string) => Promise<void>;
+  onRewriteChapter?: (chapterId: string, instructions: string) => Promise<void>;
+  onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
 };
 
 type DiffState = DiffResult & {
@@ -141,7 +143,9 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const {
     chapters, selectedChapter, selectedChapterId, busy, originalRef, rewriteRef,
     onSelectChapter, onBack, onExport, editingAllowed = false, editDisabledReason,
-    onSaveRewrite = async () => undefined, onRestoreRewrite = async () => undefined
+    onSaveRewrite = async () => undefined, onRestoreRewrite = async () => undefined,
+    onRewriteChapter = async () => undefined,
+    onRestoreInitialRewrite = async () => undefined
   } = props;
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -154,6 +158,9 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [editDraft, setEditDraft] = useState("");
   const [editBusy, setEditBusy] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(false);
+  const [rewriteDialogOpen, setRewriteDialogOpen] = useState(false);
+  const [rewriteInstructions, setRewriteInstructions] = useState("");
+  const [rewriteBusy, setRewriteBusy] = useState(false);
   const pendingNavigationRef = useRef<(() => void) | null>(null);
   const deferredQuery = useDeferredValue(query);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -208,6 +215,31 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     setQuery("");
     setActiveMatchIndex(null);
     setWrapped(false);
+  }
+
+  async function confirmRewriteChapter() {
+    if (!selectedChapter) return;
+    setRewriteBusy(true);
+    try {
+      await onRewriteChapter(selectedChapter.id, rewriteInstructions);
+      setRewriteDialogOpen(false);
+      setRewriteInstructions("");
+      setEditing(false);
+    } finally {
+      setRewriteBusy(false);
+    }
+  }
+
+  async function restoreInitialRewrite() {
+    if (!selectedChapter) return;
+    if (!window.confirm("恢复到单章重新改写前的初稿？当前重新改写结果和之后的人工修改将被覆盖。")) return;
+    setRewriteBusy(true);
+    try {
+      await onRestoreInitialRewrite(selectedChapter.id);
+      setEditing(false);
+    } finally {
+      setRewriteBusy(false);
+    }
   }
 
   function selectSearchMatch(index: number | null, didWrap = false) {
@@ -306,6 +338,23 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
         <div className="compare-toolbar-actions">
           <button className={searchOpen ? "active" : ""} aria-pressed={searchOpen} onClick={() => searchOpen ? closeSearch() : setSearchOpen(true)}><Search size={17} />查找</button>
           <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
+          {selectedChapter?.single_rewrite_original_available ? (
+            <button
+              onClick={() => runOrConfirmNavigation(() => void restoreInitialRewrite())}
+              disabled={!editingAllowed || rewriteBusy || busy !== ""}
+              title={editingAllowed ? "恢复到单章重新改写前的初稿" : editDisabledReason}
+            >
+              <RotateCcw size={17} />恢复初稿
+            </button>
+          ) : (
+            <button
+              onClick={() => runOrConfirmNavigation(() => setRewriteDialogOpen(true))}
+              disabled={!editingAllowed || !rewriteText.trim() || busy !== ""}
+              title={editingAllowed ? "使用当前改写模型重新生成本章并覆盖现有改写稿" : editDisabledReason}
+            >
+              <RefreshCw size={17} />重写本章
+            </button>
+          )}
           <button onClick={() => runOrConfirmNavigation(onBack)}><ArrowLeft size={17} />返回</button>
           <button onClick={onExport} disabled={busy !== ""}><Download size={17} />TXT</button>
         </div>
@@ -453,6 +502,35 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
               onClick={() => void saveEdit(false).then((saved) => { if (saved) finishPendingNavigation(); })}
             >
               保存并继续
+            </button>
+          </footer>
+        </Modal>
+      )}
+      {rewriteDialogOpen && selectedChapter && (
+        <Modal className="settings-dialog rewrite-chapter-dialog" labelledBy="rewrite-chapter-title">
+          <header className="dialog-titlebar">
+            <h2 id="rewrite-chapter-title">重新改写《{selectedChapter.title}》</h2>
+            <button className="icon-button" type="button" aria-label="关闭单章重写" onClick={() => setRewriteDialogOpen(false)} disabled={rewriteBusy}><X size={17} /></button>
+          </header>
+          <div className="dialog-body">
+            <p>可填写只适用于本章的补充要求。程序会复用现有分析、一致性资产、姓名映射和复检设置，完成后覆盖当前 AI 改写稿。</p>
+            <label className="field">
+              <span>本章补充要求（可选）</span>
+              <textarea
+                aria-label="单章重写补充要求"
+                rows={7}
+                value={rewriteInstructions}
+                onChange={(event) => setRewriteInstructions(event.target.value)}
+                placeholder="例如：加强两位女主在本章的情绪互动，但保持事件顺序和伏笔不变。"
+                disabled={rewriteBusy}
+                autoFocus
+              />
+            </label>
+          </div>
+          <footer className="dialog-actions">
+            <button type="button" onClick={() => setRewriteDialogOpen(false)} disabled={rewriteBusy}>取消</button>
+            <button className="dialog-primary" type="button" onClick={() => void confirmRewriteChapter()} disabled={rewriteBusy}>
+              {rewriteBusy ? "正在改写…" : "确定改写"}
             </button>
           </footer>
         </Modal>

@@ -16,6 +16,7 @@ export type Chapter = {
   analysis_json?: string | null;
   rewrite_text?: string | null;
   rewrite_edited?: boolean;
+  single_rewrite_original_available?: boolean;
   analysis_status: string;
   rewrite_status: string;
 };
@@ -141,9 +142,36 @@ export type AppSettings = {
   core_prompt?: string;
   review_enabled?: boolean;
   review_profile_id?: string | null;
+  analysis_profile_id?: string | null;
   selected_profile_id?: string | null;
   chapter_batch_size?: 30 | 50 | 100;
   rewrite_parallelism?: 1 | 3 | 6 | 10 | 25 | 50;
+};
+
+export type TokenUsageDay = {
+  date: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+};
+
+export type TokenUsageModel = {
+  profile_id: string;
+  profile_name: string;
+  model: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  days: TokenUsageDay[];
+};
+
+export type TokenUsageReport = {
+  start_date: string;
+  end_date: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  models: TokenUsageModel[];
 };
 
 export type UpdateCheckResult = {

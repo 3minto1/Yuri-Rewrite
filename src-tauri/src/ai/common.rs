@@ -217,6 +217,19 @@ pub(crate) fn load_review_profile_for_run(
     Ok((Some(profile), Some(api_key)))
 }
 
+pub(crate) fn load_analysis_profile_for_run(
+    state: &State<'_, AppState>,
+    rewrite_profile: &ModelProfile,
+    analysis_profile_id: Option<&str>,
+) -> Result<(ModelProfile, String), String> {
+    let profile = match crate::normalize_analysis_profile_id(analysis_profile_id) {
+        Some(profile_id) => load_model_profile(state, &profile_id)?,
+        None => rewrite_profile.clone(),
+    };
+    let api_key = read_stored_api_key(state, &profile.id)?;
+    Ok((profile, api_key))
+}
+
 pub(crate) fn prepare_prompt_for_profile(
     profile: &ModelProfile,
     system: &str,

@@ -127,6 +127,13 @@ pub(crate) fn delete_model_profile(
             params![profile_id],
         )
         .map_err(to_string)?;
+        tx.execute(
+            "DELETE FROM app_settings
+             WHERE key IN ('selected_profile_id', 'review_profile_id', 'analysis_profile_id')
+               AND value = ?1",
+            params![profile_id],
+        )
+        .map_err(to_string)?;
         tx.commit().map_err(to_string)?;
         Ok(())
     })();

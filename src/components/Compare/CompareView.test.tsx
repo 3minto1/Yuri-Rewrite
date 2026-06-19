@@ -10,8 +10,18 @@ const chapters: Chapter[] = [
   { id: "c2", novel_id: "n1", index: 2, title: "第二章", original_text: "第二章也有目标", rewrite_text: "最终目标", analysis_status: "completed", rewrite_status: "completed" }
 ];
 
-function Harness({ onBack = vi.fn() }: { onBack?: () => void }) {
-  const [chapterRows, setChapterRows] = useState(chapters);
+function Harness({
+  onBack = vi.fn(),
+  onRewriteChapter = vi.fn(async () => undefined),
+  onRestoreInitialRewrite = vi.fn(async () => undefined),
+  initialChapters = chapters
+}: {
+  onBack?: () => void;
+  onRewriteChapter?: (chapterId: string, instructions: string) => Promise<void>;
+  onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
+  initialChapters?: Chapter[];
+}) {
+  const [chapterRows, setChapterRows] = useState(initialChapters);
   const [selectedChapterId, setSelectedChapterId] = useState("c1");
   return (
     <CompareView
@@ -35,6 +45,8 @@ function Harness({ onBack = vi.fn() }: { onBack?: () => void }) {
           ? { ...chapter, rewrite_text: chapters.find((source) => source.id === chapterId)?.rewrite_text, rewrite_edited: false }
           : chapter));
       }}
+      onRewriteChapter={onRewriteChapter}
+      onRestoreInitialRewrite={onRestoreInitialRewrite}
     />
   );
 }
@@ -89,6 +101,43 @@ describe("CompareView", () => {
     expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c1");
     fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c2"));
+  });
+
+  it("collects optional instructions before rewriting the current chapter", async () => {
+    const onRewriteChapter = vi.fn(async () => undefined);
+    render(<Harness onRewriteChapter={onRewriteChapter} />);
+    fireEvent.click(screen.getByRole("button", { name: "重写本章" }));
+    const dialog = screen.getByRole("dialog", { name: "重新改写《第一章》" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "单章重写补充要求" }), {
+      target: { value: "加强双女主互动，但不要改变伏笔。" }
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确定改写" }));
+    await waitFor(() => expect(onRewriteChapter).toHaveBeenCalledWith(
+      "c1",
+      "加强双女主互动，但不要改变伏笔。"
+    ));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "重新改写《第一章》" })).not.toBeInTheDocument());
+  });
+
+  it("offers to restore the initial draft after a single-chapter rewrite", async () => {
+    const onRestoreInitialRewrite = vi.fn(async () => undefined);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <Harness
+        initialChapters={[
+          { ...chapters[0], single_rewrite_original_available: true },
+          chapters[1]
+        ]}
+        onRestoreInitialRewrite={onRestoreInitialRewrite}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: "重写本章" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "恢复初稿" }));
+    await waitFor(() => expect(onRestoreInitialRewrite).toHaveBeenCalledWith("c1"));
+    expect(window.confirm).toHaveBeenCalledWith(
+      "恢复到单章重新改写前的初稿？当前重新改写结果和之后的人工修改将被覆盖。"
+    );
   });
 
   afterEach(() => {
