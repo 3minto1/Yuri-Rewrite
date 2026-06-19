@@ -225,86 +225,92 @@ pub(crate) async fn rewrite_single_chapter(
     let _active_task = state
         .active_tasks
         .acquire(&novel_id, active_profile_ids, "重新改写本章")?;
-
-    ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
-    let canon_assets = {
-        let conn = state.conn.lock().map_err(to_string)?;
-        load_canon_assets(&conn, &novel_id)?
-    };
-    let target = vec![chapter.clone()];
-    let canon_text = build_relevant_canon_text(&canon_assets, &target, &settings);
-    let custom_instructions = instructions.trim();
-    let single_chapter_core_prompt = if custom_instructions.is_empty() {
-        core_prompt.clone()
-    } else if core_prompt.trim().is_empty() {
-        format!(
-            "【本次单章重写补充要求】\n{}\n以上要求仅适用于当前目标章节；不得改写相邻只读章节，不得破坏既有姓名映射、人物关系和剧情连续性。",
-            custom_instructions
-        )
-    } else {
-        format!(
-            "{}\n\n【本次单章重写补充要求】\n{}\n以上要求仅适用于当前目标章节；不得改写相邻只读章节，不得破坏既有姓名映射、人物关系和剧情连续性。",
-            core_prompt.trim(),
-            custom_instructions
-        )
-    };
-
+    let cancellation = state.single_rewrite_tasks.register(&novel_id)?;
     set_chapter_status(&state, &chapter.id, "rewrite_status", "running")?;
-    let result = if source_mode == "rewrite" {
-        let adjacent_context = build_single_chapter_adjacent_context(&all_chapters, &chapter);
-        let prompt = build_single_chapter_rewrite_from_draft_prompt(
-            &chapter,
-            &canon_text,
-            &settings,
-            &core_prompt,
-            &adjacent_context,
-            custom_instructions,
-        );
-        match generate_text(
-            &state.client,
-            Some(state.rate_limits.clone()),
-            &profile,
-            &api_key,
-            SYSTEM_REWRITE_EXPERT,
-            &prompt,
-            false,
-        )
-        .await
-        {
-            Ok(output) => {
-                append_ai_log(
-                    &state,
-                    Some(&novel_id),
-                    &profile.id,
-                    "单章基于改写稿重写",
-                    Some(&chapter.title),
-                    "success",
-                    &format_model_log_content(&output, &profile, None),
-                    output.reasoning.as_deref(),
-                    Some(&output.raw_response),
-                )?;
-                parse_rewrite_model_output(&output, &target)
+    let operation = async {
+        ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
+        let canon_assets = {
+            let conn = state.conn.lock().map_err(to_string)?;
+            load_canon_assets(&conn, &novel_id)?
+        };
+        let target = vec![chapter.clone()];
+        let canon_text = build_relevant_canon_text(&canon_assets, &target, &settings);
+        let custom_instructions = instructions.trim();
+        let single_chapter_core_prompt = if custom_instructions.is_empty() {
+            core_prompt.clone()
+        } else if core_prompt.trim().is_empty() {
+            format!(
+                "【本次单章重写补充要求】\n{}\n以上要求仅适用于当前目标章节；不得改写相邻只读章节，不得破坏既有姓名映射、人物关系和剧情连续性。",
+                custom_instructions
+            )
+        } else {
+            format!(
+                "{}\n\n【本次单章重写补充要求】\n{}\n以上要求仅适用于当前目标章节；不得改写相邻只读章节，不得破坏既有姓名映射、人物关系和剧情连续性。",
+                core_prompt.trim(),
+                custom_instructions
+            )
+        };
+
+        if source_mode == "rewrite" {
+            let adjacent_context = build_single_chapter_adjacent_context(&all_chapters, &chapter);
+            let prompt = build_single_chapter_rewrite_from_draft_prompt(
+                &chapter,
+                &canon_text,
+                &settings,
+                &core_prompt,
+                &adjacent_context,
+                custom_instructions,
+            );
+            match generate_text(
+                &state.client,
+                Some(state.rate_limits.clone()),
+                &profile,
+                &api_key,
+                SYSTEM_REWRITE_EXPERT,
+                &prompt,
+                false,
+            )
+            .await
+            {
+                Ok(output) => {
+                    append_ai_log(
+                        &state,
+                        Some(&novel_id),
+                        &profile.id,
+                        "单章基于改写稿重写",
+                        Some(&chapter.title),
+                        "success",
+                        &format_model_log_content(&output, &profile, None),
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    parse_rewrite_model_output(&output, &target)
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
+        } else {
+            rewrite_batch_with_parallelism(
+                &state,
+                &novel_id,
+                &profile,
+                &api_key,
+                &all_chapters,
+                &target,
+                &canon_text,
+                &settings,
+                &single_chapter_core_prompt,
+                review_enabled,
+                review_profile.as_ref(),
+                review_api_key.as_deref(),
+                rewrite_parallelism,
+                None,
+            )
+            .await
         }
-    } else {
-        rewrite_batch_with_parallelism(
-            &state,
-            &novel_id,
-            &profile,
-            &api_key,
-            &all_chapters,
-            &target,
-            &canon_text,
-            &settings,
-            &single_chapter_core_prompt,
-            review_enabled,
-            review_profile.as_ref(),
-            review_api_key.as_deref(),
-            rewrite_parallelism,
-            None,
-        )
-        .await
+    };
+    let result = tokio::select! {
+        result = operation => result,
+        _ = cancellation.cancelled() => Err("单章重写已终止。".to_string()),
     };
     let rewrites = match result {
         Ok(rewrites) => rewrites,
@@ -322,6 +328,18 @@ pub(crate) async fn rewrite_single_chapter(
         .into_iter()
         .find(|item| item.id == chapter.id)
         .ok_or_else(|| "重新改写已完成，但刷新章节失败。".to_string())
+}
+
+#[tauri::command]
+pub(crate) fn terminate_single_chapter_rewrite(
+    novel_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if state.single_rewrite_tasks.cancel(&novel_id)? {
+        Ok(())
+    } else {
+        Err("当前小说没有正在运行的单章重写任务。".to_string())
+    }
 }
 
 fn build_single_chapter_adjacent_context(chapters: &[Chapter], target: &Chapter) -> String {

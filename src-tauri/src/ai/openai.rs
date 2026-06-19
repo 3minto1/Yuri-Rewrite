@@ -11,6 +11,7 @@ pub(crate) async fn generate_openai_compatible(
     system: &str,
     user: &str,
     prefer_json_output: bool,
+    output_limit_override: Option<usize>,
 ) -> Result<ModelOutput, ModelResponseError> {
     let base = profile.base_url.trim().trim_end_matches('/');
     let model = normalize_model_name(base, &profile.model);
@@ -33,7 +34,14 @@ pub(crate) async fn generate_openai_compatible(
             payload["response_format"] = response_format;
         }
     }
-    apply_openai_compatible_output_limit(&mut payload, profile, base, &model, prefer_json_output);
+    apply_openai_compatible_output_limit(
+        &mut payload,
+        profile,
+        base,
+        &model,
+        prefer_json_output,
+        output_limit_override,
+    );
     let added_thinking_control =
         apply_openai_compatible_thinking_control(&mut payload, profile, base, &model);
     let response = client

@@ -47,6 +47,10 @@ impl ModelResponseError {
     pub(crate) fn retry_after(&self) -> Option<Duration> {
         self.retry_after
     }
+
+    pub(crate) fn is_client_parameter_error(&self) -> bool {
+        matches!(self.status, Some(400 | 422))
+    }
 }
 
 impl fmt::Display for ModelResponseError {
@@ -107,6 +111,16 @@ pub(crate) fn model_output_truncation_error(raw_response: &str) -> Option<String
             reason.trim()
         )
     })
+}
+
+pub(crate) fn model_output_finish_reason(raw_response: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(raw_response).ok()?;
+    value["choices"][0]["finish_reason"]
+        .as_str()
+        .or_else(|| value["candidates"][0]["finishReason"].as_str())
+        .or_else(|| value["stop_reason"].as_str())
+        .or_else(|| value["incomplete_details"]["reason"].as_str())
+        .map(str::to_string)
 }
 
 pub(crate) fn should_retry_without_thinking(status: u16, body: &str) -> bool {
@@ -209,5 +223,23 @@ mod tests {
         )
         .is_none());
         assert!(model_output_truncation_error("not json").is_none());
+    }
+
+    #[test]
+    fn extracts_finish_reason_before_log_response_is_truncated() {
+        assert_eq!(
+            model_output_finish_reason(
+                &json!({"choices": [{"finish_reason": "length"}]}).to_string()
+            )
+            .as_deref(),
+            Some("length")
+        );
+        assert_eq!(
+            model_output_finish_reason(
+                &json!({"candidates": [{"finishReason": "MAX_TOKENS"}]}).to_string()
+            )
+            .as_deref(),
+            Some("MAX_TOKENS")
+        );
     }
 }

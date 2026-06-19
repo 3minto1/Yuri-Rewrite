@@ -135,6 +135,7 @@ export type AiLog = {
   content: string;
   reasoning?: string | null;
   raw_response?: string | null;
+  finish_reason?: string | null;
   created_at: string;
 };
 

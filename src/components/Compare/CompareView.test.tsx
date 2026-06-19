@@ -13,6 +13,7 @@ const chapters: Chapter[] = [
 function Harness({
   onBack = vi.fn(),
   onRewriteChapter = vi.fn(async () => undefined),
+  onTerminateRewrite = vi.fn(async () => undefined),
   onRestoreInitialRewrite = vi.fn(async () => undefined),
   initialChapters = chapters
 }: {
@@ -22,6 +23,7 @@ function Harness({
     instructions: string,
     sourceMode: "original" | "rewrite"
   ) => Promise<void>;
+  onTerminateRewrite?: () => Promise<void>;
   onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
   initialChapters?: Chapter[];
 }) {
@@ -50,6 +52,7 @@ function Harness({
           : chapter));
       }}
       onRewriteChapter={onRewriteChapter}
+      onTerminateRewrite={onTerminateRewrite}
       onRestoreInitialRewrite={onRestoreInitialRewrite}
     />
   );
@@ -122,6 +125,34 @@ describe("CompareView", () => {
       "加强双女主互动，但不要改变伏笔。",
       "original"
     ));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "根据原文重新改写《第一章》" })).not.toBeInTheDocument());
+  });
+
+  it("shows a terminate button while a single-chapter rewrite is running", async () => {
+    let finishRewrite: (() => void) | undefined;
+    const onRewriteChapter = vi.fn(() => new Promise<void>((resolve) => {
+      finishRewrite = resolve;
+    }));
+    const onTerminateRewrite = vi.fn(async () => undefined);
+    render(
+      <Harness
+        onRewriteChapter={onRewriteChapter}
+        onTerminateRewrite={onTerminateRewrite}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重写本章（原文）" }));
+    const dialog = screen.getByRole("dialog", { name: "根据原文重新改写《第一章》" });
+    expect(within(dialog).queryByRole("button", { name: "终止" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "确定改写" }));
+
+    const terminateButton = await within(dialog).findByRole("button", { name: "终止" });
+    expect(terminateButton).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+    fireEvent.click(terminateButton);
+    await waitFor(() => expect(onTerminateRewrite).toHaveBeenCalledOnce());
+
+    finishRewrite?.();
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "根据原文重新改写《第一章》" })).not.toBeInTheDocument());
   });
 

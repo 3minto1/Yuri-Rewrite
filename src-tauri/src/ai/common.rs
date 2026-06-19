@@ -1,5 +1,5 @@
 use crate::domain::{AppState, ModelOutput, ModelProfile};
-use crate::model_support::ModelResponseError;
+use crate::model_support::{model_output_truncation_error, ModelResponseError};
 use crate::rate_limit::{
     is_rate_limit_retry_exhausted, parse_retry_after, RateLimitCoordinator, RateLimitScope,
     MAX_RATE_LIMIT_RETRIES, RATE_LIMIT_RETRY_EXHAUSTED,
@@ -131,8 +131,17 @@ pub(crate) fn apply_openai_compatible_output_limit(
     base_url: &str,
     model: &str,
     prefer_json_output: bool,
+    output_limit_override: Option<usize>,
 ) -> bool {
-    let output_limit = if prefer_json_output { 16_384 } else { 65_536 };
+    let output_limit = output_limit_override.unwrap_or_else(|| {
+        if prefer_json_output && is_doubao_profile(profile, base_url, model) {
+            32_768
+        } else if prefer_json_output {
+            16_384
+        } else {
+            65_536
+        }
+    });
 
     if is_deepseek_profile(profile, base_url, model) {
         payload["max_tokens"] = json!(output_limit);
@@ -292,7 +301,16 @@ pub(crate) async fn generate_text(
                 tokio::time::sleep(delay).await;
             }
         }
-        match generate_text_once(client, profile, api_key, system, user, prefer_json_output).await {
+        match generate_text_with_doubao_length_retry(
+            client,
+            profile,
+            api_key,
+            system,
+            user,
+            prefer_json_output,
+        )
+        .await
+        {
             Ok(output) => {
                 if let Some(rate_limiter) = rate_limiter.as_ref() {
                     rate_limiter.record_success(&scope)?;
@@ -330,6 +348,48 @@ pub(crate) async fn generate_text(
     }
 }
 
+async fn generate_text_with_doubao_length_retry(
+    client: &Client,
+    profile: &ModelProfile,
+    api_key: &str,
+    system: &str,
+    user: &str,
+    prefer_json_output: bool,
+) -> Result<ModelOutput, ModelResponseError> {
+    let first = generate_text_once(
+        client,
+        profile,
+        api_key,
+        system,
+        user,
+        prefer_json_output,
+        None,
+    )
+    .await?;
+    if !prefer_json_output
+        || !is_doubao_profile(profile, &profile.base_url, &profile.model)
+        || model_output_truncation_error(&first.raw_response).is_none()
+    {
+        return Ok(first);
+    }
+
+    match generate_text_once(
+        client,
+        profile,
+        api_key,
+        system,
+        user,
+        prefer_json_output,
+        Some(65_536),
+    )
+    .await
+    {
+        Ok(output) => Ok(output),
+        Err(error) if error.is_client_parameter_error() => Ok(first),
+        Err(error) => Err(error),
+    }
+}
+
 async fn generate_text_once(
     client: &Client,
     profile: &ModelProfile,
@@ -337,6 +397,7 @@ async fn generate_text_once(
     system: &str,
     user: &str,
     prefer_json_output: bool,
+    output_limit_override: Option<usize>,
 ) -> Result<ModelOutput, ModelResponseError> {
     let started = Instant::now();
     let (system, user) = prepare_prompt_for_profile(profile, system, user);
@@ -352,6 +413,7 @@ async fn generate_text_once(
             &system,
             &user,
             prefer_json_output,
+            output_limit_override,
         )
         .await
     }?;
@@ -568,6 +630,11 @@ pub(crate) fn apply_reasoning_parameter(
         return true;
     }
 
+    if is_doubao_profile(profile, base_url, model) {
+        payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
+        return true;
+    }
+
     if is_siliconflow_profile(profile, base_url) {
         payload["thinking_budget"] = json!(if enabled { 1024 } else { 0 });
         return true;
@@ -651,7 +718,8 @@ mod tests {
             &profile,
             &profile.base_url,
             &profile.model,
-            false
+            false,
+            None
         ));
         assert_eq!(payload["max_tokens"], json!(65_536));
         assert!(payload.get("max_completion_tokens").is_none());
@@ -673,7 +741,8 @@ mod tests {
                 &profile,
                 &profile.base_url,
                 &profile.model,
-                false
+                false,
+                None
             ));
             assert_eq!(payload["max_completion_tokens"], json!(65_536));
             assert!(payload.get("max_tokens").is_none());
@@ -693,7 +762,8 @@ mod tests {
                 &profile,
                 &profile.base_url,
                 &profile.model,
-                false
+                false,
+                None
             ));
             assert_eq!(payload["max_completion_tokens"], json!(65_536));
             assert!(payload.get("max_tokens").is_none());
@@ -721,7 +791,8 @@ mod tests {
                 &profile,
                 &profile.base_url,
                 &profile.model,
-                false
+                false,
+                None
             ));
             assert_eq!(payload["max_tokens"], json!(65_536));
             assert!(payload.get("max_completion_tokens").is_none());
@@ -737,7 +808,8 @@ mod tests {
             &profile,
             &profile.base_url,
             &profile.model,
-            true
+            true,
+            None
         ));
         assert_eq!(payload["max_tokens"], json!(16_384));
     }
@@ -751,9 +823,58 @@ mod tests {
             &profile,
             &profile.base_url,
             &profile.model,
-            false
+            false,
+            None
         ));
         assert_eq!(payload, json!({}));
+    }
+
+    #[test]
+    fn doubao_json_output_uses_32k_and_accepts_64k_override() {
+        let profile = profile(
+            "OpenAI 兼容",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "doubao-seed-2.0-pro",
+        );
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_output_limit(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model,
+            true,
+            None
+        ));
+        assert_eq!(payload["max_completion_tokens"], json!(32_768));
+
+        let mut retry_payload = json!({});
+        assert!(apply_openai_compatible_output_limit(
+            &mut retry_payload,
+            &profile,
+            &profile.base_url,
+            &profile.model,
+            true,
+            Some(65_536)
+        ));
+        assert_eq!(retry_payload["max_completion_tokens"], json!(65_536));
+    }
+
+    #[test]
+    fn doubao_thinking_mode_uses_official_thinking_parameter() {
+        let mut profile = profile(
+            "OpenAI 兼容",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "doubao-seed-2.0-pro",
+        );
+        profile.thinking_mode = "off".to_string();
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
     }
 
     #[test]

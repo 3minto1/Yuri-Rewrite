@@ -74,6 +74,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             content TEXT NOT NULL,
             reasoning TEXT,
             raw_response TEXT,
+            finish_reason TEXT,
             input_tokens INTEGER,
             output_tokens INTEGER,
             created_at TEXT NOT NULL
@@ -168,6 +169,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     migrations::ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
+    migrations::ensure_column(conn, "ai_logs", "finish_reason", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "input_tokens", "INTEGER")?;
     migrations::ensure_column(conn, "ai_logs", "output_tokens", "INTEGER")?;
     backfill_ai_log_token_usage(conn)?;

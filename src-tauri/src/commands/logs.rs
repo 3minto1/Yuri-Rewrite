@@ -16,7 +16,7 @@ pub(crate) fn list_ai_logs(
     if let Some(novel_id) = novel_id {
         let mut stmt = conn
             .prepare(
-                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, created_at FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL ORDER BY created_at DESC LIMIT 80",
+                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, finish_reason, created_at FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL ORDER BY created_at DESC LIMIT 80",
             )
             .map_err(to_string)?;
         let logs = stmt
@@ -28,7 +28,7 @@ pub(crate) fn list_ai_logs(
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, created_at FROM ai_logs ORDER BY created_at DESC LIMIT 80",
+                "SELECT id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, finish_reason, created_at FROM ai_logs ORDER BY created_at DESC LIMIT 80",
             )
             .map_err(to_string)?;
         let logs = stmt

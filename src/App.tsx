@@ -1597,6 +1597,17 @@ export default function App() {
     }
   }, [setBusy, showNotice, updateChapterFromBackend]);
 
+  const terminateSingleChapterRewrite = useCallback(async () => {
+    const currentDetail = detailRef.current;
+    if (!currentDetail) {
+      throw new Error("当前小说不可用。");
+    }
+    await invoke("terminate_single_chapter_rewrite", {
+      novelId: currentDetail.novel.id
+    });
+    setNotice("正在终止当前单章重写任务…");
+  }, [setNotice]);
+
   function diagnosisStatusText(status: DiagnosisStatus) {
     if (status === "ok") return "通过";
     if (status === "warning") return "警告";
@@ -2079,6 +2090,7 @@ export default function App() {
             onSaveRewrite={saveChapterRewriteEdit}
             onRestoreRewrite={restoreChapterRewriteEdit}
             onRewriteChapter={rewriteSingleChapter}
+            onTerminateRewrite={terminateSingleChapterRewrite}
             onRestoreInitialRewrite={restoreSingleChapterRewrite}
           />
         )}

@@ -1,4 +1,4 @@
-import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RefreshCw, RotateCcw, Save, Search, X } from "lucide-react";
+import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RefreshCw, RotateCcw, Save, Search, Square, X } from "lucide-react";
 import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { Chapter } from "../../types";
 import { Modal } from "../common/Modal";
@@ -26,6 +26,7 @@ type CompareViewProps = {
     instructions: string,
     sourceMode: "original" | "rewrite"
   ) => Promise<void>;
+  onTerminateRewrite?: () => Promise<void>;
   onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
 };
 
@@ -149,6 +150,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     onSelectChapter, onBack, onExport, editingAllowed = false, editDisabledReason,
     onSaveRewrite = async () => undefined, onRestoreRewrite = async () => undefined,
     onRewriteChapter = async () => undefined,
+    onTerminateRewrite = async () => undefined,
     onRestoreInitialRewrite = async () => undefined
   } = props;
   const [searchOpen, setSearchOpen] = useState(false);
@@ -167,6 +169,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [rewriteMenuOpen, setRewriteMenuOpen] = useState(false);
   const [rewriteInstructions, setRewriteInstructions] = useState("");
   const [rewriteBusy, setRewriteBusy] = useState(false);
+  const [terminateRewriteBusy, setTerminateRewriteBusy] = useState(false);
   const pendingNavigationRef = useRef<(() => void) | null>(null);
   const deferredQuery = useDeferredValue(query);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -233,6 +236,15 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
       setEditing(false);
     } finally {
       setRewriteBusy(false);
+    }
+  }
+
+  async function terminateRewriteChapter() {
+    setTerminateRewriteBusy(true);
+    try {
+      await onTerminateRewrite();
+    } finally {
+      setTerminateRewriteBusy(false);
     }
   }
 
@@ -585,6 +597,16 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
             </label>
           </div>
           <footer className="dialog-actions">
+            {rewriteBusy && (
+              <button
+                className="dialog-danger"
+                type="button"
+                onClick={() => void terminateRewriteChapter()}
+                disabled={terminateRewriteBusy}
+              >
+                <Square size={16} />{terminateRewriteBusy ? "终止中…" : "终止"}
+              </button>
+            )}
             <button type="button" onClick={() => setRewriteDialogOpen(false)} disabled={rewriteBusy}>取消</button>
             <button className="dialog-primary" type="button" onClick={() => void confirmRewriteChapter()} disabled={rewriteBusy}>
               {rewriteBusy ? "正在改写…" : "确定改写"}

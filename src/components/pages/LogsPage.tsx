@@ -32,7 +32,9 @@ export function LogsPage({ logs, busy, onBack, onClear, onRefresh }: LogsPagePro
                 <strong>{log.action}</strong>
                 <span>{log.chapter_title || "全局调用"} · {new Date(log.created_at).toLocaleString()}</span>
               </div>
-              <span className="log-status">{log.status}</span>
+              <span className="log-status">
+                {log.status}{log.finish_reason ? ` · ${log.finish_reason}` : ""}
+              </span>
             </header>
             {log.reasoning && <section><h3>思考过程</h3><pre>{log.reasoning}</pre></section>}
             <section><h3>输出文本</h3><pre>{log.content || "无正文内容。"}</pre></section>

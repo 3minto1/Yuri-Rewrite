@@ -1,4 +1,5 @@
 use crate::domain::AppState;
+use crate::model_support::model_output_finish_reason;
 use crate::{to_string, truncate_text};
 use chrono::Utc;
 use rusqlite::params;
@@ -60,9 +61,10 @@ pub(crate) fn append_ai_log(
     raw_response: Option<&str>,
 ) -> Result<(), String> {
     let token_usage = extract_token_usage(raw_response);
+    let finish_reason = raw_response.and_then(model_output_finish_reason);
     let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
-        "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, input_tokens, output_tokens, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, finish_reason, input_tokens, output_tokens, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             Uuid::new_v4().to_string(),
             novel_id,
@@ -73,6 +75,7 @@ pub(crate) fn append_ai_log(
             truncate_text(content, 12_000),
             reasoning.map(|value| truncate_text(value, 12_000)),
             raw_response.map(|value| truncate_text(value, 24_000)),
+            finish_reason,
             token_usage.map(|usage| usage.0 as i64),
             token_usage.map(|usage| usage.1 as i64),
             Utc::now().to_rfc3339()

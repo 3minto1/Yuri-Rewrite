@@ -2,8 +2,12 @@ use crate::domain::ActiveShardProgress;
 use rusqlite::Connection;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveTask {
@@ -77,6 +81,80 @@ impl Drop for ActiveTaskPermit<'_> {
     fn drop(&mut self) {
         if let Ok(mut tasks) = self.registry.tasks.lock() {
             tasks.remove(&self.novel_id);
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CancellableTaskRegistry {
+    tasks: Mutex<HashMap<String, Arc<CancellationSignal>>>,
+}
+
+#[derive(Default)]
+struct CancellationSignal {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+pub(crate) struct CancellableTaskPermit<'a> {
+    registry: &'a CancellableTaskRegistry,
+    novel_id: String,
+    signal: Arc<CancellationSignal>,
+}
+
+impl CancellableTaskRegistry {
+    pub(crate) fn register(&self, novel_id: &str) -> Result<CancellableTaskPermit<'_>, String> {
+        let mut tasks = self.tasks.lock().map_err(|error| error.to_string())?;
+        if tasks.contains_key(novel_id) {
+            return Err("当前小说已有可终止的单章重写任务。".to_string());
+        }
+        let signal = Arc::new(CancellationSignal::default());
+        tasks.insert(novel_id.to_string(), signal.clone());
+        Ok(CancellableTaskPermit {
+            registry: self,
+            novel_id: novel_id.to_string(),
+            signal,
+        })
+    }
+
+    pub(crate) fn cancel(&self, novel_id: &str) -> Result<bool, String> {
+        let signal = {
+            let tasks = self.tasks.lock().map_err(|error| error.to_string())?;
+            tasks.get(novel_id).cloned()
+        };
+        let Some(signal) = signal else {
+            return Ok(false);
+        };
+        signal.cancelled.store(true, Ordering::Release);
+        signal.notify.notify_waiters();
+        Ok(true)
+    }
+}
+
+impl CancellableTaskPermit<'_> {
+    pub(crate) async fn cancelled(&self) {
+        loop {
+            if self.signal.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let notified = self.signal.notify.notified();
+            if self.signal.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for CancellableTaskPermit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut tasks) = self.registry.tasks.lock() {
+            if tasks
+                .get(&self.novel_id)
+                .is_some_and(|signal| Arc::ptr_eq(signal, &self.signal))
+            {
+                tasks.remove(&self.novel_id);
+            }
         }
     }
 }
@@ -190,6 +268,18 @@ mod tests {
             .expect("active profile"));
         drop(permit);
         assert!(!registry.novel_is_active("novel-1").expect("released novel"));
+    }
+
+    #[tokio::test]
+    async fn cancellable_task_notifies_and_releases_registration() {
+        let registry = CancellableTaskRegistry::default();
+        let permit = registry.register("novel-1").expect("register task");
+        assert!(registry.register("novel-1").is_err());
+        assert!(registry.cancel("novel-1").expect("cancel task"));
+        permit.cancelled().await;
+        drop(permit);
+        assert!(!registry.cancel("novel-1").expect("task released"));
+        assert!(registry.register("novel-1").is_ok());
     }
 
     #[test]

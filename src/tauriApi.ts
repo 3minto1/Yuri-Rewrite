@@ -76,6 +76,10 @@ type CommandMap = {
     };
     result: import("./types").Chapter;
   };
+  terminate_single_chapter_rewrite: {
+    args: { novelId: string };
+    result: void;
+  };
   restore_single_chapter_rewrite: {
     args: { chapterId: string };
     result: import("./types").Chapter;

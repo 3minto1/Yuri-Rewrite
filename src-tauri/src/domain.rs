@@ -1,5 +1,7 @@
 use crate::rate_limit::RateLimitCoordinator;
-use crate::task_control::{ActiveTaskRegistry, AutoRunControl, AutoRunProgressState};
+use crate::task_control::{
+    ActiveTaskRegistry, AutoRunControl, AutoRunProgressState, CancellableTaskRegistry,
+};
 use reqwest::Client;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,7 @@ pub(crate) struct AppState {
     pub(crate) auto_runs: Mutex<HashMap<String, AutoRunControl>>,
     pub(crate) auto_run_progress: Mutex<HashMap<String, AutoRunProgressState>>,
     pub(crate) active_tasks: ActiveTaskRegistry,
+    pub(crate) single_rewrite_tasks: CancellableTaskRegistry,
     pub(crate) rate_limits: RateLimitCoordinator,
 }
 
@@ -208,6 +211,7 @@ pub(crate) struct AiLog {
     pub(crate) content: String,
     pub(crate) reasoning: Option<String>,
     pub(crate) raw_response: Option<String>,
+    pub(crate) finish_reason: Option<String>,
     pub(crate) created_at: String,
 }
 

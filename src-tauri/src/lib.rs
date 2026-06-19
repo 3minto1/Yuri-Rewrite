@@ -19,9 +19,9 @@ use commands::{
 use credentials::{classify_api_key_storage, read_api_key, write_api_key, ApiKeyStorage};
 use db::init_db;
 use domain::*;
-use futures_util::{stream, StreamExt};
 #[cfg(test)]
 use futures_util::stream::FuturesUnordered;
+use futures_util::{future::BoxFuture, stream, FutureExt, StreamExt};
 use model_support::model_output_truncation_error;
 use rate_limit::RateLimitCoordinator;
 use regex::Regex;
@@ -38,7 +38,9 @@ use std::{
     sync::{Mutex, OnceLock},
     time::Duration,
 };
-use task_control::{should_terminate_paused_run, ActiveTaskRegistry, AutoRunControl};
+use task_control::{
+    should_terminate_paused_run, ActiveTaskRegistry, AutoRunControl, CancellableTaskRegistry,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use text::*;
 use uuid::Uuid;
@@ -87,6 +89,7 @@ pub fn run() {
                 auto_runs: Mutex::new(restored_auto_runs),
                 auto_run_progress: Mutex::new(HashMap::new()),
                 active_tasks: ActiveTaskRegistry::default(),
+                single_rewrite_tasks: CancellableTaskRegistry::default(),
                 rate_limits: RateLimitCoordinator::default(),
             });
             Ok(())
@@ -115,6 +118,7 @@ pub fn run() {
             start_analysis,
             start_rewrite,
             rewrite_single_chapter,
+            terminate_single_chapter_rewrite,
             start_analyze_rewrite_batch,
             start_analyze_rewrite_all,
             pause_analyze_rewrite_all,
@@ -347,7 +351,7 @@ async fn analyze_batch_with_parallelism(
                     output.reasoning.as_deref(),
                     Some(&output.raw_response),
                 )?;
-                let parsed = match parse_batch_analysis_output(&output.text, &shard) {
+                let parsed = match parse_analysis_model_output(&output, &shard) {
                     Ok(parsed) => parsed,
                     Err(error) => {
                         append_ai_log(
@@ -426,9 +430,22 @@ async fn retry_analysis_shard_after_parse_error(
     shard: &[Chapter],
     shard_context: &str,
     shard_label: &str,
-    _parse_error: &str,
+    parse_error: &str,
     bad_output: &str,
 ) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    if parse_error.contains("模型输出因达到长度上限被截断") {
+        return retry_truncated_analysis_shard_by_splitting(
+            state,
+            novel_id,
+            profile,
+            api_key,
+            shard,
+            shard_context,
+            shard_label,
+        )
+        .await;
+    }
+
     let retry_context = format!(
         "{}\n\n只输出当前输入级一致性资产 JSON 对象；不要输出 Markdown、解释、空内容或 chapters 数组；JSON 字符串内换行必须写成 \\n。",
         shard_context.trim()
@@ -470,7 +487,7 @@ async fn retry_analysis_shard_after_parse_error(
                 output.reasoning.as_deref(),
                 Some(&output.raw_response),
             )?;
-            match parse_batch_analysis_output(&output.text, shard) {
+            match parse_analysis_model_output(&output, shard) {
                 Ok(parsed) => Ok(parsed),
                 Err(error) => {
                     append_ai_log(
@@ -484,10 +501,23 @@ async fn retry_analysis_shard_after_parse_error(
                         output.reasoning.as_deref(),
                         Some(&output.raw_response),
                     )?;
-                    Err(format!(
-                        "分析输出格式多次修复后仍无法解析：{}。任务可以暂停后手动继续，已完成分片会保留，仅重新尝试未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
-                        error
-                    ))
+                    if error.contains("模型输出因达到长度上限被截断") {
+                        retry_truncated_analysis_shard_by_splitting(
+                            state,
+                            novel_id,
+                            profile,
+                            api_key,
+                            shard,
+                            shard_context,
+                            shard_label,
+                        )
+                        .await
+                    } else {
+                        Err(format!(
+                            "分析输出格式多次修复后仍无法解析：{}。任务可以暂停后手动继续，已完成分片会保留，仅重新尝试未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、提高并发以缩小单个分片，或缩小处理范围。",
+                            error
+                        ))
+                    }
                 }
             }
         }
@@ -504,11 +534,123 @@ async fn retry_analysis_shard_after_parse_error(
                 None,
             )?;
             Err(format!(
-                "分析输出格式修复重试调用失败：{}。任务可以暂停后手动继续，已完成分片会保留，仅重新尝试未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。",
+                "分析输出格式修复重试调用失败：{}。任务可以暂停后手动继续，已完成分片会保留，仅重新尝试未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、提高并发以缩小单个分片，或缩小处理范围。",
                 error
             ))
         }
     }
+}
+
+fn parse_analysis_model_output(
+    output: &ModelOutput,
+    chapters: &[Chapter],
+) -> Result<Vec<ParsedChapterAnalysis>, String> {
+    if let Some(error) = model_output_truncation_error(&output.raw_response) {
+        return Err(error);
+    }
+    parse_batch_analysis_output(&output.text, chapters)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retry_truncated_analysis_shard_by_splitting<'a>(
+    state: &'a State<'a, AppState>,
+    novel_id: &'a str,
+    profile: &'a ModelProfile,
+    api_key: &'a str,
+    shard: &'a [Chapter],
+    shard_context: &'a str,
+    shard_label: &'a str,
+) -> BoxFuture<'a, Result<Vec<ParsedChapterAnalysis>, String>> {
+    async move {
+        if shard.len() <= 1 {
+            return Err(format!(
+                "分析输出在 64K 上限下仍被截断，且当前已是单章分片（{}）。请缩短该章原文、关闭思考或更换输出上限更高的模型。",
+                shard_label
+            ));
+        }
+
+        let midpoint = shard.len().div_ceil(2);
+        let parts = [&shard[..midpoint], &shard[midpoint..]];
+        let identity_context = {
+            let conn = state.conn.lock().map_err(to_string)?;
+            load_novel_settings(&conn, novel_id)?
+                .map(|settings| build_analysis_identity_context(&settings))
+                .unwrap_or_default()
+        };
+        let mut merged = Vec::with_capacity(shard.len());
+
+        for (part_index, part) in parts.into_iter().filter(|part| !part.is_empty()).enumerate() {
+            if let Some(status) = requested_auto_run_stop(state, novel_id)? {
+                return Err(status);
+            }
+            let part_label = format!(
+                "{} · 长度恢复 {}/2 · {}",
+                shard_label,
+                part_index + 1,
+                format_batch_label(part)
+            );
+            let part_context = format!(
+                "{}\n\n长度恢复说明：原分片在保留思考并提高到 64K 输出上限后仍被截断；当前只分析上述范围中的这个连续子分片。",
+                shard_context.trim()
+            );
+            let prompt =
+                build_batch_analysis_prompt_with_identity(part, &part_context, &identity_context);
+            let output = generate_text(
+                &state.client,
+                Some(state.rate_limits.clone()),
+                profile,
+                api_key,
+                SYSTEM_ANALYSIS_EXPERT,
+                &prompt,
+                true,
+            )
+            .await?;
+            append_ai_log(
+                state,
+                Some(novel_id),
+                &profile.id,
+                "批次分析拆分重试",
+                Some(&part_label),
+                "success",
+                &format_model_log_content(&output, profile, None),
+                output.reasoning.as_deref(),
+                Some(&output.raw_response),
+            )?;
+
+            let parsed = match parse_analysis_model_output(&output, part) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    append_ai_log(
+                        state,
+                        Some(novel_id),
+                        &profile.id,
+                        "批次分析拆分重试解析",
+                        Some(&part_label),
+                        "error",
+                        &error,
+                        output.reasoning.as_deref(),
+                        Some(&output.raw_response),
+                    )?;
+                    retry_analysis_shard_after_parse_error(
+                        state,
+                        novel_id,
+                        profile,
+                        api_key,
+                        part,
+                        &part_context,
+                        &part_label,
+                        &error,
+                        &output.text,
+                    )
+                    .await?
+                }
+            };
+            merged.extend(parsed);
+        }
+
+        Ok(merged)
+    }
+    .boxed()
 }
 
 fn save_parsed_analyses(
@@ -6209,7 +6351,7 @@ fn pause_auto_run_after_model_format_error(
 ) -> Result<Job, String> {
     let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
-        "模型输出格式多次修复后仍无法解析，任务已暂停。已完成分片已保留，可以点击继续处理第 {} 批的未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、降低并发或缩小处理范围。\n\n{}",
+        "模型输出格式多次修复后仍无法解析，任务已暂停。已完成分片已保留，可以点击继续处理第 {} 批的未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、提高并发以缩小单个分片，或缩小处理范围。\n\n{}",
         completed_batches + 1,
         error
     );
@@ -6687,7 +6829,8 @@ fn row_to_ai_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiLog> {
         content: row.get(6)?,
         reasoning: row.get(7)?,
         raw_response: row.get(8)?,
-        created_at: row.get(9)?,
+        finish_reason: row.get(9)?,
+        created_at: row.get(10)?,
     })
 }
 
