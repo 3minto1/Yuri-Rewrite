@@ -8,8 +8,9 @@ use crate::{
     load_review_enabled, load_review_profile_for_run, load_review_profile_id,
     load_rewrite_parallelism, mark_chapters_rewrite_failed, mark_empty_source_chapters_skipped,
     parse_rewrite_model_output, read_stored_api_key, require_novel_settings,
-    rewrite_batch_with_parallelism, set_chapter_status, to_string, truncate_text,
-    truncate_text_tail, update_job, SYSTEM_REWRITE_EXPERT,
+    restore_orphaned_rewrite_status_for_chapter, rewrite_batch_with_parallelism,
+    set_chapter_status, to_string, truncate_text, truncate_text_tail, update_job,
+    SYSTEM_REWRITE_EXPERT,
 };
 use chrono::Utc;
 use rusqlite::params;
@@ -163,7 +164,7 @@ pub(crate) async fn rewrite_single_chapter(
     let api_key = read_stored_api_key(&state, &profile.id)?;
     let (
         all_chapters,
-        chapter,
+        mut chapter,
         settings,
         core_prompt,
         review_enabled,
@@ -198,14 +199,6 @@ pub(crate) async fn rewrite_single_chapter(
     if chapter.analysis_status != "completed" {
         return Err("当前章节尚未完成分析，不能单独重新改写。".to_string());
     }
-    if chapter.rewrite_status != "completed"
-        || chapter
-            .rewrite_text
-            .as_deref()
-            .is_none_or(|text| text.trim().is_empty())
-    {
-        return Err("当前章节尚未完成改写。".to_string());
-    }
     let (review_profile, review_api_key) = if source_mode == "original" {
         load_review_profile_for_run(
             &state,
@@ -225,6 +218,20 @@ pub(crate) async fn rewrite_single_chapter(
     let _active_task = state
         .active_tasks
         .acquire(&novel_id, active_profile_ids, "重新改写本章")?;
+    if chapter.rewrite_status == "running" {
+        let conn = state.conn.lock().map_err(to_string)?;
+        if restore_orphaned_rewrite_status_for_chapter(&conn, &chapter.id).map_err(to_string)? {
+            chapter.rewrite_status = "completed".to_string();
+        }
+    }
+    if chapter.rewrite_status != "completed"
+        || chapter
+            .rewrite_text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+    {
+        return Err("当前章节尚未完成改写。".to_string());
+    }
     let cancellation = state.single_rewrite_tasks.register(&novel_id)?;
     set_chapter_status(&state, &chapter.id, "rewrite_status", "running")?;
     let operation = async {

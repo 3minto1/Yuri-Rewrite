@@ -76,6 +76,7 @@ pub fn run() {
             let conn = Connection::open(data_dir.join("yuri-rewrite.sqlite3"))?;
             init_db(&conn)?;
             let restored_auto_runs = restore_auto_run_controls(&conn)?;
+            restore_orphaned_rewrite_statuses(&conn)?;
             let client = Client::builder()
                 .connect_timeout(Duration::from_secs(20))
                 .timeout(Duration::from_secs(20 * 60))
@@ -177,6 +178,42 @@ fn restore_auto_run_controls(
         ))
     })?;
     Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+}
+
+fn restore_orphaned_rewrite_statuses(
+    conn: &Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    conn.execute(
+        "UPDATE chapters
+         SET rewrite_status = CASE
+             WHEN rewrite_text IS NOT NULL AND trim(rewrite_text) != '' THEN 'completed'
+             ELSE 'failed'
+         END
+         WHERE rewrite_status = 'running'
+           AND novel_id NOT IN (
+               SELECT novel_id FROM auto_run_checkpoints WHERE status = 'paused'
+           )",
+        [],
+    )?;
+    Ok(())
+}
+
+fn restore_orphaned_rewrite_status_for_chapter(
+    conn: &Connection,
+    chapter_id: &str,
+) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE chapters
+         SET rewrite_status = 'completed'
+         WHERE id = ?1
+           AND rewrite_status = 'running'
+           AND rewrite_text IS NOT NULL
+           AND trim(rewrite_text) != ''
+           AND novel_id NOT IN (
+               SELECT novel_id FROM auto_run_checkpoints WHERE status = 'paused'
+           )",
+        params![chapter_id],
+    )? > 0)
 }
 
 fn cleanup_deletion_trash(data_dir: &Path) {
@@ -7779,6 +7816,91 @@ mod tests {
             })
             .expect("load job");
         assert_eq!(status, "paused");
+    }
+
+    #[test]
+    fn startup_restores_only_orphaned_running_rewrite_statuses() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+        for novel_id in ["orphan", "paused"] {
+            conn.execute(
+                "INSERT INTO novels (
+                    id, title, source_path, encoding, status, created_at
+                 ) VALUES (?1, '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+                params![novel_id],
+            )
+            .expect("insert novel");
+        }
+        conn.execute(
+            "INSERT INTO chapters (
+                id, novel_id, chapter_index, title, original_text, rewrite_text,
+                analysis_status, rewrite_status
+             ) VALUES
+                ('with-draft', 'orphan', 1, '第一章', '原文', '已有改写稿', 'completed', 'running'),
+                ('without-draft', 'orphan', 2, '第二章', '原文', NULL, 'completed', 'running'),
+                ('paused-draft', 'paused', 1, '第一章', '原文', '旧改写稿', 'completed', 'running')",
+            [],
+        )
+        .expect("insert chapters");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (
+                novel_id, start_batch_index, next_batch_index, status, pause_reason,
+                phase, batch_index, profile_ids, created_at, updated_at
+             ) VALUES (
+                'paused', 0, 0, 'paused', '测试暂停', 'rewrite', 0, '[]', 'now', 'now'
+             )",
+            [],
+        )
+        .expect("insert paused checkpoint");
+
+        restore_orphaned_rewrite_statuses(&conn).expect("restore statuses");
+
+        let status = |chapter_id: &str| {
+            conn.query_row(
+                "SELECT rewrite_status FROM chapters WHERE id = ?1",
+                params![chapter_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("load status")
+        };
+        assert_eq!(status("with-draft"), "completed");
+        assert_eq!(status("without-draft"), "failed");
+        assert_eq!(status("paused-draft"), "running");
+    }
+
+    #[test]
+    fn single_chapter_entry_restores_orphaned_running_draft() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (
+                id, title, source_path, encoding, status, created_at
+             ) VALUES ('novel-1', '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO chapters (
+                id, novel_id, chapter_index, title, original_text, rewrite_text,
+                analysis_status, rewrite_status
+             ) VALUES (
+                'chapter-1', 'novel-1', 1, '第一章', '原文', '已有改写稿',
+                'completed', 'running'
+             )",
+            [],
+        )
+        .expect("insert chapter");
+
+        assert!(restore_orphaned_rewrite_status_for_chapter(&conn, "chapter-1")
+            .expect("restore chapter"));
+        let status: String = conn
+            .query_row(
+                "SELECT rewrite_status FROM chapters WHERE id = 'chapter-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load status");
+        assert_eq!(status, "completed");
     }
 
     #[test]
