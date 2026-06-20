@@ -34,6 +34,7 @@ const profile: ModelProfile = {
   base_url: "https://example.com/v1",
   model: "test-model",
   temperature: 0.7,
+  top_p: 1,
   thinking_mode: "auto",
   has_api_key: true,
   api_key_storage: "system",

@@ -607,6 +607,7 @@ pub(crate) fn apply_reasoning_parameter(
     let provider = profile.provider.to_ascii_lowercase();
     let base = base_url.to_ascii_lowercase();
     let model_lower = model.to_ascii_lowercase();
+    let normalized_model = model_lower.replace('.', "-");
 
     if base.contains("openrouter") {
         payload["reasoning"] = if enabled {
@@ -617,7 +618,15 @@ pub(crate) fn apply_reasoning_parameter(
         return true;
     }
 
-    if is_deepseek_profile(profile, base_url, model) {
+    if is_siliconflow_profile(profile, base_url) {
+        if siliconflow_supports_thinking_toggle(&model_lower) {
+            payload["enable_thinking"] = json!(enabled);
+            return true;
+        }
+        return false;
+    }
+
+    if is_deepseek_profile(profile, base_url, model) && model_lower.starts_with("deepseek-v4") {
         payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
         if enabled {
             payload["reasoning_effort"] = json!("high");
@@ -625,18 +634,34 @@ pub(crate) fn apply_reasoning_parameter(
         return true;
     }
 
-    if is_kimi_profile(profile, base_url, model) {
+    if is_zhipu_profile(profile, base_url, model) && glm_supports_thinking_toggle(&model_lower) {
         payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
         return true;
     }
 
-    if is_doubao_profile(profile, base_url, model) {
+    if is_kimi_profile(profile, base_url, model)
+        && (model_lower.starts_with("kimi-k2.5") || model_lower.starts_with("kimi-k2.6"))
+    {
         payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
         return true;
     }
 
-    if is_siliconflow_profile(profile, base_url) {
-        payload["thinking_budget"] = json!(if enabled { 1024 } else { 0 });
+    if is_doubao_profile(profile, base_url, model)
+        && normalized_model.contains("doubao-seed-2-0")
+    {
+        payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
+        return true;
+    }
+
+    if is_minimax_profile(profile, base_url, model) && model_lower.contains("minimax-m3") {
+        payload["thinking"] = json!({
+            "type": if enabled { "adaptive" } else { "disabled" }
+        });
+        return true;
+    }
+
+    if is_mimo_profile(profile) {
+        payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
         return true;
     }
 
@@ -651,6 +676,35 @@ pub(crate) fn apply_reasoning_parameter(
     }
 
     false
+}
+
+fn siliconflow_supports_thinking_toggle(model: &str) -> bool {
+    matches!(
+        model,
+        "deepseek-ai/deepseek-v3.2"
+            | "deepseek-ai/deepseek-v3.1-terminus"
+            | "qwen/qwen3.5-122b-a10b"
+            | "qwen/qwen3.5-35b-a3b"
+            | "qwen/qwen3.5-27b"
+    )
+}
+
+fn glm_supports_thinking_toggle(model: &str) -> bool {
+    let Some(version) = model.strip_prefix("glm-") else {
+        return false;
+    };
+    let major = version
+        .split(['.', '-'])
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    if major.is_some_and(|value| value >= 5) {
+        return true;
+    }
+    version
+        .strip_prefix("4.")
+        .and_then(|value| value.split('-').next())
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|minor| minor >= 5)
 }
 
 pub(crate) fn is_openai_reasoning_model(model: &str) -> bool {
@@ -673,16 +727,26 @@ pub(crate) fn apply_gemini_thinking_control(
     }
 
     let model = profile.model.to_ascii_lowercase();
-    let thinking_config = if model.contains("2.5") {
+    let thinking_config = if model.contains("2.5-pro") {
+        if mode == "off" {
+            json!({ "thinkingBudget": 128 })
+        } else {
+            json!({ "thinkingBudget": -1 })
+        }
+    } else if model.contains("2.5") {
         if mode == "off" {
             json!({ "thinkingBudget": 0 })
         } else {
             json!({ "thinkingBudget": -1 })
         }
-    } else if mode == "off" {
-        json!({ "thinkingLevel": "minimal" })
-    } else {
+    } else if model.contains("gemini-3") && mode == "off" {
+        json!({
+            "thinkingLevel": if model.contains("pro") { "low" } else { "minimal" }
+        })
+    } else if model.contains("gemini-3") {
         json!({ "thinkingLevel": "high" })
+    } else {
+        return false;
     };
 
     payload["generationConfig"]["thinkingConfig"] = thinking_config;
@@ -702,6 +766,7 @@ mod tests {
             base_url: base_url.to_string(),
             model: model.to_string(),
             temperature: 0.7,
+            top_p: 1.0,
             thinking_mode: "auto".to_string(),
             has_api_key: true,
             api_key_storage: "system".to_string(),

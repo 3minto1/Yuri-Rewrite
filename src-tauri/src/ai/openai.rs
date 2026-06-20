@@ -28,6 +28,7 @@ pub(crate) async fn generate_openai_compatible(
             {"role": "user", "content": user}
         ]
     });
+    apply_top_p(&mut payload, profile.top_p);
     if prefer_json_output {
         if let Some(response_format) = openai_compatible_json_response_format(profile, base, &model)
         {
@@ -118,4 +119,26 @@ pub(crate) async fn generate_openai_compatible(
         elapsed_ms: 0,
         retried_without_thinking,
     })
+}
+
+fn apply_top_p(payload: &mut serde_json::Value, top_p: f64) {
+    if top_p < 1.0 {
+        payload["top_p"] = json!(top_p);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_p_is_omitted_at_default_and_added_when_restricted() {
+        let mut default_payload = json!({});
+        apply_top_p(&mut default_payload, 1.0);
+        assert!(default_payload.get("top_p").is_none());
+
+        let mut restricted_payload = json!({});
+        apply_top_p(&mut restricted_payload, 0.9);
+        assert_eq!(restricted_payload["top_p"], json!(0.9));
+    }
 }

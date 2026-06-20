@@ -47,6 +47,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             base_url TEXT NOT NULL,
             model TEXT NOT NULL,
             temperature REAL NOT NULL,
+            top_p REAL NOT NULL DEFAULT 1.0,
             thinking_mode TEXT NOT NULL DEFAULT 'auto',
             api_key TEXT,
             updated_at TEXT NOT NULL
@@ -167,6 +168,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "thinking_mode",
         "TEXT NOT NULL DEFAULT 'auto'",
     )?;
+    migrations::ensure_column(conn, "model_profiles", "top_p", "REAL NOT NULL DEFAULT 1.0")?;
     migrations::ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "finish_reason", "TEXT")?;
@@ -261,6 +263,42 @@ fn backfill_ai_log_token_usage(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_adds_default_top_p_to_existing_profiles() {
+        let conn = Connection::open_in_memory().expect("open database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE model_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                thinking_mode TEXT NOT NULL DEFAULT 'auto',
+                api_key TEXT,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO model_profiles VALUES (
+                'profile-1', '测试模型', 'openai-compatible', 'https://example.com/v1',
+                'model-a', 0.7, 'auto', NULL, 'now'
+            );
+            "#,
+        )
+        .expect("seed previous model profile schema");
+
+        init_db(&conn).expect("migrate schema");
+
+        let top_p: f64 = conn
+            .query_row(
+                "SELECT top_p FROM model_profiles WHERE id = 'profile-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load top p");
+        assert_eq!(top_p, 1.0);
+    }
 
     #[test]
     fn migration_adds_empty_protagonist_aliases_to_existing_settings() {

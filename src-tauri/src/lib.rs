@@ -31,6 +31,7 @@ use rusqlite::{params, Connection};
 #[cfg(test)]
 use serde_json::json;
 use services::progress::*;
+use services::{estimation::*, shard_context::*};
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
@@ -4810,427 +4811,6 @@ async fn retry_rewrite_shard_after_parse_error(
     }
 }
 
-fn split_chapters_for_parallelism(
-    chapters: &[Chapter],
-    rewrite_parallelism: usize,
-) -> Vec<Vec<Chapter>> {
-    if chapters.is_empty() {
-        return Vec::new();
-    }
-    let parallelism = normalize_rewrite_parallelism(rewrite_parallelism).min(chapters.len());
-    if parallelism <= 1 {
-        return vec![chapters.to_vec()];
-    }
-    let base_size = chapters.len() / parallelism;
-    let remainder = chapters.len() % parallelism;
-    let mut shards = Vec::with_capacity(parallelism);
-    let mut start = 0usize;
-    for shard_index in 0..parallelism {
-        let shard_size = base_size + usize::from(shard_index < remainder);
-        let end = start + shard_size;
-        shards.push(chapters[start..end].to_vec());
-        start = end;
-    }
-    shards
-}
-
-#[derive(Debug, Clone)]
-struct ChapterShardWork {
-    chapters: Vec<Chapter>,
-    previous: Option<Chapter>,
-    next: Option<Chapter>,
-}
-
-fn build_contiguous_shard_work(
-    all_chapters: &[Chapter],
-    target_chapters: &[Chapter],
-    rewrite_parallelism: usize,
-) -> Vec<ChapterShardWork> {
-    if target_chapters.is_empty() {
-        return Vec::new();
-    }
-    let target_ids = target_chapters
-        .iter()
-        .map(|chapter| chapter.id.as_str())
-        .collect::<HashSet<_>>();
-    if target_ids.len() == all_chapters.len()
-        && all_chapters
-            .iter()
-            .all(|chapter| target_ids.contains(chapter.id.as_str()))
-    {
-        return split_chapters_for_parallelism(all_chapters, rewrite_parallelism)
-            .into_iter()
-            .map(|chapters| ChapterShardWork {
-                chapters,
-                previous: None,
-                next: None,
-            })
-            .collect();
-    }
-
-    let parallelism = normalize_rewrite_parallelism(rewrite_parallelism).max(1);
-    let target_shard_size = all_chapters.len().div_ceil(parallelism).max(1);
-    let mut work = Vec::new();
-    let mut position = 0usize;
-    while position < all_chapters.len() {
-        if !target_ids.contains(all_chapters[position].id.as_str()) {
-            position += 1;
-            continue;
-        }
-        let run_start = position;
-        while position < all_chapters.len()
-            && target_ids.contains(all_chapters[position].id.as_str())
-        {
-            position += 1;
-        }
-        let run_end = position;
-        let mut chunk_start = run_start;
-        while chunk_start < run_end {
-            let chunk_end = (chunk_start + target_shard_size).min(run_end);
-            work.push(ChapterShardWork {
-                chapters: all_chapters[chunk_start..chunk_end].to_vec(),
-                previous: chunk_start
-                    .checked_sub(1)
-                    .and_then(|index| all_chapters.get(index))
-                    .cloned(),
-                next: all_chapters.get(chunk_end).cloned(),
-            });
-            chunk_start = chunk_end;
-        }
-    }
-    work
-}
-
-#[derive(Debug, Clone)]
-struct StagedChapterOutput {
-    title: Option<String>,
-    content: Option<String>,
-}
-
-fn load_staged_outputs(
-    state: &State<'_, AppState>,
-    novel_id: &str,
-    batch_index: i64,
-    phase: &str,
-) -> Result<HashMap<String, StagedChapterOutput>, String> {
-    let conn = state.conn.lock().map_err(to_string)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT chapter_id, title, content FROM auto_run_shard_outputs
-             WHERE novel_id = ?1 AND batch_index = ?2 AND phase = ?3",
-        )
-        .map_err(to_string)?;
-    let rows = stmt
-        .query_map(params![novel_id, batch_index, phase], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                StagedChapterOutput {
-                    title: row.get(1)?,
-                    content: row.get(2)?,
-                },
-            ))
-        })
-        .map_err(to_string)?
-        .collect::<Result<HashMap<_, _>, _>>()
-        .map_err(to_string)?;
-    Ok(rows)
-}
-
-fn format_readonly_neighbor(
-    label: &str,
-    chapter: Option<&Chapter>,
-    staged: &HashMap<String, StagedChapterOutput>,
-    phase: &str,
-    use_tail: bool,
-) -> Option<String> {
-    let chapter = chapter?;
-    let staged_output = staged.get(&chapter.id);
-    let title = staged_output
-        .and_then(|output| output.title.as_deref())
-        .unwrap_or(&chapter.title);
-    let completed_context = staged_output
-        .and_then(|output| output.content.as_deref())
-        .filter(|content| !content.trim().is_empty());
-    let summarize = |content: &str| {
-        if use_tail {
-            truncate_text_tail(content.trim(), 600)
-        } else {
-            truncate_text(content.trim(), 600)
-        }
-    };
-    let context = match (phase, completed_context) {
-        ("rewrite", Some(content)) => format!(
-            "已完成改写摘要：{}",
-            summarize(content)
-        ),
-        ("analysis", Some(content)) => format!(
-            "已完成分析摘要：{}",
-            summarize(content)
-        ),
-        _ => format!(
-            "原文摘要：{}",
-            summarize(&chapter.original_text)
-        ),
-    };
-    Some(format!(
-        "{}：内部索引 {} · 标题：{}\n{}",
-        label, chapter.index, title, context
-    ))
-}
-
-fn build_readonly_adjacent_context(
-    work: &ChapterShardWork,
-    staged: &HashMap<String, StagedChapterOutput>,
-    phase: &str,
-) -> String {
-    let context = [
-        format_readonly_neighbor(
-            "前一相邻章节",
-            work.previous.as_ref(),
-            staged,
-            phase,
-            true,
-        ),
-        format_readonly_neighbor(
-            "后一相邻章节",
-            work.next.as_ref(),
-            staged,
-            phase,
-            false,
-        ),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    if context.is_empty() {
-        "无相邻章节。".to_string()
-    } else {
-        context.join("\n\n")
-    }
-}
-
-fn estimate_requests_for_chapters(
-    chapters: &[Chapter],
-    rewrite_parallelism: usize,
-    review_enabled: bool,
-) -> usize {
-    if chapters.is_empty() {
-        return 0;
-    }
-    let shard_count = split_chapters_for_parallelism(chapters, rewrite_parallelism).len();
-    shard_count * if review_enabled { 7 } else { 2 }
-}
-
-fn estimate_wait_stages_for_chapters(chapters: &[Chapter], review_enabled: bool) -> usize {
-    if chapters.is_empty() {
-        0
-    } else if review_enabled {
-        7
-    } else {
-        2
-    }
-}
-
-fn estimate_wait_seconds_for_chapters(
-    chapters: &[Chapter],
-    rewrite_parallelism: usize,
-    review_enabled: bool,
-    average_call_seconds: Option<f64>,
-    average_input_chars: Option<usize>,
-) -> Option<f64> {
-    let average_call_seconds = average_call_seconds?;
-    if chapters.is_empty() {
-        return Some(0.0);
-    }
-
-    let shard_count = split_chapters_for_parallelism(chapters, rewrite_parallelism).len();
-    let total_chars = chapters.iter().map(chapter_text_chars).sum::<usize>();
-    let average_shard_chars = total_chars as f64 / shard_count as f64;
-    let size_factor = average_input_chars
-        .filter(|chars| *chars > 0)
-        .map(|chars| {
-            let relative_size = (average_shard_chars / chars as f64).clamp(0.05, 4.0);
-            0.4 + relative_size * 0.6
-        })
-        .unwrap_or(1.0);
-
-    Some(
-        average_call_seconds
-            * estimate_wait_stages_for_chapters(chapters, review_enabled) as f64
-            * size_factor,
-    )
-}
-
-fn chapter_text_chars(chapter: &Chapter) -> usize {
-    chapter.title.chars().count() + chapter.original_text.chars().count()
-}
-
-#[derive(Default)]
-struct RecentModelStats {
-    success_calls: usize,
-    failed_calls: usize,
-    total_elapsed_seconds: f64,
-    elapsed_samples: usize,
-    total_input_chars: usize,
-    input_samples: usize,
-    total_output_chars: usize,
-    output_samples: usize,
-}
-
-impl RecentModelStats {
-    fn average_call_seconds(&self) -> Option<f64> {
-        if self.elapsed_samples == 0 {
-            None
-        } else {
-            Some(self.total_elapsed_seconds / self.elapsed_samples as f64)
-        }
-    }
-
-    fn average_input_chars(&self) -> Option<usize> {
-        self.total_input_chars.checked_div(self.input_samples)
-    }
-
-    fn average_output_chars(&self) -> Option<usize> {
-        self.total_output_chars.checked_div(self.output_samples)
-    }
-}
-
-fn load_recent_model_stats(
-    conn: &Connection,
-    profile_id: &str,
-) -> Result<RecentModelStats, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT status, content FROM ai_logs WHERE profile_id = ?1 ORDER BY created_at DESC LIMIT 80",
-        )
-        .map_err(to_string)?;
-    let rows = stmt
-        .query_map(params![profile_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(to_string)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(to_string)?;
-    let mut stats = RecentModelStats::default();
-    for (status, content) in rows {
-        if status == "success" {
-            stats.success_calls += 1;
-            if let Some(value) = extract_usize_after_label(&content, "输入字符数：") {
-                stats.total_input_chars += value;
-                stats.input_samples += 1;
-            }
-            if let Some(value) = extract_usize_after_label(&content, "输出字符数：") {
-                stats.total_output_chars += value;
-                stats.output_samples += 1;
-            }
-            if let Some(value) = extract_f64_after_label(&content, "AI 调用耗时：") {
-                stats.total_elapsed_seconds += value;
-                stats.elapsed_samples += 1;
-            }
-        } else if status == "error" {
-            stats.failed_calls += 1;
-        }
-    }
-    Ok(stats)
-}
-
-fn extract_usize_after_label(text: &str, label: &str) -> Option<usize> {
-    extract_value_after_label(text, label)?
-        .parse::<usize>()
-        .ok()
-}
-
-fn extract_f64_after_label(text: &str, label: &str) -> Option<f64> {
-    extract_value_after_label(text, label)?.parse::<f64>().ok()
-}
-
-fn extract_value_after_label(text: &str, label: &str) -> Option<String> {
-    let rest = text.split_once(label)?.1.trim_start();
-    let value = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
-        .collect::<String>();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn format_shard_label(
-    batch_label: &str,
-    shard_index: usize,
-    shard_total: usize,
-    chapters: &[Chapter],
-) -> String {
-    if shard_total <= 1 {
-        return batch_label.to_string();
-    }
-    match (chapters.first(), chapters.last()) {
-        (Some(first), Some(last)) if first.index == last.index => {
-            format!(
-                "{} · 分片 {}/{} · 第{}章",
-                batch_label,
-                shard_index + 1,
-                shard_total,
-                first.index
-            )
-        }
-        (Some(first), Some(last)) => format!(
-            "{} · 分片 {}/{} · 第{}-{}章",
-            batch_label,
-            shard_index + 1,
-            shard_total,
-            first.index,
-            last.index
-        ),
-        _ => format!("{} · 分片 {}/{}", batch_label, shard_index + 1, shard_total),
-    }
-}
-
-fn format_shard_context(
-    _shard_index: usize,
-    _shard_total: usize,
-    _rewrite_parallelism: usize,
-    _batch_label: &str,
-    chapters: &[Chapter],
-) -> String {
-    format_shard_context_with_neighbors(
-        _shard_index,
-        _shard_total,
-        _rewrite_parallelism,
-        _batch_label,
-        chapters,
-        "无相邻章节。",
-    )
-}
-
-fn format_shard_context_with_neighbors(
-    _shard_index: usize,
-    _shard_total: usize,
-    _rewrite_parallelism: usize,
-    _batch_label: &str,
-    chapters: &[Chapter],
-    readonly_adjacent_context: &str,
-) -> String {
-    let chapter_list = chapters
-        .iter()
-        .map(|chapter| format!("第{}章", chapter.index))
-        .collect::<Vec<_>>()
-        .join("、");
-    let chapter_range = match (chapters.first(), chapters.last()) {
-        (Some(first), Some(last)) if first.index == last.index => format!("第{}章", first.index),
-        (Some(first), Some(last)) => format!("第{}-{}章", first.index, last.index),
-        _ => "空分片".to_string(),
-    };
-    format!(
-        "本次目标只包含{}：{}。只能处理和输出这些目标章节，严禁输出输入外的任何章节、标题、正文或章节边界标记。所有请求共享同一份小说设定、一致性资产、姓名女性化规则和章节边界规则；不得因为只看到当前输入就改变人物设定或重置关系进展。\n\n相邻章节只读上下文（仅用于判断人物、场景、称谓和剧情连续性；不得分析为本次结果，不得输出、改写或覆盖）：\n{}",
-        chapter_range,
-        chapter_list,
-        readonly_adjacent_context.trim()
-    )
-}
-
 #[allow(dead_code)]
 async fn start_rewrite_legacy(
     novel_id: String,
@@ -5501,11 +5081,11 @@ fn load_model_profile(
 ) -> Result<ModelProfile, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     conn.query_row(
-        "SELECT id, name, provider, base_url, model, temperature, thinking_mode, updated_at, api_key FROM model_profiles WHERE id = ?1",
+        "SELECT id, name, provider, base_url, model, temperature, top_p, thinking_mode, updated_at, api_key FROM model_profiles WHERE id = ?1",
         params![profile_id],
         |row| {
             let id: String = row.get(0)?;
-            let db_api_key: Option<String> = row.get(8)?;
+            let db_api_key: Option<String> = row.get(9)?;
             let storage = api_key_storage_from_values(&id, db_api_key.as_deref());
             Ok(ModelProfile {
                 has_api_key: storage != ApiKeyStorage::None,
@@ -5516,8 +5096,9 @@ fn load_model_profile(
                 base_url: row.get(3)?,
                 model: row.get(4)?,
                 temperature: row.get(5)?,
-                thinking_mode: row.get(6)?,
-                updated_at: row.get(7)?,
+                top_p: row.get(6)?,
+                thinking_mode: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         },
     )
@@ -7927,68 +7508,6 @@ mod tests {
     }
 
     #[test]
-    fn estimate_requests_include_analysis_rewrite_and_optional_review() {
-        let chapters = (1..=30)
-            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), "原文"))
-            .collect::<Vec<_>>();
-
-        assert_eq!(estimate_requests_for_chapters(&chapters, 6, false), 12);
-        assert_eq!(estimate_requests_for_chapters(&chapters, 6, true), 42);
-        assert_eq!(estimate_requests_for_chapters(&chapters[..3], 10, true), 21);
-        assert_eq!(estimate_requests_for_chapters(&[], 6, true), 0);
-    }
-
-    #[test]
-    fn estimate_wait_stages_follow_pipeline_not_shard_count() {
-        let chapters = (1..=30)
-            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), "原文"))
-            .collect::<Vec<_>>();
-
-        assert_eq!(split_chapters_for_parallelism(&chapters, 6).len(), 6);
-        assert_eq!(estimate_wait_stages_for_chapters(&chapters, false), 2);
-        assert_eq!(estimate_wait_stages_for_chapters(&chapters, true), 7);
-        assert_eq!(estimate_wait_stages_for_chapters(&[], true), 0);
-    }
-
-    #[test]
-    fn estimated_wait_accounts_for_larger_shards_at_lower_parallelism() {
-        let body = "原".repeat(1_000);
-        let chapters = (1..=50)
-            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), &body))
-            .collect::<Vec<_>>();
-
-        let low_parallelism =
-            estimate_wait_seconds_for_chapters(&chapters, 6, false, Some(60.0), Some(10_000))
-                .expect("estimate low parallelism");
-        let high_parallelism =
-            estimate_wait_seconds_for_chapters(&chapters, 50, false, Some(60.0), Some(10_000))
-                .expect("estimate high parallelism");
-
-        assert!(low_parallelism > high_parallelism);
-        assert_eq!(
-            estimate_wait_seconds_for_chapters(&[], 6, false, Some(60.0), Some(10_000)),
-            Some(0.0)
-        );
-    }
-
-    #[test]
-    fn estimated_wait_distinguishes_twenty_five_and_fifty_way_shards() {
-        let body = "原".repeat(3_000);
-        let chapters = (1..=100)
-            .map(|idx| sample_chapter(idx, &format!("第{}章", idx), &body))
-            .collect::<Vec<_>>();
-
-        let twenty_five =
-            estimate_wait_seconds_for_chapters(&chapters, 25, false, Some(90.0), Some(27_000))
-                .expect("estimate 25-way shards");
-        let fifty =
-            estimate_wait_seconds_for_chapters(&chapters, 50, false, Some(90.0), Some(27_000))
-                .expect("estimate 50-way shards");
-
-        assert!(twenty_five > fifty);
-    }
-
-    #[test]
     fn review_warning_file_appends_per_novel() {
         let temp_dir = env::temp_dir().join(format!("yuri-rewrite-warning-{}", Uuid::new_v4()));
         let app_dir = temp_dir.join("app");
@@ -8033,49 +7552,6 @@ mod tests {
     }
 
     #[test]
-    fn recent_model_stats_default_to_no_history() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        init_db(&conn).expect("init db");
-
-        let stats = load_recent_model_stats(&conn, "missing-profile").expect("load stats");
-
-        assert_eq!(stats.success_calls, 0);
-        assert_eq!(stats.failed_calls, 0);
-        assert_eq!(stats.average_call_seconds(), None);
-        assert_eq!(stats.average_input_chars(), None);
-        assert_eq!(stats.average_output_chars(), None);
-    }
-
-    #[test]
-    fn recent_model_stats_parse_log_content() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        init_db(&conn).expect("init db");
-        conn.execute(
-            "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, created_at) VALUES (?1, NULL, ?2, '测试', NULL, 'success', ?3, ?4)",
-            params![
-                "log-1",
-                "profile-1",
-                "调用统计：\n- 输入字符数：120\n- 输出字符数：30\n- AI 调用耗时：2.50 秒\n\n正文",
-                Utc::now().to_rfc3339()
-            ],
-        )
-        .expect("insert success log");
-        conn.execute(
-            "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, created_at) VALUES (?1, NULL, ?2, '测试', NULL, 'error', 'HTTP 401', ?3)",
-            params!["log-2", "profile-1", Utc::now().to_rfc3339()],
-        )
-        .expect("insert error log");
-
-        let stats = load_recent_model_stats(&conn, "profile-1").expect("load stats");
-
-        assert_eq!(stats.success_calls, 1);
-        assert_eq!(stats.failed_calls, 1);
-        assert_eq!(stats.average_call_seconds(), Some(2.5));
-        assert_eq!(stats.average_input_chars(), Some(120));
-        assert_eq!(stats.average_output_chars(), Some(30));
-    }
-
-    #[test]
     fn model_diagnosis_status_uses_worst_check() {
         let ok = build_model_diagnosis(vec![diagnosis_check("连接", "ok", "ok")], None);
         assert_eq!(ok.status, "ok");
@@ -8098,118 +7574,6 @@ mod tests {
             None,
         );
         assert_eq!(failed.status, "failed");
-    }
-
-    #[test]
-    fn rewrite_parallelism_splits_batch_into_contiguous_shards() {
-        let chapters = (1..=30)
-            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
-            .collect::<Vec<_>>();
-
-        let six = split_chapters_for_parallelism(&chapters, 6);
-        assert_eq!(six.len(), 6);
-        assert!(six.iter().all(|shard| shard.len() == 5));
-        assert_eq!(six[0][0].index, 1);
-        assert_eq!(six[5][4].index, 30);
-
-        let three = split_chapters_for_parallelism(&chapters, 3);
-        assert_eq!(three.len(), 3);
-        assert!(three.iter().all(|shard| shard.len() == 10));
-
-        let ten = split_chapters_for_parallelism(&chapters, 10);
-        assert_eq!(ten.len(), 10);
-        assert!(ten.iter().all(|shard| shard.len() == 3));
-
-        let single = split_chapters_for_parallelism(&chapters, 1);
-        assert_eq!(single.len(), 1);
-        assert_eq!(single[0].len(), 30);
-
-        let uneven = split_chapters_for_parallelism(&chapters[..24], 10);
-        assert_eq!(uneven.len(), 10);
-        assert_eq!(
-            uneven.iter().map(Vec::len).collect::<Vec<_>>(),
-            vec![3, 3, 3, 3, 2, 2, 2, 2, 2, 2]
-        );
-        assert_eq!(uneven[0][0].index, 1);
-        assert_eq!(uneven[9][1].index, 24);
-    }
-
-    #[test]
-    fn resumed_auto_run_skips_staged_chapters_after_parallelism_changes() {
-        let chapters = (1..=100)
-            .map(|index| sample_chapter(index, &format!("第{index}章"), "正文"))
-            .collect::<Vec<_>>();
-        let staged = chapters
-            .iter()
-            .filter(|chapter| matches!(chapter.index % 5, 0 | 1))
-            .map(|chapter| chapter.id.clone())
-            .collect::<HashSet<_>>();
-
-        let pending = chapters_without_staged_outputs(&chapters, &staged);
-        let twenty_five = build_contiguous_shard_work(&chapters, &pending, 25);
-        let one = build_contiguous_shard_work(&chapters, &pending, 1);
-
-        assert_eq!(staged.len(), 40);
-        assert_eq!(pending.len(), 60);
-        assert_eq!(twenty_five.len(), 20);
-        assert_eq!(one.len(), 20);
-        for work in twenty_five.iter().chain(one.iter()) {
-            assert!(work
-                .chapters
-                .windows(2)
-                .all(|pair| pair[1].index == pair[0].index + 1));
-        }
-        assert_eq!(
-            twenty_five
-                .iter()
-                .flat_map(|work| work.chapters.iter())
-                .count(),
-            pending.len()
-        );
-        assert_eq!(
-            one.iter()
-                .flat_map(|work| work.chapters.iter())
-                .map(|chapter| chapter.id.as_str())
-                .collect::<HashSet<_>>(),
-            pending
-                .iter()
-                .map(|chapter| chapter.id.as_str())
-                .collect::<HashSet<_>>()
-        );
-    }
-
-    #[test]
-    fn resumed_shards_include_completed_neighbors_as_read_only_context() {
-        let chapters = (1..=5)
-            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文正文"))
-            .collect::<Vec<_>>();
-        let target = vec![chapters[2].clone()];
-        let work = build_contiguous_shard_work(&chapters, &target, 1);
-        let staged = HashMap::from([
-            (
-                chapters[1].id.clone(),
-                StagedChapterOutput {
-                    title: Some("第二章改写".to_string()),
-                    content: Some("前文已完成改写".to_string()),
-                },
-            ),
-            (
-                chapters[3].id.clone(),
-                StagedChapterOutput {
-                    title: None,
-                    content: Some("后文已完成改写".to_string()),
-                },
-            ),
-        ]);
-
-        let context = build_readonly_adjacent_context(&work[0], &staged, "rewrite");
-
-        assert!(context.contains("前一相邻章节"));
-        assert!(context.contains("第二章改写"));
-        assert!(context.contains("前文已完成改写"));
-        assert!(context.contains("后一相邻章节"));
-        assert!(context.contains("后文已完成改写"));
-        assert!(!context.contains("YURI_REWRITE_CHAPTER_START"));
     }
 
     #[test]
@@ -8285,21 +7649,6 @@ mod tests {
             assert_eq!(chapter.id, rewrite.id);
             assert_eq!(chapter.index, rewrite.index);
         }
-    }
-
-    #[test]
-    fn shard_context_limits_model_to_current_shard_chapters() {
-        let chapters = (25..=27)
-            .map(|index| sample_chapter(index, &format!("第{index}章"), "原文"))
-            .collect::<Vec<_>>();
-
-        let context = format_shard_context(8, 10, 10, "第1-30章", &chapters);
-
-        assert!(!context.contains("分片 9/10"));
-        assert!(!context.contains("并发请求数"));
-        assert!(context.contains("第25-27章"));
-        assert!(context.contains("第25章、第26章、第27章"));
-        assert!(context.contains("严禁输出输入外的任何章节"));
     }
 
     #[test]
@@ -9645,6 +8994,7 @@ mod tests {
             base_url: "https://api.deepseek.com/v1".to_string(),
             model: "deepseek-chat".to_string(),
             temperature: 0.7,
+            top_p: 1.0,
             thinking_mode: "auto".to_string(),
             has_api_key: true,
             api_key_storage: "system".to_string(),
@@ -9681,6 +9031,7 @@ mod tests {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             model: "anthropic/claude-sonnet-4".to_string(),
             temperature: 0.7,
+            top_p: 1.0,
             thinking_mode: "off".to_string(),
             has_api_key: true,
             api_key_storage: "system".to_string(),
@@ -9733,7 +9084,7 @@ mod tests {
         assert_eq!(payload["thinking"]["type"], "enabled");
 
         profile.base_url = "https://api.siliconflow.cn/v1".to_string();
-        profile.model = "Qwen/Qwen3-235B-A22B-Thinking-2507".to_string();
+        profile.model = "Qwen/Qwen3.5-122B-A10B".to_string();
         profile.thinking_mode = "off".to_string();
         let mut payload = json!({});
         assert!(apply_openai_compatible_thinking_control(
@@ -9742,7 +9093,29 @@ mod tests {
             &profile.base_url,
             &profile.model
         ));
-        assert_eq!(payload["thinking_budget"], 0);
+        assert_eq!(payload["enable_thinking"], false);
+
+        profile.base_url = "https://api.minimax.io/v1".to_string();
+        profile.model = "MiniMax-M2.7".to_string();
+        let mut payload = json!({});
+        assert!(!apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload, json!({}));
+
+        profile.model = "MiniMax-M3".to_string();
+        profile.thinking_mode = "on".to_string();
+        let mut payload = json!({});
+        assert!(apply_openai_compatible_thinking_control(
+            &mut payload,
+            &profile,
+            &profile.base_url,
+            &profile.model
+        ));
+        assert_eq!(payload["thinking"]["type"], "adaptive");
 
         profile.provider = "gemini".to_string();
         profile.model = "gemini-2.5-flash".to_string();
@@ -9752,6 +9125,22 @@ mod tests {
         assert_eq!(
             payload["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             0
+        );
+
+        profile.model = "gemini-2.5-pro".to_string();
+        let mut payload = json!({ "generationConfig": {} });
+        assert!(apply_gemini_thinking_control(&mut payload, &profile));
+        assert_eq!(
+            payload["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            128
+        );
+
+        profile.model = "gemini-3.1-pro-preview".to_string();
+        let mut payload = json!({ "generationConfig": {} });
+        assert!(apply_gemini_thinking_control(&mut payload, &profile));
+        assert_eq!(
+            payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "low"
         );
     }
 
@@ -9764,6 +9153,7 @@ mod tests {
             base_url: "https://api.xiaomimimo.com/v1".to_string(),
             model: "mimo-v2.5-pro".to_string(),
             temperature: 0.7,
+            top_p: 1.0,
             thinking_mode: "auto".to_string(),
             has_api_key: true,
             api_key_storage: "system".to_string(),

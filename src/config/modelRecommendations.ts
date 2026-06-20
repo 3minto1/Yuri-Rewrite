@@ -11,18 +11,21 @@ type ModelSuggestionGroup = {
   models: ModelSuggestion[];
 };
 
+export type ThinkingModeSupport = {
+  disabledModes: Array<"off" | "on">;
+  guidance: string;
+};
+
 export const emptyProfile: ProfileDraft = {
   name: "OpenAI 兼容接口",
   provider: "openai-compatible",
   base_url: "https://api.openai.com/v1",
   model: "请填写模型名",
   temperature: 0.7,
+  top_p: 1,
   thinking_mode: "auto",
   api_key: ""
 };
-
-export const thinkingModeTooltip =
-  "建议自动；分析阶段通常关闭更快\n兼容性：OpenAI 推理模型可控；DeepSeek V4 与 Kimi K2.5 支持 thinking 开关；Gemini 2.5 用 thinkingBudget；SiliconFlow 推理模型用 thinking_budget；Claude 原生 API 支持 extended/adaptive thinking；MiniMax/MiMo/Claude 转发取决于服务商，不支持时会自动降级";
 
 const groups: ModelSuggestionGroup[] = [
   {
@@ -162,4 +165,176 @@ export function getModelSuggestions(profile: ProfileDraft): ModelSuggestion[] {
   return groups.find((group) =>
     group.modelTerms.some((term) => modelHint.includes(term))
   )?.models ?? [];
+}
+
+function includesAny(value: string, terms: string[]) {
+  return terms.some((term) => value.includes(term));
+}
+
+function isSiliconFlowToggleModel(model: string) {
+  return [
+    "deepseek-ai/deepseek-v3.2",
+    "deepseek-ai/deepseek-v3.1-terminus",
+    "qwen/qwen3.5-122b-a10b",
+    "qwen/qwen3.5-35b-a3b",
+    "qwen/qwen3.5-27b"
+  ].includes(model);
+}
+
+export function getThinkingModeSupport(profile: ProfileDraft): ThinkingModeSupport {
+  const base = profile.base_url.trim().toLowerCase();
+  const model = profile.model.trim().toLowerCase();
+  const provider = profile.provider.trim().toLowerCase();
+
+  if (provider === "gemini") {
+    if (model.includes("2.5-pro")) {
+      return {
+        disabledModes: [],
+        guidance: "Gemini 2.5 Pro 始终会思考。自动使用模型默认动态预算；“关闭”会降到官方允许的最低预算 128，不能完全关闭；“开启”使用动态思考。"
+      };
+    }
+    if (model.includes("2.5")) {
+      return {
+        disabledModes: [],
+        guidance: "Gemini 2.5 使用 thinkingBudget。自动不附加参数；支持关闭思考和开启动态思考，但具体可用范围仍取决于所选 2.5 型号。"
+      };
+    }
+    if (model.includes("gemini-3")) {
+      return {
+        disabledModes: [],
+        guidance: "Gemini 3 使用 thinkingLevel。自动采用模型默认级别；“关闭”会改为最低思考级别，不能保证完全不思考；“开启”使用 high。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "当前 Gemini 型号未确认支持可控思考参数。请选择“自动”，程序不会额外发送 thinkingConfig。"
+    };
+  }
+
+  if (base.includes("siliconflow")) {
+    if (isSiliconFlowToggleModel(model)) {
+      return {
+        disabledModes: [],
+        guidance: "SiliconFlow 官方为该模型提供 enable_thinking 开关。自动不附加参数；关闭或开启会发送对应布尔值。"
+      };
+    }
+    if (includesAny(model, ["deepseek-r1", "minimax", "kimi-k2", "gpt-oss"])) {
+      return {
+        disabledModes: ["off", "on"],
+        guidance: "该 SiliconFlow 模型会自行决定或固定使用推理，官方未为此推荐型号提供可靠的开关。请选择“自动”。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "SiliconFlow 只对部分模型提供 enable_thinking。当前型号不在已确认支持列表中，请使用“自动”。"
+    };
+  }
+
+  if (includesAny(base, ["api.deepseek.com"]) || model.startsWith("deepseek-v4")) {
+    return {
+      disabledModes: [],
+      guidance: "DeepSeek V4 支持 Thinking / Non-Thinking 双模式。自动使用服务商默认行为；关闭或开启会发送官方 thinking.type 参数。"
+    };
+  }
+
+  if (includesAny(base, ["volcengine", "volces", "ark.cn-"])) {
+    if (model.replace(/\./g, "-").includes("doubao-seed-2-0")) {
+      return {
+        disabledModes: [],
+        guidance: "豆包 Seed 2.0 支持通过 thinking.type 开启或关闭深度思考。自动不覆盖接入点或模型的默认设置。"
+      };
+    }
+    if (model.includes("thinking")) {
+      return {
+        disabledModes: ["off", "on"],
+        guidance: "该旧版豆包 Thinking 型号并非可切换双模式模型。为避免发送不兼容参数，请使用“自动”。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "当前豆包型号未提供可控思考开关。请选择“自动”，程序不会附加 thinking 参数。"
+    };
+  }
+
+  if (includesAny(base, ["bigmodel", "zhipu", "z.ai"]) || model.startsWith("glm-")) {
+    if (/^glm-(?:[5-9]|4\.(?:[5-9]|[1-9]\d))/.test(model)) {
+      return {
+        disabledModes: [],
+        guidance: "GLM 4.5 及以上支持 thinking.type 开关。自动保留模型默认行为；关闭或开启会发送官方参数。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "该 GLM 型号早于 4.5，未确认支持 thinking.type。请选择“自动”。"
+    };
+  }
+
+  if (includesAny(base, ["moonshot", "kimi"]) || model.startsWith("kimi-")) {
+    if (model.startsWith("kimi-k2.5") || model.startsWith("kimi-k2.6")) {
+      return {
+        disabledModes: [],
+        guidance: "Kimi K2.5 / K2.6 支持 thinking.type 开关。自动采用默认开启；关闭或开启会显式发送官方参数。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "Moonshot V1 等当前型号不支持本应用的思考模式开关。请选择“自动”。"
+    };
+  }
+
+  if (base.includes("minimax") || model.includes("minimax") || model.startsWith("m2-")) {
+    if (model.includes("minimax-m3")) {
+      return {
+        disabledModes: [],
+        guidance: "MiniMax M3 支持关闭或 Adaptive Thinking。自动使用服务商默认开启；开启会发送 adaptive，关闭会发送 disabled。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "MiniMax M2.x 的 thinking 无法关闭，发送 disabled 也不会生效。请选择“自动”，由模型固定启用思考。"
+    };
+  }
+
+  if (includesAny(base, ["xiaomimimo", "mimo.mi.com", "mimo"]) || model.startsWith("mimo-")) {
+    return {
+      disabledModes: [],
+      guidance: "小米 MiMo 的推荐型号支持 thinking.type 开关。自动使用模型默认行为；关闭或开启会发送官方参数。"
+    };
+  }
+
+  if (base.includes("api.openai.com") || base.includes("openai.azure.com")) {
+    if (/^(?:gpt-5|o[134])/.test(model)) {
+      return {
+        disabledModes: [],
+        guidance: "OpenAI 推理模型支持 reasoning_effort。自动使用模型默认推理强度；关闭使用 none，开启使用 medium；个别型号不接受某档位时会自动移除参数重试。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "GPT-4.1、GPT-4o 等非推理型号不支持 reasoning_effort。请选择“自动”。"
+    };
+  }
+
+  if (base.includes("anthropic") || model.startsWith("claude-")) {
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "Claude 原生 API 使用 adaptive / extended thinking，但本应用当前调用的是 OpenAI 兼容 Chat Completions，不能直接发送 Anthropic 原生参数。通过第三方转发时请使用“自动”。"
+    };
+  }
+
+  return {
+    disabledModes: ["off", "on"],
+    guidance: "当前兼容接口未确认支持哪种思考参数。建议使用“自动”；程序不会额外发送参数，避免接口兼容错误。"
+  };
+}
+
+export function normalizeThinkingMode(profile: ProfileDraft): ProfileDraft {
+  const support = getThinkingModeSupport(profile);
+  if (
+    profile.thinking_mode !== "auto"
+    && support.disabledModes.includes(profile.thinking_mode)
+  ) {
+    return { ...profile, thinking_mode: "auto" };
+  }
+  return profile;
 }

@@ -1,5 +1,9 @@
-import { ChevronDown, FilePlus2, KeyRound, Loader2, Save } from "lucide-react";
+import { ChevronDown, FilePlus2, HelpCircle, KeyRound, Loader2, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
+import {
+  getThinkingModeSupport,
+  normalizeThinkingMode
+} from "../../config/modelRecommendations";
 import type { ModelProfile, ProfileDraft } from "../../types";
 import { ScrollablePanel } from "../common/ScrollablePanel";
 
@@ -13,7 +17,6 @@ type ModelConfigProps = {
   busy: string;
   processing: boolean;
   savedApiKeyMask: string;
-  thinkingModeTooltip: string;
   onSuggestionsOpenChange: (open: boolean) => void;
   onCreate: () => void;
   onDiagnose: () => void;
@@ -23,9 +26,13 @@ type ModelConfigProps = {
 export function ModelConfig(props: ModelConfigProps) {
   const {
     draft, setDraft, selectedProfile, selectedProfileId, suggestions, suggestionsOpen,
-    busy, processing, savedApiKeyMask, thinkingModeTooltip, onSuggestionsOpenChange,
+    busy, processing, savedApiKeyMask, onSuggestionsOpenChange,
     onCreate, onDiagnose, onSave
   } = props;
+  const thinkingSupport = getThinkingModeSupport(draft);
+  const updateProviderFields = (updates: Partial<ProfileDraft>) => {
+    setDraft((current) => normalizeThinkingMode({ ...current, ...updates }));
+  };
   return (
     <section className="panel model-panel">
       <div className="panel-heading">
@@ -47,8 +54,7 @@ export function ModelConfig(props: ModelConfigProps) {
             Provider
             <select
               value={draft.provider}
-              onChange={(event) => setDraft({
-                ...draft,
+              onChange={(event) => updateProviderFields({
                 provider: event.target.value,
                 base_url: event.target.value === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : draft.base_url
               })}
@@ -57,11 +63,11 @@ export function ModelConfig(props: ModelConfigProps) {
               <option value="gemini">Google Gemini</option>
             </select>
           </label>
-          <label>Base URL<input value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} /></label>
+          <label>Base URL<input value={draft.base_url} onChange={(event) => updateProviderFields({ base_url: event.target.value })} /></label>
           <label>
             模型名
             <div className="model-name-control">
-              <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} />
+              <input value={draft.model} onChange={(event) => updateProviderFields({ model: event.target.value })} />
               {suggestions.length > 0 && (
                 <button
                   type="button"
@@ -81,7 +87,10 @@ export function ModelConfig(props: ModelConfigProps) {
                       role="option"
                       aria-selected={draft.model === suggestion.model}
                       onClick={() => {
-                        setDraft((current) => ({ ...current, model: suggestion.model }));
+                        setDraft((current) => normalizeThinkingMode({
+                          ...current,
+                          model: suggestion.model
+                        }));
                         onSuggestionsOpenChange(false);
                       }}
                     ><span>{suggestion.label}</span><small>{suggestion.model}</small></button>
@@ -91,11 +100,39 @@ export function ModelConfig(props: ModelConfigProps) {
             </div>
           </label>
           <label>
-            Temperature
-            <input type="number" min="0" max="2" step="0.1" value={draft.temperature} onChange={(event) => setDraft({ ...draft, temperature: Number(event.target.value) })} />
+            <span className="model-parameter-heading">
+              Temperature
+              <span className="setting-help" tabIndex={0} aria-label="Temperature 参数说明">
+                <HelpCircle size={15} />
+                <span className="setting-help-tooltip model-parameter-tooltip" role="tooltip">
+                  修改AI回复的创造力；值越高，回复变得越随机和有趣，而较低的值则确保更大的稳定性和可靠性。
+                </span>
+              </span>
+            </span>
+            <input aria-label="Temperature" type="number" min="0" max="2" step="0.1" value={draft.temperature} onChange={(event) => setDraft({ ...draft, temperature: Number(event.target.value) })} />
           </label>
-          <label className="mode-field thinking-mode-field form-full" title={thinkingModeTooltip}>
-            <span>思考模式</span>
+          <label>
+            <span className="model-parameter-heading">
+              Top P
+              <span className="setting-help" tabIndex={0} aria-label="Top P 参数说明">
+                <HelpCircle size={15} />
+                <span className="setting-help-tooltip model-parameter-tooltip model-parameter-tooltip-right" role="tooltip">
+                  topP 参数控制 AI 响应的多样性：较低的值使输出更集中和可预测，而较高的值则允许更多样化和富有创意的回复。
+                </span>
+              </span>
+            </span>
+            <input aria-label="Top P" type="number" min="0" max="1" step="0.05" value={draft.top_p} onChange={(event) => setDraft({ ...draft, top_p: Number(event.target.value) })} />
+          </label>
+          <label className="mode-field thinking-mode-field form-full">
+            <span className="model-parameter-heading">
+              思考模式
+              <span className="setting-help" tabIndex={0} aria-label="思考模式说明">
+                <HelpCircle size={15} />
+                <span className="setting-help-tooltip thinking-mode-tooltip" role="tooltip">
+                  {thinkingSupport.guidance}
+                </span>
+              </span>
+            </span>
             <div className="mode-toggle mode-toggle-three" role="radiogroup" aria-label="思考模式">
               {(["auto", "off", "on"] as const).map((mode) => (
                 <button
@@ -104,7 +141,7 @@ export function ModelConfig(props: ModelConfigProps) {
                   className={draft.thinking_mode === mode ? "active" : ""}
                   role="radio"
                   aria-checked={draft.thinking_mode === mode}
-                  title={thinkingModeTooltip}
+                  disabled={mode !== "auto" && thinkingSupport.disabledModes.includes(mode)}
                   onClick={() => setDraft({ ...draft, thinking_mode: mode })}
                 >{mode === "auto" ? "自动" : mode === "off" ? "关闭" : "开启"}</button>
               ))}

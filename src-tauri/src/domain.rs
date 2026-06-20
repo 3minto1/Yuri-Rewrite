@@ -112,6 +112,7 @@ pub(crate) struct ModelProfile {
     pub(crate) base_url: String,
     pub(crate) model: String,
     pub(crate) temperature: f64,
+    pub(crate) top_p: f64,
     pub(crate) thinking_mode: String,
     pub(crate) has_api_key: bool,
     pub(crate) api_key_storage: String,
@@ -126,8 +127,14 @@ pub(crate) struct ModelProfileInput {
     pub(crate) base_url: String,
     pub(crate) model: String,
     pub(crate) temperature: f64,
+    #[serde(default = "default_top_p")]
+    pub(crate) top_p: f64,
     pub(crate) thinking_mode: Option<String>,
     pub(crate) api_key: Option<String>,
+}
+
+fn default_top_p() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Serialize, Deserialize)]

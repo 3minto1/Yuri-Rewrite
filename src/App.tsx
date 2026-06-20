@@ -40,7 +40,7 @@ import { TaskEstimate } from "./components/Workspace/TaskEstimate";
 import {
   emptyProfile as defaultProfile,
   getModelSuggestions as detectModelSuggestions,
-  thinkingModeTooltip as modelThinkingModeTooltip
+  normalizeThinkingMode
 } from "./config/modelRecommendations";
 import { useModelProfiles } from "./hooks/useModelProfiles";
 import { useNovels } from "./hooks/useNovels";
@@ -88,6 +88,7 @@ const emptyProfile: ProfileDraft = {
   base_url: "https://api.openai.com/v1",
   model: "请填写模型名",
   temperature: 0.7,
+  top_p: 1,
   thinking_mode: "auto",
   api_key: ""
 };
@@ -105,8 +106,6 @@ const emptyNovelSettings: NovelSettingsDraft = {
 
 const savedApiKeyMask = "********";
 const quickStartSeenKey = "yuri-rewrite.quick-start-seen";
-const thinkingModeTooltip =
-  "建议自动；分析阶段通常关闭更快\n兼容性：OpenAI 推理模型可控；DeepSeek V4 与 Kimi K2.5 支持 thinking 开关；Gemini 2.5 用 thinkingBudget；SiliconFlow 推理模型用 thinking_budget；Claude 原生 API 支持 extended/adaptive thinking；MiniMax/MiMo/Claude 转发取决于服务商，不支持时会自动降级";
 const modelSuggestionGroups: ModelSuggestionGroup[] = [
   {
     id: "deepseek",
@@ -561,16 +560,17 @@ export default function App() {
     const profile = selectedProfile;
     setModelDiagnosis(null);
     if (!profile) return;
-    setProfileDraft({
+    setProfileDraft(normalizeThinkingMode({
       id: profile.id,
       name: profile.name,
       provider: profile.provider,
       base_url: profile.base_url,
       model: profile.model,
       temperature: profile.temperature,
+      top_p: profile.top_p,
       thinking_mode: profile.thinking_mode === "off" || profile.thinking_mode === "on" ? profile.thinking_mode : "auto",
       api_key: profile.has_api_key ? savedApiKeyMask : ""
-    });
+    }));
   }, [selectedProfile]);
 
   useEffect(() => {
@@ -2127,7 +2127,6 @@ export default function App() {
                 busy={busy}
                 processing={adjustableWhilePaused}
                 savedApiKeyMask={savedApiKeyMask}
-                thinkingModeTooltip={modelThinkingModeTooltip}
                 onSuggestionsOpenChange={setOpenModelSuggestions}
                 onCreate={createNewModelProfile}
                 onDiagnose={diagnoseProfile}

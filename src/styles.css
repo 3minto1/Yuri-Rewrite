@@ -1119,6 +1119,39 @@ pre {
   border: 0;
 }
 
+.model-parameter-heading {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.model-parameter-tooltip {
+  box-sizing: border-box;
+  left: -8px;
+  max-width: calc(100vw - 64px);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  width: min(360px, calc(100vw - 48px));
+}
+
+.model-parameter-tooltip-right {
+  left: auto;
+  right: -8px;
+}
+
+.model-parameter-tooltip-right::before {
+  left: auto;
+  right: 10px;
+}
+
+.thinking-mode-tooltip {
+  box-sizing: border-box;
+  max-width: calc(100vw - 64px);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  width: min(520px, calc(100vw - 48px));
+}
+
 .form-full {
   grid-column: 1 / -1;
 }

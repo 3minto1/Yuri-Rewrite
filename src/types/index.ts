@@ -67,6 +67,7 @@ export type ModelProfile = {
   base_url: string;
   model: string;
   temperature: number;
+  top_p: number;
   thinking_mode: "auto" | "off" | "on";
   has_api_key: boolean;
   api_key_storage: "system" | "database_fallback" | "none";
@@ -80,6 +81,7 @@ export type ProfileDraft = {
   base_url: string;
   model: string;
   temperature: number;
+  top_p: number;
   thinking_mode: "auto" | "off" | "on";
   api_key: string;
 };
