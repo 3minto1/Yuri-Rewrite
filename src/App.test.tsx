@@ -523,6 +523,19 @@ describe("App feature behavior", () => {
     }));
   });
 
+  it("removes the repeated topbar from secondary operational pages", async () => {
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(container.querySelector(".topbar")).not.toBeNull();
+
+    for (const pageName of ["对比", "日志", "Token统计", "设置"]) {
+      fireEvent.click(screen.getByRole("button", { name: pageName }));
+      await waitFor(() => expect(container.querySelector(".topbar")).toBeNull());
+      fireEvent.click(screen.getByRole("button", { name: "返回" }));
+      await waitFor(() => expect(container.querySelector(".topbar")).not.toBeNull());
+    }
+  });
+
   it("rewrites one completed chapter from the compare page and replaces its text", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "list_novels") return novels;

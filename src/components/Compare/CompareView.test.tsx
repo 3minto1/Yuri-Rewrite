@@ -58,6 +58,12 @@ function Harness({
   );
 }
 
+function selectChapter(title: string) {
+  const selector = screen.getByRole("combobox", { name: "章节" });
+  if (selector.getAttribute("aria-expanded") !== "true") fireEvent.click(selector);
+  fireEvent.click(screen.getByRole("option", { name: new RegExp(title) }));
+}
+
 describe("CompareView", () => {
   beforeEach(() => {
     clearDiffCache();
@@ -102,12 +108,25 @@ describe("CompareView", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
       target: { value: "尚未保存的正文" }
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+    selectChapter("第二章");
 
     expect(screen.getByRole("dialog", { name: "改写稿尚未保存" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c1");
+    expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("1. 第一章");
     fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c2"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("2. 第二章"));
+  });
+
+  it("shows completed as presentation-only status in the chapter menu", () => {
+    render(<Harness initialChapters={[
+      chapters[0],
+      { ...chapters[1], rewrite_text: null, rewrite_status: "pending" }
+    ]} />);
+
+    fireEvent.click(screen.getByRole("combobox", { name: "章节" }));
+    const completedOption = screen.getByRole("option", { name: /第一章 completed/ });
+    expect(within(completedOption).getByText("completed")).toHaveClass("compare-chapter-completed");
+    expect(screen.getByRole("option", { name: "2. 第二章" })).not.toHaveTextContent("completed");
+    expect(chapters[0].title).toBe("第一章");
   });
 
   it("collects optional instructions before rewriting the current chapter", async () => {
@@ -215,7 +234,7 @@ describe("CompareView", () => {
     fireEvent.click(screen.getByRole("button", { name: "向下搜索" }));
     expect(within(screen.getByLabelText("改写稿内容")).getByText("目标")).toHaveClass("active-search-match");
     fireEvent.click(screen.getByRole("button", { name: "向下搜索" }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c2"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("2. 第二章"));
     fireEvent.click(screen.getByRole("button", { name: "向下搜索" }));
     fireEvent.click(screen.getByRole("button", { name: "向下搜索" }));
     await waitFor(() => expect(searchStatus()).toHaveTextContent("1 / 4 · 已循环"));
@@ -230,7 +249,7 @@ describe("CompareView", () => {
     await waitFor(() => expect(searchStatus()).toHaveTextContent("1 / 2"));
     fireEvent.click(screen.getByRole("button", { name: "区分大小写" }));
     await waitFor(() => expect(searchStatus()).toHaveTextContent("1 / 1"));
-    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+    selectChapter("第二章");
     expect(screen.getByRole("textbox", { name: "全局搜索" })).toHaveValue("Alpha");
     await waitFor(() => expect(searchStatus()).toHaveTextContent("— / 1"));
   });
@@ -264,7 +283,7 @@ describe("CompareView", () => {
     vi.stubGlobal("Worker", WorkerMock);
     render(<Harness />);
     await waitFor(() => expect(workers).toHaveLength(1));
-    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+    selectChapter("第二章");
     await waitFor(() => expect(workers).toHaveLength(2));
     expect(workers[0].terminate).toHaveBeenCalledOnce();
   });
@@ -286,7 +305,7 @@ describe("CompareView", () => {
     vi.stubGlobal("Worker", WorkerMock);
     render(<Harness />);
     await waitFor(() => expect(workers).toHaveLength(1));
-    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+    selectChapter("第二章");
     await waitFor(() => expect(workers).toHaveLength(2));
     workers[0].onmessage?.({
       data: {
@@ -314,10 +333,10 @@ describe("CompareView", () => {
     vi.stubGlobal("Worker", WorkerMock);
     render(<Harness />);
     await waitFor(() => expect(workers).toHaveLength(1));
-    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c2" } });
+    selectChapter("第二章");
     await waitFor(() => expect(workers).toHaveLength(2));
-    fireEvent.change(screen.getByRole("combobox", { name: "章节" }), { target: { value: "c1" } });
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue("c1"));
+    selectChapter("第一章");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("1. 第一章"));
     expect(workers).toHaveLength(2);
   });
 

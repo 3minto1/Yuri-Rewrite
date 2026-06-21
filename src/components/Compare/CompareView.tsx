@@ -39,6 +39,130 @@ type DiffState = DiffResult & {
   error?: string;
 };
 
+type ChapterSelectorProps = {
+  chapters: Chapter[];
+  selectedChapterId: string;
+  onSelect: (chapterId: string) => void;
+};
+
+const ChapterSelector = memo(function ChapterSelector({
+  chapters,
+  selectedChapterId,
+  onSelect
+}: ChapterSelectorProps) {
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const selectedIndex = Math.max(0, chapters.findIndex((chapter) => chapter.id === selectedChapterId));
+  const selectedChapter = chapters[selectedIndex];
+
+  function focusOption(index: number) {
+    const nextIndex = Math.max(0, Math.min(index, chapters.length - 1));
+    setActiveIndex(nextIndex);
+    window.requestAnimationFrame(() => optionRefs.current[nextIndex]?.focus());
+  }
+
+  function openMenu(index = selectedIndex) {
+    setOpen(true);
+    setActiveIndex(index);
+    window.requestAnimationFrame(() => {
+      const option = optionRefs.current[index];
+      option?.focus();
+      option?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function closeMenu() {
+    setOpen(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    function handleOutsidePointer(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    window.addEventListener("mousedown", handleOutsidePointer);
+    return () => window.removeEventListener("mousedown", handleOutsidePointer);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) setActiveIndex(selectedIndex);
+  }, [open, selectedIndex]);
+
+  return (
+    <div className="compare-chapter-selector" ref={rootRef}>
+      <button
+        type="button"
+        className="compare-chapter-trigger"
+        ref={triggerRef}
+        role="combobox"
+        aria-label="章节"
+        aria-expanded={open}
+        aria-controls="compare-chapter-options"
+        onClick={() => open ? closeMenu() : openMenu()}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            openMenu(event.key === "ArrowDown" ? selectedIndex : Math.max(0, selectedIndex - 1));
+          }
+        }}
+      >
+        <span>{selectedChapter ? `${selectedChapter.index}. ${selectedChapter.title}` : "请选择章节"}</span>
+        <ChevronDown size={17} aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          id="compare-chapter-options"
+          className="compare-chapter-options"
+          role="listbox"
+          aria-label="章节列表"
+        >
+          {chapters.map((chapter, index) => {
+            const completed = chapter.rewrite_status === "completed"
+              && Boolean(chapter.rewrite_text?.trim());
+            return (
+              <button
+                type="button"
+                key={chapter.id}
+                ref={(node) => { optionRefs.current[index] = node; }}
+                className={chapter.id === selectedChapterId ? "active" : ""}
+                role="option"
+                aria-selected={chapter.id === selectedChapterId}
+                tabIndex={index === activeIndex ? 0 : -1}
+                onClick={() => {
+                  closeMenu();
+                  onSelect(chapter.id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    focusOption((index + 1) % chapters.length);
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    focusOption((index - 1 + chapters.length) % chapters.length);
+                  } else if (event.key === "Home" || event.key === "End") {
+                    event.preventDefault();
+                    focusOption(event.key === "Home" ? 0 : chapters.length - 1);
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeMenu();
+                  }
+                }}
+              >
+                <span className="compare-chapter-option-title">{chapter.index}. {chapter.title}</span>
+                {completed && <span className="compare-chapter-completed">completed</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+});
+
 const EMPTY_RANGES: DiffRange[] = [];
 
 function emptyDiffState(chapterId: string, original: string, rewrite: string, loading = false): DiffState {
@@ -287,6 +411,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   }
 
   function handleManualChapterSelect(chapterId: string) {
+    if (chapterId === selectedChapterId) return;
     navigationTargetRef.current = null;
     setActiveMatchIndex(null);
     setWrapped(false);
@@ -350,9 +475,11 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
       <div className="compare-page-toolbar">
         <label>
           章节
-          <select value={selectedChapterId} onChange={(event) => handleManualChapterSelect(event.target.value)}>
-            {chapters.map((chapter) => <option key={chapter.id} value={chapter.id}>{chapter.index}. {chapter.title}</option>)}
-          </select>
+          <ChapterSelector
+            chapters={chapters}
+            selectedChapterId={selectedChapterId}
+            onSelect={handleManualChapterSelect}
+          />
         </label>
         <div className="compare-toolbar-actions">
           <button

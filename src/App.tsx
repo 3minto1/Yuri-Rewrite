@@ -1771,6 +1771,7 @@ export default function App() {
       </aside>
 
       <section className="workspace">
+        {!["compare", "settings", "token-stats", "logs"].includes(activeView) && (
         <header className="topbar">
           <div>
             <h1>
@@ -1886,6 +1887,7 @@ export default function App() {
             </div>
           )}
         </header>
+        )}
 
         {notice && (
           <div className="notice notice-panel">
