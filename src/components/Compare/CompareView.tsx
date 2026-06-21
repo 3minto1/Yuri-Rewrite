@@ -2,6 +2,7 @@ import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareA
 import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { Chapter } from "../../types";
 import { Modal } from "../common/Modal";
+import { StatusBadge } from "../common/StatusBadge";
 import { calculateDiff, type DiffRange, type DiffResult, type DiffSide } from "./compareDiff";
 import { getCachedDiff, setCachedDiff } from "./compareDiffCache";
 import { HighlightedText } from "./HighlightedText";
@@ -153,7 +154,13 @@ const ChapterSelector = memo(function ChapterSelector({
                 }}
               >
                 <span className="compare-chapter-option-title">{chapter.index}. {chapter.title}</span>
-                {completed && <span className="compare-chapter-completed">completed</span>}
+                {completed && (
+                  <StatusBadge
+                    status="completed"
+                    label="completed"
+                    className="compare-chapter-completed"
+                  />
+                )}
               </button>
             );
           })}
@@ -473,39 +480,18 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   return (
     <div className="compare-page">
       <div className="compare-page-toolbar">
-        <label>
-          章节
-          <ChapterSelector
-            chapters={chapters}
-            selectedChapterId={selectedChapterId}
-            onSelect={handleManualChapterSelect}
-          />
-        </label>
-        <div className="compare-toolbar-actions">
-          <button
-            onClick={() => runOrConfirmNavigation(() => void restoreInitialRewrite())}
-            disabled={
-              !selectedChapter?.single_rewrite_original_available
-              || !rewriteText.trim()
-              || !editingAllowed
-              || rewriteBusy
-              || busy !== ""
-            }
-            title={
-              !selectedChapter?.single_rewrite_original_available
-                ? "当前章节没有可恢复的单章重写初稿"
-                : editingAllowed
-                  ? "恢复到第一次单章重新改写前的初稿"
-                  : editDisabledReason
-            }
-          >
-            <RotateCcw size={17} />恢复初稿
-          </button>
-          <button className={searchOpen ? "active" : ""} aria-pressed={searchOpen} onClick={() => searchOpen ? closeSearch() : setSearchOpen(true)}><Search size={17} />查找</button>
-          <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
+        <div className="compare-toolbar-row compare-toolbar-primary-row">
+          <label>
+            章节
+            <ChapterSelector
+              chapters={chapters}
+              selectedChapterId={selectedChapterId}
+              onSelect={handleManualChapterSelect}
+            />
+          </label>
           <div className="split-button compare-rewrite-split">
             <button
-              className="split-button-main"
+              className="split-button-main action-primary"
               onClick={() => runOrConfirmNavigation(() => {
                 setRewriteSourceMode("original");
                 setRewriteDialogOpen(true);
@@ -516,7 +502,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
               <RefreshCw size={17} />重写本章（原文）
             </button>
             <button
-              className="split-button-toggle"
+              className="split-button-toggle action-primary"
               type="button"
               aria-label="重写本章选项"
               aria-expanded={rewriteMenuOpen}
@@ -544,10 +530,37 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
               </div>
             )}
           </div>
+        </div>
+        <div className="compare-toolbar-row compare-toolbar-secondary-row">
+          <div className="compare-toolbar-actions compare-toolbar-left-actions">
+          <button
+            onClick={() => runOrConfirmNavigation(() => void restoreInitialRewrite())}
+            disabled={
+              !selectedChapter?.single_rewrite_original_available
+              || !rewriteText.trim()
+              || !editingAllowed
+              || rewriteBusy
+              || busy !== ""
+            }
+            title={
+              !selectedChapter?.single_rewrite_original_available
+                ? "当前章节没有可恢复的单章重写初稿"
+                : editingAllowed
+                  ? "恢复到第一次单章重新改写前的初稿"
+                  : editDisabledReason
+            }
+          >
+            <RotateCcw size={17} />恢复初稿
+          </button>
+          <button className={searchOpen ? "active" : ""} aria-pressed={searchOpen} onClick={() => searchOpen ? closeSearch() : setSearchOpen(true)}><Search size={17} />查找</button>
+          <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
+          </div>
+          <div className="compare-toolbar-actions compare-toolbar-right-actions">
           <button onClick={() => runOrConfirmNavigation(onBack)}><ArrowLeft size={17} />返回</button>
           <button onClick={onExport} disabled={busy !== ""}><Download size={17} />TXT</button>
+          </div>
         </div>
-      </div>
+        </div>
       {searchOpen && (
         <div className="compare-search-bar" role="search">
           <Search size={18} aria-hidden="true" />

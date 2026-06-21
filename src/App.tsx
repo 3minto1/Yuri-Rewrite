@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CompareView } from "./components/Compare/CompareView";
 import { DeleteNovelDialog } from "./components/common/DeleteNovelDialog";
 import { Modal } from "./components/common/Modal";
+import { getStatusTone, StatusBadge } from "./components/common/StatusBadge";
 import { ModelProfiles } from "./components/Settings/ModelProfiles";
 import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/NovelSettings";
 import { CoreSettingsPage } from "./components/pages/CoreSettingsPage";
@@ -1811,6 +1812,7 @@ export default function App() {
                 <>
                   {autoRunMode !== "batch" && (
                     <button
+                      className="task-control-warning"
                       onClick={autoRunState === "paused" ? () => void runAnalyzeRewriteAll() : pauseAnalyzeRewriteAll}
                       disabled={autoControlBusy || autoRunState === "stopping"}
                       title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
@@ -1825,15 +1827,15 @@ export default function App() {
                       {autoRunState === "paused" ? "继续" : "暂停"}
                     </button>
                   )}
-                  <button onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy} title="终止一键分析改写">
+                  <button className="task-control-danger" onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy} title="终止一键分析改写">
                     {autoControlBusy ? <Loader2 className="spin" size={17} /> : <Square size={17} />}
                     终止
                   </button>
                 </>
               )}
-              <div className="split-button" ref={autoRunMenuRef}>
+              <div className="split-button task-primary-split" ref={autoRunMenuRef}>
                 <button
-                  className="split-button-main"
+                  className="split-button-main action-primary"
                   onClick={() => void runAnalyzeRewriteAll()}
                   disabled={!detail || !selectedProfileId || busy !== "" || autoRunState !== "idle"}
                   title="AI自动分析改写全文，耗时较久"
@@ -1842,7 +1844,7 @@ export default function App() {
                   一键分析改写
                 </button>
                 <button
-                  className="split-button-toggle"
+                  className="split-button-toggle action-primary"
                   aria-label="一键分析改写选项"
                   aria-expanded={autoRunMenuOpen}
                   onClick={() => setAutoRunMenuOpen((open) => !open)}
@@ -1863,6 +1865,7 @@ export default function App() {
                 )}
               </div>
               <button
+                className="action-primary"
                 onClick={runAnalyzeRewriteCurrentBatch}
                 disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
                 title="AI自动分析并改写当前选中批次"
@@ -1870,20 +1873,22 @@ export default function App() {
                 {busy === "auto-batch" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
                 一键分析改写当前批次
               </button>
-              <button
-                onClick={() => runJob("analysis")}
-                disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-              >
-                {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
-                分析
-              </button>
-              <button
-                onClick={() => runJob("rewrite")}
-                disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-              >
-                {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-                改写
-              </button>
+              <div className="task-secondary-group">
+                <button
+                  onClick={() => runJob("analysis")}
+                  disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+                >
+                  {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
+                  分析
+                </button>
+                <button
+                  onClick={() => runJob("rewrite")}
+                  disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+                >
+                  {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+                  改写
+                </button>
+              </div>
             </div>
           )}
         </header>
@@ -1906,11 +1911,15 @@ export default function App() {
           </div>
         )}
         {modelDiagnosis && (
-          <div className={`diagnosis-panel diagnosis-top-panel ${modelDiagnosis.status}`}>
+          <div className={`diagnosis-panel diagnosis-top-panel status-container status-${getStatusTone(modelDiagnosis.status)}`}>
             <div className="diagnosis-heading">
-              <strong>诊断结果：{diagnosisStatusText(modelDiagnosis.status)}</strong>
+              <strong>诊断结果</strong>
+              <StatusBadge
+                status={modelDiagnosis.status}
+                label={diagnosisStatusText(modelDiagnosis.status)}
+              />
               {modelDiagnosis.recommended_thinking_mode && (
-                <span>建议思考模式：{modelDiagnosis.recommended_thinking_mode}</span>
+                <span className="diagnosis-recommendation">建议思考模式：{modelDiagnosis.recommended_thinking_mode}</span>
               )}
               <button
                 className="icon-button diagnosis-close"
@@ -1923,8 +1932,12 @@ export default function App() {
             </div>
             <div className="diagnosis-list">
               {modelDiagnosis.checks.map((check) => (
-                <div className={`diagnosis-item ${check.status}`} key={`${check.name}-${check.message}`}>
-                  <span>{diagnosisStatusText(check.status)}</span>
+                <div className="diagnosis-item" key={`${check.name}-${check.message}`}>
+                  <StatusBadge
+                    status={check.status}
+                    label={diagnosisStatusText(check.status)}
+                    showDot={false}
+                  />
                   <div>
                     <strong>{check.name}</strong>
                     <p>{check.message}</p>
@@ -1935,12 +1948,13 @@ export default function App() {
           </div>
         )}
         {job && activeView === "workspace" && (
-          <div className={`job-strip ${job.status}`}>
+          <div className={`job-strip status-container status-${getStatusTone(job.status)}`}>
             <CheckCircle2 size={17} />
             <div className="job-content">
-              <span>
-                {job.job_type === "auto_batch" ? "当前批次一键任务" : job.job_type} · {statusText[job.status] ?? job.status} · {job.current_chapter}/{job.total_chapters} ·{" "}
-                {job.message}
+              <span className="job-summary">
+                <span>{job.job_type === "auto_batch" ? "当前批次一键任务" : job.job_type}</span>
+                <StatusBadge status={job.status} label={statusText[job.status] ?? job.status} />
+                <span>{job.current_chapter}/{job.total_chapters} · {job.message}</span>
                 {job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running"
                   ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}`
                   : ""}

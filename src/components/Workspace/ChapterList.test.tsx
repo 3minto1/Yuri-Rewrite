@@ -25,6 +25,21 @@ describe("ChapterList", () => {
     const rows = chapters(CHAPTER_VIRTUALIZATION_THRESHOLD - 1);
     render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={vi.fn()} displayTitle={displayTitle} statusText={statusText} />);
     expect(screen.getAllByRole("button").filter((button) => button.className.includes("chapter-item"))).toHaveLength(rows.length);
+    expect(screen.getAllByText("分析 待处理")[0].closest(".status-badge")).toHaveClass("status-neutral");
+    expect(screen.getAllByText("改写 待处理")[0].closest(".status-badge")).toHaveClass("status-neutral");
+  });
+
+  it("shows independent analysis and rewrite status tones", () => {
+    const rows = [{
+      ...chapters(1)[0],
+      analysis_status: "completed",
+      rewrite_status: "running"
+    }];
+    render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={vi.fn()} displayTitle={displayTitle} statusText={{ ...statusText, running: "进行中" }} />);
+
+    expect(screen.getByText("分析 完成").closest(".status-badge")).toHaveClass("status-success");
+    expect(screen.getByText("改写 进行中").closest(".status-badge")).toHaveClass("status-progress");
+    expect(screen.getByRole("button", { name: /第1章/ })).toHaveAttribute("title", "1. 第1章");
   });
 
   it("virtualizes at the threshold and for very large novels", () => {

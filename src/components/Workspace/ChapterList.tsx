@@ -2,9 +2,10 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import { List, useListRef, type RowComponentProps } from "react-window";
 import type { Chapter } from "../../types";
 import { ScrollablePanel } from "../common/ScrollablePanel";
+import { StatusBadge } from "../common/StatusBadge";
 
 export const CHAPTER_VIRTUALIZATION_THRESHOLD = 300;
-const CHAPTER_ROW_HEIGHT = 68;
+const CHAPTER_ROW_HEIGHT = 76;
 
 type ChapterListProps = {
   chapters: Chapter[];
@@ -16,16 +17,31 @@ type ChapterListProps = {
 
 type ChapterRowProps = Pick<ChapterListProps, "chapters" | "selectedChapterId" | "onSelect" | "displayTitle" | "statusText">;
 
-type ChapterButtonProps = Omit<ChapterRowProps, "chapters"> & { chapter: Chapter };
+type ChapterButtonProps = Omit<ChapterRowProps, "chapters"> & {
+  chapter: Chapter;
+  buttonRef?: (node: HTMLButtonElement | null) => void;
+};
 
-const ChapterButton = memo(function ChapterButton({ chapter, selectedChapterId, onSelect, displayTitle, statusText }: ChapterButtonProps) {
+const ChapterButton = memo(function ChapterButton({ chapter, selectedChapterId, onSelect, displayTitle, statusText, buttonRef }: ChapterButtonProps) {
+  const title = `${chapter.index}. ${displayTitle(chapter)}`;
   return (
     <button
+      ref={buttonRef}
       className={selectedChapterId === chapter.id ? "chapter-item active" : "chapter-item"}
       onClick={() => onSelect(chapter.id)}
+      title={title}
     >
-      <span className="chapter-title">{chapter.index}. {displayTitle(chapter)}</span>
-      <small>分析 {statusText[chapter.analysis_status] ?? chapter.analysis_status} · 改写 {statusText[chapter.rewrite_status] ?? chapter.rewrite_status}</small>
+      <span className="chapter-title">{title}</span>
+      <span className="chapter-status-row">
+        <StatusBadge
+          status={chapter.analysis_status}
+          label={`分析 ${statusText[chapter.analysis_status] ?? chapter.analysis_status}`}
+        />
+        <StatusBadge
+          status={chapter.rewrite_status}
+          label={`改写 ${statusText[chapter.rewrite_status] ?? chapter.rewrite_status}`}
+        />
+      </span>
     </button>
   );
 });
@@ -139,15 +155,15 @@ export const ChapterList = memo(function ChapterList({ chapters, selectedChapter
       ) : (
         <ScrollablePanel className="chapter-list">
           {visibleChapters.map((chapter) => (
-            <button
+            <ChapterButton
               key={chapter.id}
-              ref={selectedChapterId === chapter.id ? selectedButtonRef : undefined}
-              className={selectedChapterId === chapter.id ? "chapter-item active" : "chapter-item"}
-              onClick={() => onSelect(chapter.id)}
-            >
-              <span className="chapter-title">{chapter.index}. {displayTitle(chapter)}</span>
-              <small>分析 {statusText[chapter.analysis_status] ?? chapter.analysis_status} · 改写 {statusText[chapter.rewrite_status] ?? chapter.rewrite_status}</small>
-            </button>
+              chapter={chapter}
+              selectedChapterId={selectedChapterId}
+              buttonRef={selectedChapterId === chapter.id ? (node) => { selectedButtonRef.current = node; } : undefined}
+              onSelect={onSelect}
+              displayTitle={displayTitle}
+              statusText={statusText}
+            />
           ))}
         </ScrollablePanel>
       )}

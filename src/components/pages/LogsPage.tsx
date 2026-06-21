@@ -1,5 +1,6 @@
 import { ArrowLeft, RefreshCw, Trash2 } from "lucide-react";
 import type { AiLog } from "../../types";
+import { getStatusTone, StatusBadge } from "../common/StatusBadge";
 
 type LogsPageProps = {
   logs: AiLog[];
@@ -26,15 +27,16 @@ export function LogsPage({ logs, busy, onBack, onClear, onRefresh }: LogsPagePro
       </div>
       <div className="full-log-list">
         {logs.map((log) => (
-          <article className={`full-log-item ${log.status}`} key={log.id}>
+          <article className={`full-log-item status-container status-${getStatusTone(log.status)}`} key={log.id}>
             <header>
               <div>
                 <strong>{log.action}</strong>
                 <span>{log.chapter_title || "全局调用"} · {new Date(log.created_at).toLocaleString()}</span>
               </div>
-              <span className="log-status">
-                {log.status}{log.finish_reason ? ` · ${log.finish_reason}` : ""}
-              </span>
+              <StatusBadge
+                status={log.status}
+                label={`${log.status}${log.finish_reason ? ` · ${log.finish_reason}` : ""}`}
+              />
             </header>
             {log.reasoning && <section><h3>思考过程</h3><pre>{log.reasoning}</pre></section>}
             <section><h3>输出文本</h3><pre>{log.content || "无正文内容。"}</pre></section>

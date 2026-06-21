@@ -536,6 +536,16 @@ describe("App feature behavior", () => {
     }
   });
 
+  it("uses two primary one-click actions and secondary manual actions", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    expect(screen.getByRole("button", { name: "一键分析改写" })).toHaveClass("action-primary");
+    expect(screen.getByRole("button", { name: "一键分析改写当前批次" })).toHaveClass("action-primary");
+    expect(screen.getByRole("button", { name: "分析" })).not.toHaveClass("action-primary");
+    expect(screen.getByRole("button", { name: "改写" })).not.toHaveClass("action-primary");
+  });
+
   it("rewrites one completed chapter from the compare page and replaces its text", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "list_novels") return novels;

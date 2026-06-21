@@ -124,9 +124,23 @@ describe("CompareView", () => {
 
     fireEvent.click(screen.getByRole("combobox", { name: "章节" }));
     const completedOption = screen.getByRole("option", { name: /第一章 completed/ });
-    expect(within(completedOption).getByText("completed")).toHaveClass("compare-chapter-completed");
+    expect(within(completedOption).getByText("completed").closest(".status-badge")).toHaveClass(
+      "compare-chapter-completed",
+      "status-success"
+    );
     expect(screen.getByRole("option", { name: "2. 第二章" })).not.toHaveTextContent("completed");
     expect(chapters[0].title).toBe("第一章");
+  });
+
+  it("keeps all compare actions in the compact two-row toolbar", () => {
+    const { container } = render(<Harness />);
+    expect(container.querySelectorAll(".compare-toolbar-row")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "恢复初稿" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查找" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "差异" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重写本章（原文）" })).toHaveClass("action-primary");
+    expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
   });
 
   it("collects optional instructions before rewriting the current chapter", async () => {
