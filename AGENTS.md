@@ -30,8 +30,12 @@ The user owns the AI account and API key. Novel content, SQLite data, internal b
 - `src-tauri/src/commands/`: Tauri commands grouped by domain.
 - `src-tauri/src/ai/`: provider calls, prompts, response parsing, and shared AI behavior.
 - `src-tauri/src/db/`: SQLite schema and migrations.
+- `src-tauri/src/repositories/`: database access helpers for logs and other extracted domains.
+- `src-tauri/src/services/`: shared analysis, rewrite, review, estimation, and shard-context services.
 - `src-tauri/src/text/`: encoding detection and chapter splitting.
 - `src-tauri/src/credentials.rs`: system credential and database-fallback behavior.
+- `src-tauri/src/model_support.rs`: provider response, output truncation, and compatibility classification.
+- `src-tauri/src/rate_limit.rs`: rate-limit classification and temporary concurrency fallback.
 - `src-tauri/src/task_control.rs`: active-task locking and cancellation.
 - `src-tauri/src/lib.rs`: application setup, shared orchestration, and `generate_handler!` registration.
 - `scripts/package-portable.ps1`: portable Windows packaging.
@@ -60,6 +64,7 @@ cargo test --manifest-path .\src-tauri\Cargo.toml
 cargo clippy --manifest-path .\src-tauri\Cargo.toml --all-targets --all-features -- -D warnings
 npm run tauri:build
 npm run package:portable
+npm run package:portable:fresh
 ```
 
 Safe debug-cache cleanup:
@@ -88,8 +93,11 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - TXT import goes through Tauri backend commands, not browser-only file APIs.
 - Recognize common Chinese web-novel heading units including `章`, `节`, `回`, `卷`, `部`, `篇`, `集`, `幕`, `话`, `夜`, `案`, `场`, `弹`, `折`, and `更`.
 - Loose numbered headings are fallback-only. Use them only when standard headings are absent and candidate numbers are sequential.
+- Treat explicit author update notices such as isolated `第X更`, `第X更到`, `继续写`, `还有第X章`, and `未完待续` conservatively as non-chapter content. A pseudo heading may donate its body to the preceding formal chapter only when the surrounding formal headings use the same non-`更` unit and have consecutive ordinals.
+- Preserve genuine `第X更 标题` chapter series, protected extras such as `番外`, `外传`, `后记`, `卷末后记`, and `完本感言`, and uncertain nonstandard headings with substantive content.
+- Chapter parsing improvements apply to new imports. Never automatically re-split existing novels on startup because chapter IDs, batches, checkpoints, analyses, rewrites, and manual edits may already depend on the current structure.
 - If no chapters can be detected, split by text length.
-- Chapter-based batches contain 30 chapters. Non-chapter batches contain at most 100,000 characters.
+- Chapter-based batches contain 30, 50, or 100 chapters according to application settings. Non-chapter batches contain at most 100,000 characters.
 
 ### Analysis and Rewrite
 
@@ -104,6 +112,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - For animals, spirit beasts, artifact spirits, and other non-human beings whose source gender is unclear or unspecified, preserve the source pronoun and title choices. Review must not flag them solely because they were not feminized.
 - Remove masculine residue from the target protagonist while preserving plot continuity and established appearance details.
 - Strict mode preserves plot and avoids unnecessary embellishment. Creative mode may reinforce female identity, appearance, expression, and dual-female-lead interaction without breaking continuity.
+- Single-chapter rewrite supports `original` and `rewrite` source modes. Original mode keeps the normal settings/canon/context pipeline. Rewrite mode treats the current rewrite as the primary draft and uses the original, settings, relevant canon, and adjacent chapters only as supporting context; it does not invoke the review model.
+- Preserve the first pre-single-rewrite snapshot until the user restores it. Later single rewrites update the latest AI baseline without replacing that first snapshot.
 
 ### Stable Chapter Parsing
 
@@ -111,7 +121,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Parse only output that can be mapped reliably to the requested chapters.
 - Missing markers, truncated output, extra unrelated output, or ambiguous marker-free output must trigger a bounded retry, smaller subdivision, or a clear failure. Never write corrupted text into chapters.
 - Provider `content_filter` responses are provider safety errors, not marker errors.
-- MiMo-specific prompt sanitization may soften direct body-type wording, but must not weaken prompts for other providers.
+- Prompt obfuscation is a per-model setting and is disabled by default. When enabled, apply the same configured substitutions to all providers immediately before sending system and user prompts. Do not mutate local source text, rewrites, settings, or stored log text. The current substitution is only `巨乳` to `胸围丰满`.
 
 ### Optional Dual-Expert Review
 
@@ -139,25 +149,32 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Progress events remain `job-progress` and must be filtered by `novel_id` and the current task ID in the frontend.
 - Disable novel/model switching, import, deletion, and relevant settings changes while the active task makes those operations unsafe.
 - Parallel shard failure must cancel and await sibling requests so quota is not consumed in the background.
-- Full one-click runs batches in order: analyze, rewrite, update the cumulative export TXT, then continue. It supports pause, continue, and terminate. Continue restarts from the first unfinished batch and reruns that batch's analysis.
+- Full one-click runs batches in order: analyze, rewrite, update the cumulative export TXT, then continue. It supports pause, continue, and terminate.
+- Analysis and rewrite shard outputs are staged per chapter for the active checkpoint. Pause, restart recovery, rate limits, network failures, temporary gateway errors, and recoverable model-format failures must preserve completed shards. Continue processes only unfinished chapters in the current phase.
+- If parallelism changes after pause, repartition only the remaining chapters into contiguous shards. Include completed adjacent chapters as bounded read-only context so resumed shards do not lose continuity.
 - Full one-click may start from the currently selected batch. In that mode, progress and the final combined TXT cover only the selected batch through the end; earlier batches are not included in that combined export.
 
 ### Provider Calls and Logs
 
 - HTTP clients use a connection timeout and a bounded request timeout. Timeout errors must be explicit.
 - Remove unsupported thinking parameters and retry only for HTTP 400/422 responses that clearly identify parameter incompatibility. Do not duplicate 401, 403, 429, or 5xx requests.
+- Thinking controls are provider/model specific. Keep unsupported choices disabled in the frontend, use `auto` when support is unknown, and remove an injected thinking parameter for one compatibility retry only when the provider explicitly reports that parameter as unsupported.
+- Temperature defaults to `0.7`; Top P defaults to `1.0` and should be omitted from provider payloads at that unrestricted default where supported.
 - For OpenAI-compatible JSON requests, add structured `response_format` only for providers known to support it. Keep unknown compatible services unchanged to avoid parameter compatibility regressions.
 - Gemini reasoning consists of all `thought: true` text parts; final content consists of all other text parts. Do not assume `parts[0]` is the answer.
 - Preserve provider response bodies in user-facing errors where practical.
 - Successful AI logs store extracted content, reasoning, raw provider JSON, input/output character counts, duration, review state, and thinking mode.
+- Token usage is persisted independently in `token_usage_records`. Clearing AI logs or deleting a model profile must not erase historical Token statistics.
 - Never log API keys, Authorization headers, or credential-store contents.
 
 ### Settings and Export
 
 - Novel settings are keyed by `novel_id`; the protagonist name is required before analysis or rewrite.
 - Do not automatically open novel settings after import. Open them when a required operation is attempted without valid settings.
-- Application settings include export directory, global core prompt, review configuration, and shared analysis/rewrite concurrency.
-- Allowed concurrency values remain `10`, `6`, `3`, and `1`, with `6` as the default unless the product behavior is intentionally changed.
+- Application settings include export directory, global core prompt, analysis/review model selection, review configuration, chapter batch size, and shared analysis/rewrite concurrency.
+- Allowed batch sizes are `30`, `50`, and `100`, with `30` as the default.
+- Allowed concurrency values are `1`, `3`, `6`, `10`, `25`, and `50`, with `10` as the default. Batch size 30 allows at most 10, batch size 50 allows at most 25, and batch size 100 allows at most 50. The backend must enforce these constraints.
+- Changing chapter batch size rebuilds chapter-based batch rows and internal TXT files atomically without changing chapter IDs, source text, analyses, rewrites, manual edits, canon assets, or logs. Reject the change while any active or paused one-click task exists.
 - Export TXT only. Include only chapters with completed rewrite status and non-empty rewrite text. Never fall back to the original text.
 - Full one-click must keep a single cumulative TXT for the selected run range. After each completed batch, rewrite that same file so it contains all completed batches from the run start through the latest completed batch; do not create one TXT per batch.
 - If the cumulative TXT cannot be updated because it is open or otherwise locked, do not fail the one-click task immediately. Show a confirmation dialog asking the user to manually close the reader/editor that occupies the file, wait for confirmation, then retry the same cumulative TXT update. Do not attempt to close external programs automatically.
@@ -171,6 +188,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Model deletion separately reports database deletion and credential deletion failures; never silently ignore credential cleanup failure.
 - Novel deletion requires a confirmation dialog describing all affected files and records.
 - Deleting a novel must remove chapters, batches, internal batch TXT files, settings, canon assets, jobs, rewrites, review warnings, and related AI logs.
+- Clearing the log page deletes `ai_logs` only. It must preserve `token_usage_records`.
 - Move batch directories to the temporary recycle area before committing database deletion. Startup cleanup handles leftovers.
 
 ## Frontend Behavior and Performance
@@ -215,7 +233,7 @@ Match verification effort to the change, but complete the relevant checks before
 2. Backend changes: `cargo test --manifest-path .\src-tauri\Cargo.toml`.
 3. Rust control-flow or release changes: strict Clippy.
 4. Release-impacting changes: `npm run tauri:build`.
-5. User-distributable builds: delete old local portable zips, then run `npm run package:portable`.
+5. User-distributable builds: delete old local portable zips, then run `npm run package:portable:fresh`.
 6. All commits: `git diff --check` and `git status -sb`.
 
 Do not update versions, generate releases, upload portable packages, or create GitHub Releases unless the user explicitly asks for that release step. The intended release asset is the Windows x64 portable zip; installer artifacts are incidental.
