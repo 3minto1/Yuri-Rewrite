@@ -91,6 +91,7 @@ const emptyProfile: ProfileDraft = {
   temperature: 0.7,
   top_p: 1,
   thinking_mode: "auto",
+  prompt_obfuscation_enabled: false,
   api_key: ""
 };
 
@@ -570,6 +571,7 @@ export default function App() {
       temperature: profile.temperature,
       top_p: profile.top_p,
       thinking_mode: profile.thinking_mode === "off" || profile.thinking_mode === "on" ? profile.thinking_mode : "auto",
+      prompt_obfuscation_enabled: profile.prompt_obfuscation_enabled,
       api_key: profile.has_api_key ? savedApiKeyMask : ""
     }));
   }, [selectedProfile]);
@@ -750,13 +752,13 @@ export default function App() {
 
   async function clearLogs() {
     const targetText = detail ? `《${detail.novel.title}》相关日志和全局日志` : "所有日志";
-    if (!window.confirm(`清空${targetText}？`)) return;
+    if (!window.confirm(`清空${targetText}？Token 调用统计将保留。`)) return;
     setBusy("clear-logs");
     setNotice("");
     try {
       await invoke("clear_ai_logs", { novelId: detail?.novel.id ?? null });
       await refreshLogs();
-      showNotice("日志已清空。");
+      showNotice("日志已清空，Token 调用统计已保留。");
     } catch (error) {
       showNotice(String(error));
     } finally {

@@ -24,6 +24,7 @@ export const emptyProfile: ProfileDraft = {
   temperature: 0.7,
   top_p: 1,
   thinking_mode: "auto",
+  prompt_obfuscation_enabled: false,
   api_key: ""
 };
 

@@ -49,6 +49,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             temperature REAL NOT NULL,
             top_p REAL NOT NULL DEFAULT 1.0,
             thinking_mode TEXT NOT NULL DEFAULT 'auto',
+            prompt_obfuscation_enabled INTEGER NOT NULL DEFAULT 0,
             api_key TEXT,
             updated_at TEXT NOT NULL
         );
@@ -78,6 +79,17 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             finish_reason TEXT,
             input_tokens INTEGER,
             output_tokens INTEGER,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS token_usage_records (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT,
+            profile_id TEXT NOT NULL,
+            profile_name TEXT NOT NULL,
+            model TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
             created_at TEXT NOT NULL
         );
 
@@ -156,6 +168,9 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_novel ON ai_logs(novel_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_ai_logs_profile_created ON ai_logs(profile_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage_records(created_at);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_profile_created
+            ON token_usage_records(profile_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_chapter_batches_novel ON chapter_batches(novel_id, batch_index);
         CREATE INDEX IF NOT EXISTS idx_auto_run_shard_outputs_phase
             ON auto_run_shard_outputs(novel_id, batch_index, phase, chapter_index);
@@ -169,12 +184,19 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "TEXT NOT NULL DEFAULT 'auto'",
     )?;
     migrations::ensure_column(conn, "model_profiles", "top_p", "REAL NOT NULL DEFAULT 1.0")?;
+    migrations::ensure_column(
+        conn,
+        "model_profiles",
+        "prompt_obfuscation_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     migrations::ensure_column(conn, "ai_logs", "reasoning", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "raw_response", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "finish_reason", "TEXT")?;
     migrations::ensure_column(conn, "ai_logs", "input_tokens", "INTEGER")?;
     migrations::ensure_column(conn, "ai_logs", "output_tokens", "INTEGER")?;
     backfill_ai_log_token_usage(conn)?;
+    backfill_token_usage_records(conn)?;
     migrations::ensure_column(conn, "chapters", "ai_rewrite_text", "TEXT")?;
     migrations::ensure_column(conn, "chapters", "rewrite_edited_at", "TEXT")?;
     migrations::ensure_column(
@@ -260,6 +282,28 @@ fn backfill_ai_log_token_usage(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn backfill_token_usage_records(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO token_usage_records (
+            id, novel_id, profile_id, profile_name, model,
+            input_tokens, output_tokens, created_at
+         )
+         SELECT logs.id,
+                logs.novel_id,
+                logs.profile_id,
+                COALESCE(profiles.name, logs.profile_id),
+                COALESCE(profiles.model, logs.profile_id),
+                MAX(COALESCE(logs.input_tokens, 0), 0),
+                MAX(COALESCE(logs.output_tokens, 0), 0),
+                logs.created_at
+         FROM ai_logs AS logs
+         LEFT JOIN model_profiles AS profiles ON profiles.id = logs.profile_id
+         WHERE logs.input_tokens IS NOT NULL OR logs.output_tokens IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +342,46 @@ mod tests {
             )
             .expect("load top p");
         assert_eq!(top_p, 1.0);
+    }
+
+    #[test]
+    fn migration_disables_prompt_obfuscation_for_existing_profiles() {
+        let conn = Connection::open_in_memory().expect("open database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE model_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                top_p REAL NOT NULL DEFAULT 1.0,
+                thinking_mode TEXT NOT NULL DEFAULT 'auto',
+                api_key TEXT,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO model_profiles (
+                id, name, provider, base_url, model, temperature, top_p,
+                thinking_mode, api_key, updated_at
+            ) VALUES (
+                'profile-1', '测试模型', 'openai-compatible', 'https://example.com/v1',
+                'model-a', 0.7, 1.0, 'auto', NULL, 'now'
+            );
+            "#,
+        )
+        .expect("seed previous model profile schema");
+
+        init_db(&conn).expect("migrate schema");
+
+        let enabled: bool = conn
+            .query_row(
+                "SELECT prompt_obfuscation_enabled FROM model_profiles WHERE id = 'profile-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load prompt obfuscation setting");
+        assert!(!enabled);
     }
 
     #[test]
@@ -409,6 +493,45 @@ mod tests {
             )
             .expect("load token usage");
         assert_eq!(usage, (Some(321), Some(54)));
+    }
+
+    #[test]
+    fn migration_copies_existing_log_usage_into_independent_records() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO model_profiles (
+                id, name, provider, base_url, model, temperature, thinking_mode, updated_at
+             ) VALUES (
+                'profile-1', '历史模型', 'openai-compatible', 'https://example.com',
+                'model-a', 0.7, 'auto', 'now'
+             )",
+            [],
+        )
+        .expect("insert profile");
+        conn.execute(
+            "INSERT INTO ai_logs (
+                id, profile_id, action, status, content,
+                input_tokens, output_tokens, created_at
+             ) VALUES (
+                'log-1', 'profile-1', '分析', 'success', 'ok',
+                120, 45, '2026-06-22T10:00:00+08:00'
+             )",
+            [],
+        )
+        .expect("insert legacy log");
+
+        init_db(&conn).expect("backfill independent usage");
+
+        let usage: (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT profile_name, model, input_tokens, output_tokens
+                 FROM token_usage_records WHERE id = 'log-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load migrated usage");
+        assert_eq!(usage, ("历史模型".to_string(), "model-a".to_string(), 120, 45));
     }
 
     #[test]

@@ -5081,11 +5081,13 @@ fn load_model_profile(
 ) -> Result<ModelProfile, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     conn.query_row(
-        "SELECT id, name, provider, base_url, model, temperature, top_p, thinking_mode, updated_at, api_key FROM model_profiles WHERE id = ?1",
+        "SELECT id, name, provider, base_url, model, temperature, top_p, thinking_mode,
+                prompt_obfuscation_enabled, updated_at, api_key
+         FROM model_profiles WHERE id = ?1",
         params![profile_id],
         |row| {
             let id: String = row.get(0)?;
-            let db_api_key: Option<String> = row.get(9)?;
+            let db_api_key: Option<String> = row.get(10)?;
             let storage = api_key_storage_from_values(&id, db_api_key.as_deref());
             Ok(ModelProfile {
                 has_api_key: storage != ApiKeyStorage::None,
@@ -5098,7 +5100,8 @@ fn load_model_profile(
                 temperature: row.get(5)?,
                 top_p: row.get(6)?,
                 thinking_mode: row.get(7)?,
-                updated_at: row.get(8)?,
+                prompt_obfuscation_enabled: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         },
     )
@@ -8996,6 +8999,7 @@ mod tests {
             temperature: 0.7,
             top_p: 1.0,
             thinking_mode: "auto".to_string(),
+            prompt_obfuscation_enabled: false,
             has_api_key: true,
             api_key_storage: "system".to_string(),
             updated_at: "now".to_string(),
@@ -9033,6 +9037,7 @@ mod tests {
             temperature: 0.7,
             top_p: 1.0,
             thinking_mode: "off".to_string(),
+            prompt_obfuscation_enabled: false,
             has_api_key: true,
             api_key_storage: "system".to_string(),
             updated_at: "now".to_string(),
@@ -9145,7 +9150,7 @@ mod tests {
     }
 
     #[test]
-    fn mimo_prompts_are_sanitized_to_reduce_content_filter_risk() {
+    fn enabled_prompt_obfuscation_only_softens_configured_phrase() {
         let profile = ModelProfile {
             id: "profile-1".to_string(),
             name: "MiMo".to_string(),
@@ -9155,6 +9160,7 @@ mod tests {
             temperature: 0.7,
             top_p: 1.0,
             thinking_mode: "auto".to_string(),
+            prompt_obfuscation_enabled: true,
             has_api_key: true,
             api_key_storage: "system".to_string(),
             updated_at: "now".to_string(),
@@ -9170,12 +9176,10 @@ mod tests {
         assert!(user.contains("百合向关系"));
         assert!(user.contains("亲密互动暗示"));
         assert!(user.contains("身体描写"));
-        assert!(user.contains("体型：娇小少女感"));
-        assert!(user.contains("身形风格：成熟曲线"));
-        assert!(user.contains("清瘦纤细"));
+        assert!(user.contains("体型：萝莉"));
+        assert!(user.contains("身材：胸围丰满"));
+        assert!(user.contains("平胸"));
         assert!(!user.contains("巨乳"));
-        assert!(!user.contains("萝莉"));
-        assert!(!user.contains("平胸"));
     }
 
     #[test]

@@ -52,6 +52,7 @@ pub(crate) fn save_model_profile(
         temperature: input.temperature,
         top_p: input.top_p,
         thinking_mode,
+        prompt_obfuscation_enabled: input.prompt_obfuscation_enabled,
         has_api_key: false,
         api_key_storage: ApiKeyStorage::None.as_str().to_string(),
         updated_at,
@@ -59,8 +60,11 @@ pub(crate) fn save_model_profile(
 
     conn.execute(
         r#"
-        INSERT INTO model_profiles (id, name, provider, base_url, model, temperature, top_p, thinking_mode, updated_at, api_key)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        INSERT INTO model_profiles (
+            id, name, provider, base_url, model, temperature, top_p, thinking_mode,
+            prompt_obfuscation_enabled, updated_at, api_key
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             provider = excluded.provider,
@@ -69,10 +73,11 @@ pub(crate) fn save_model_profile(
             temperature = excluded.temperature,
             top_p = excluded.top_p,
             thinking_mode = excluded.thinking_mode,
+            prompt_obfuscation_enabled = excluded.prompt_obfuscation_enabled,
             updated_at = excluded.updated_at,
             api_key = CASE
-                WHEN ?10 IS NOT NULL THEN excluded.api_key
-                WHEN ?11 IS NOT NULL THEN NULL
+                WHEN ?11 IS NOT NULL THEN excluded.api_key
+                WHEN ?12 IS NOT NULL THEN NULL
                 ELSE model_profiles.api_key
             END
         "#,
@@ -85,6 +90,7 @@ pub(crate) fn save_model_profile(
             profile.temperature,
             profile.top_p,
             profile.thinking_mode,
+            profile.prompt_obfuscation_enabled,
             profile.updated_at,
             db_api_key_fallback,
             api_key
@@ -160,13 +166,15 @@ pub(crate) fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelPro
     let conn = state.conn.lock().map_err(to_string)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, provider, base_url, model, temperature, top_p, thinking_mode, updated_at, api_key FROM model_profiles ORDER BY updated_at DESC",
+            "SELECT id, name, provider, base_url, model, temperature, top_p, thinking_mode,
+                    prompt_obfuscation_enabled, updated_at, api_key
+             FROM model_profiles ORDER BY updated_at DESC",
         )
         .map_err(to_string)?;
     let profiles = stmt
         .query_map([], |row| {
             let id: String = row.get(0)?;
-            let db_api_key: Option<String> = row.get(9)?;
+            let db_api_key: Option<String> = row.get(10)?;
             let storage = api_key_storage_from_values(&id, db_api_key.as_deref());
             Ok(ModelProfile {
                 has_api_key: storage != ApiKeyStorage::None,
@@ -179,7 +187,8 @@ pub(crate) fn list_model_profiles(state: State<AppState>) -> Result<Vec<ModelPro
                 temperature: row.get(5)?,
                 top_p: row.get(6)?,
                 thinking_mode: row.get(7)?,
-                updated_at: row.get(8)?,
+                prompt_obfuscation_enabled: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })
         .map_err(to_string)?

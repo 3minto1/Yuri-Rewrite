@@ -1295,6 +1295,27 @@ textarea:focus-visible {
   width: min(520px, calc(100vw - 48px));
 }
 
+.prompt-obfuscation-tooltip {
+  bottom: calc(100% + 10px);
+  box-sizing: border-box;
+  left: -72px;
+  max-width: calc(100vw - 64px);
+  overflow-wrap: anywhere;
+  top: auto;
+  white-space: normal;
+  width: min(340px, calc(100vw - 48px));
+}
+
+.prompt-obfuscation-tooltip::before {
+  border-bottom: 1px solid #4c4741;
+  border-left: 0;
+  border-right: 1px solid #4c4741;
+  border-top: 0;
+  bottom: -5px;
+  left: 76px;
+  top: auto;
+}
+
 .form-full {
   grid-column: 1 / -1;
 }

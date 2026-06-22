@@ -46,6 +46,13 @@ pub(crate) fn clear_ai_logs(
     state: State<AppState>,
 ) -> Result<(), String> {
     let conn = state.conn.lock().map_err(to_string)?;
+    clear_ai_logs_from_connection(&conn, novel_id.as_deref())
+}
+
+fn clear_ai_logs_from_connection(
+    conn: &Connection,
+    novel_id: Option<&str>,
+) -> Result<(), String> {
     if let Some(novel_id) = novel_id {
         conn.execute(
             "DELETE FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL",
@@ -95,16 +102,14 @@ fn build_token_usage_report(
 
     let mut stmt = conn
         .prepare(
-            "SELECT logs.profile_id,
-                    COALESCE(profiles.name, logs.profile_id),
-                    COALESCE(profiles.model, logs.profile_id),
-                    logs.input_tokens,
-                    logs.output_tokens,
-                    logs.created_at
-             FROM ai_logs AS logs
-             LEFT JOIN model_profiles AS profiles ON profiles.id = logs.profile_id
-             WHERE logs.input_tokens IS NOT NULL OR logs.output_tokens IS NOT NULL
-             ORDER BY logs.created_at",
+            "SELECT profile_id,
+                    profile_name,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    created_at
+             FROM token_usage_records
+             ORDER BY created_at",
         )
         .map_err(to_string)?;
     let rows = stmt
@@ -206,13 +211,13 @@ mod tests {
             ("log-3", 300_i64, 60_i64, "2026-06-19T12:00:00+08:00"),
         ] {
             conn.execute(
-                "INSERT INTO ai_logs (
-                    id, profile_id, action, status, content,
+                "INSERT INTO token_usage_records (
+                    id, profile_id, profile_name, model,
                     input_tokens, output_tokens, created_at
-                 ) VALUES (?1, 'profile-1', '分析', 'success', 'ok', ?2, ?3, ?4)",
+                 ) VALUES (?1, 'profile-1', '主力模型', 'model-a', ?2, ?3, ?4)",
                 params![id, input, output, created_at],
             )
-            .expect("insert log");
+            .expect("insert token usage");
         }
         let report = build_token_usage_report(
             &conn,
@@ -227,5 +232,50 @@ mod tests {
         assert_eq!(report.models[0].model, "model-a");
         assert_eq!(report.models[0].days.len(), 2);
         assert_eq!(report.models[0].days[0].requests, 2);
+    }
+
+    #[test]
+    fn clearing_logs_preserves_token_usage_history() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO ai_logs (
+                id, novel_id, profile_id, action, status, content, created_at
+             ) VALUES (
+                'log-1', 'novel-1', 'profile-1', '改写', 'success', 'ok',
+                '2026-06-22T10:00:00+08:00'
+             )",
+            [],
+        )
+        .expect("insert log");
+        conn.execute(
+            "INSERT INTO token_usage_records (
+                id, novel_id, profile_id, profile_name, model,
+                input_tokens, output_tokens, created_at
+             ) VALUES (
+                'log-1', 'novel-1', 'profile-1', '已删除模型', 'model-a',
+                500, 125, '2026-06-22T10:00:00+08:00'
+             )",
+            [],
+        )
+        .expect("insert usage");
+
+        clear_ai_logs_from_connection(&conn, Some("novel-1")).expect("clear logs");
+
+        let log_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ai_logs", [], |row| row.get(0))
+            .expect("count logs");
+        assert_eq!(log_count, 0);
+        let report = build_token_usage_report(
+            &conn,
+            NaiveDate::from_ymd_opt(2026, 6, 22).expect("start date"),
+            NaiveDate::from_ymd_opt(2026, 6, 22).expect("end date"),
+        )
+        .expect("build report");
+        assert_eq!(report.requests, 1);
+        assert_eq!(report.input_tokens, 500);
+        assert_eq!(report.output_tokens, 125);
+        assert_eq!(report.models[0].profile_name, "已删除模型");
+        assert_eq!(report.models[0].model, "model-a");
     }
 }

@@ -69,6 +69,7 @@ export type ModelProfile = {
   temperature: number;
   top_p: number;
   thinking_mode: "auto" | "off" | "on";
+  prompt_obfuscation_enabled: boolean;
   has_api_key: boolean;
   api_key_storage: "system" | "database_fallback" | "none";
   updated_at: string;
@@ -83,6 +84,7 @@ export type ProfileDraft = {
   temperature: number;
   top_p: number;
   thinking_mode: "auto" | "off" | "on";
+  prompt_obfuscation_enabled: boolean;
   api_key: string;
 };
 

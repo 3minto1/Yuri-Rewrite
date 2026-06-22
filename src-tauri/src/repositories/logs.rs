@@ -2,7 +2,7 @@ use crate::domain::AppState;
 use crate::model_support::model_output_finish_reason;
 use crate::{to_string, truncate_text};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use tauri::State;
 use uuid::Uuid;
 
@@ -62,11 +62,43 @@ pub(crate) fn append_ai_log(
 ) -> Result<(), String> {
     let token_usage = extract_token_usage(raw_response);
     let finish_reason = raw_response.and_then(model_output_finish_reason);
-    let conn = state.conn.lock().map_err(to_string)?;
-    conn.execute(
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    persist_ai_log(
+        &mut conn,
+        novel_id,
+        profile_id,
+        action,
+        chapter_title,
+        status,
+        content,
+        reasoning,
+        raw_response,
+        finish_reason.as_deref(),
+        token_usage,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_ai_log(
+    conn: &mut Connection,
+    novel_id: Option<&str>,
+    profile_id: &str,
+    action: &str,
+    chapter_title: Option<&str>,
+    status: &str,
+    content: &str,
+    reasoning: Option<&str>,
+    raw_response: Option<&str>,
+    finish_reason: Option<&str>,
+    token_usage: Option<(usize, usize)>,
+) -> Result<(), String> {
+    let id = Uuid::new_v4().to_string();
+    let created_at = Utc::now().to_rfc3339();
+    let tx = conn.transaction().map_err(to_string)?;
+    tx.execute(
         "INSERT INTO ai_logs (id, novel_id, profile_id, action, chapter_title, status, content, reasoning, raw_response, finish_reason, input_tokens, output_tokens, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
-            Uuid::new_v4().to_string(),
+            id,
             novel_id,
             profile_id,
             action,
@@ -78,16 +110,41 @@ pub(crate) fn append_ai_log(
             finish_reason,
             token_usage.map(|usage| usage.0 as i64),
             token_usage.map(|usage| usage.1 as i64),
-            Utc::now().to_rfc3339()
+            created_at
         ],
     )
     .map_err(to_string)?;
+    if let Some((input_tokens, output_tokens)) = token_usage {
+        tx.execute(
+            "INSERT INTO token_usage_records (
+                id, novel_id, profile_id, profile_name, model,
+                input_tokens, output_tokens, created_at
+             ) VALUES (
+                ?1, ?2, ?3,
+                COALESCE((SELECT name FROM model_profiles WHERE id = ?3), ?3),
+                COALESCE((SELECT model FROM model_profiles WHERE id = ?3), ?3),
+                ?4, ?5, ?6
+             )",
+            params![
+                id,
+                novel_id,
+                profile_id,
+                input_tokens as i64,
+                output_tokens as i64,
+                created_at
+            ],
+        )
+        .map_err(to_string)?;
+    }
+    tx.commit().map_err(to_string)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::extract_token_usage;
+    use super::{extract_token_usage, persist_ai_log};
+    use crate::db::init_db;
+    use rusqlite::Connection;
 
     #[test]
     fn extracts_openai_and_gemini_token_usage() {
@@ -114,5 +171,50 @@ mod tests {
             Some((0, 0))
         );
         assert_eq!(extract_token_usage(Some(r#"{"status":"ok"}"#)), None);
+    }
+
+    #[test]
+    fn persists_log_and_token_usage_snapshot_together() {
+        let mut conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO model_profiles (
+                id, name, provider, base_url, model, temperature, thinking_mode, updated_at
+             ) VALUES (
+                'profile-1', '快照模型', 'openai-compatible', 'https://example.com',
+                'model-a', 0.7, 'auto', 'now'
+             )",
+            [],
+        )
+        .expect("insert profile");
+
+        persist_ai_log(
+            &mut conn,
+            Some("novel-1"),
+            "profile-1",
+            "分析",
+            Some("第一章"),
+            "success",
+            "ok",
+            None,
+            Some(r#"{"usage":{"prompt_tokens":120,"completion_tokens":45}}"#),
+            Some("stop"),
+            Some((120, 45)),
+        )
+        .expect("persist log and usage");
+
+        let log_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ai_logs", [], |row| row.get(0))
+            .expect("count logs");
+        let usage: (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT profile_name, model, input_tokens, output_tokens
+                 FROM token_usage_records",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load usage");
+        assert_eq!(log_count, 1);
+        assert_eq!(usage, ("快照模型".to_string(), "model-a".to_string(), 120, 45));
     }
 }

@@ -36,6 +36,7 @@ const profile: ModelProfile = {
   temperature: 0.7,
   top_p: 1,
   thinking_mode: "auto",
+  prompt_obfuscation_enabled: false,
   has_api_key: true,
   api_key_storage: "system",
   updated_at: "now"

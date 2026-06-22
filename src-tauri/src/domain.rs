@@ -114,6 +114,7 @@ pub(crate) struct ModelProfile {
     pub(crate) temperature: f64,
     pub(crate) top_p: f64,
     pub(crate) thinking_mode: String,
+    pub(crate) prompt_obfuscation_enabled: bool,
     pub(crate) has_api_key: bool,
     pub(crate) api_key_storage: String,
     pub(crate) updated_at: String,
@@ -130,6 +131,8 @@ pub(crate) struct ModelProfileInput {
     #[serde(default = "default_top_p")]
     pub(crate) top_p: f64,
     pub(crate) thinking_mode: Option<String>,
+    #[serde(default)]
+    pub(crate) prompt_obfuscation_enabled: bool,
     pub(crate) api_key: Option<String>,
 }
 

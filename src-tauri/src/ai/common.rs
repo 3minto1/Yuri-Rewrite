@@ -244,44 +244,15 @@ pub(crate) fn prepare_prompt_for_profile(
     system: &str,
     user: &str,
 ) -> (String, String) {
-    if is_mimo_profile(profile) {
-        (
-            sanitize_prompt_for_mimo(system),
-            sanitize_prompt_for_mimo(user),
-        )
-    } else if is_zhipu_profile(profile, &profile.base_url, &profile.model) {
-        (
-            sanitize_prompt_for_zhipu(system),
-            sanitize_prompt_for_zhipu(user),
-        )
+    if profile.prompt_obfuscation_enabled {
+        (obfuscate_prompt(system), obfuscate_prompt(user))
     } else {
         (system.to_string(), user.to_string())
     }
 }
 
-pub(crate) fn sanitize_prompt_for_mimo(text: &str) -> String {
-    let replacements = [
-        ("身材：巨乳", "身形风格：成熟曲线"),
-        ("身材：平胸", "身形风格：清瘦纤细"),
-        ("体型：萝莉", "体型：娇小少女感"),
-        ("巨乳", "成熟曲线"),
-        ("平胸", "清瘦纤细"),
-        ("萝莉", "娇小少女感"),
-    ];
-    let mut sanitized = text.to_string();
-    for (from, to) in replacements {
-        sanitized = sanitized.replace(from, to);
-    }
-    sanitized
-}
-
-pub(crate) fn sanitize_prompt_for_zhipu(text: &str) -> String {
-    let replacements = [("身材：巨乳", "身材：丰满"), ("巨乳", "身材丰满")];
-    let mut sanitized = text.to_string();
-    for (from, to) in replacements {
-        sanitized = sanitized.replace(from, to);
-    }
-    sanitized
+pub(crate) fn obfuscate_prompt(text: &str) -> String {
+    text.replace("巨乳", "胸围丰满")
 }
 
 pub(crate) async fn generate_text(
@@ -768,6 +739,7 @@ mod tests {
             temperature: 0.7,
             top_p: 1.0,
             thinking_mode: "auto".to_string(),
+            prompt_obfuscation_enabled: false,
             has_api_key: true,
             api_key_storage: "system".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -1068,16 +1040,25 @@ mod tests {
     }
 
     #[test]
-    fn zhipu_prompt_sanitization_softens_sensitive_body_terms() {
-        let profile = profile("智谱", "https://open.bigmodel.cn/api/paas/v4", "glm-5.2");
+    fn prompt_obfuscation_is_model_setting_and_provider_independent() {
+        let mut profile = profile("智谱", "https://open.bigmodel.cn/api/paas/v4", "glm-5.2");
+        let unchanged = prepare_prompt_for_profile(
+            &profile,
+            "系统规则：巨乳设定需要自然处理",
+            "身材：巨乳\n请改写为百合文本",
+        );
+        assert_eq!(unchanged.0, "系统规则：巨乳设定需要自然处理");
+        assert_eq!(unchanged.1, "身材：巨乳\n请改写为百合文本");
+
+        profile.prompt_obfuscation_enabled = true;
         let (system, user) = prepare_prompt_for_profile(
             &profile,
             "系统规则：巨乳设定需要自然处理",
             "身材：巨乳\n请改写为百合文本",
         );
 
-        assert_eq!(system, "系统规则：身材丰满设定需要自然处理");
-        assert_eq!(user, "身材：丰满\n请改写为百合文本");
+        assert_eq!(system, "系统规则：胸围丰满设定需要自然处理");
+        assert_eq!(user, "身材：胸围丰满\n请改写为百合文本");
     }
 
     #[test]

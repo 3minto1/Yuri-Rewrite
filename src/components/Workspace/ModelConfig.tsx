@@ -147,6 +147,33 @@ export function ModelConfig(props: ModelConfigProps) {
               ))}
             </div>
           </label>
+          <div className="mode-field prompt-obfuscation-field form-full">
+            <span className="model-parameter-heading">
+              提示词模糊
+              <span className="setting-help" tabIndex={0} aria-label="提示词模糊说明">
+                <HelpCircle size={15} />
+                <span className="setting-help-tooltip prompt-obfuscation-tooltip" role="tooltip">
+                  开启后，该模型收到的系统提示词和用户提示词会在发送前进行敏感表达模糊化，以降低内容安全策略拦截概率。
+                </span>
+              </span>
+            </span>
+            <div className="mode-toggle" role="radiogroup" aria-label="提示词模糊">
+              <button
+                type="button"
+                className={!draft.prompt_obfuscation_enabled ? "active" : ""}
+                role="radio"
+                aria-checked={!draft.prompt_obfuscation_enabled}
+                onClick={() => setDraft({ ...draft, prompt_obfuscation_enabled: false })}
+              >关闭</button>
+              <button
+                type="button"
+                className={draft.prompt_obfuscation_enabled ? "active" : ""}
+                role="radio"
+                aria-checked={draft.prompt_obfuscation_enabled}
+                onClick={() => setDraft({ ...draft, prompt_obfuscation_enabled: true })}
+              >开启</button>
+            </div>
+          </div>
           <label>
             API Key
             <input
