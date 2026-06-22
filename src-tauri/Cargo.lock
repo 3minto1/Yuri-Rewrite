@@ -5290,7 +5290,7 @@ dependencies = [
 
 [[package]]
 name = "yuri-rewrite"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "chrono",
  "encoding_rs",
