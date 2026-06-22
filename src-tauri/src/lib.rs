@@ -9270,9 +9270,65 @@ mod tests {
         assert!(split.detected_chapters);
         assert_eq!(split.chapters.len(), 2);
         assert_eq!(split.chapters[0].title, "第159章 夜归");
-        assert!(split.chapters[0].original_text.contains("第一更！"));
-        assert!(split.chapters[0].original_text.contains("未完待续"));
+        assert_eq!(split.chapters[0].original_text, "这里是第一段正式剧情。");
         assert_eq!(split.chapters[1].title, "第160章 重逢");
+    }
+
+    #[test]
+    fn strict_chapter_split_merges_update_marker_body_back_into_formal_chapter() {
+        let story = "宽阔的大船撕裂开空间裂缝，碾压飞入云雾中。雪鹰看向远方，继续追查敌人的踪迹。";
+        let text = format!(
+            "第九篇 第二十四章 刺入\n第二更到！番茄继续写~~~\n{story}\n第九篇 第二十五章 坠落\n下一章正式剧情。"
+        );
+        let split = split_chapters("novel-1", &text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 2);
+        assert_eq!(split.chapters[0].title, "第九篇 第二十四章 刺入");
+        assert_eq!(split.chapters[0].original_text, story);
+        assert_eq!(split.chapters[1].title, "第九篇 第二十五章 坠落");
+    }
+
+    #[test]
+    fn strict_chapter_split_drops_composite_update_notice_pseudo_headings() {
+        let text = "第九篇 第二十五章 坠落\n正式剧情甲。\n第一更！第二更也快了。\n第九篇 第二十六章 救治\n正式剧情乙。\n第二更到！番茄继续写~~~\n第九篇 第二十七章 夏族先辈降临\n正式剧情丙。\n第三更到，第四更快了。\n第九篇 第二十八章 救\n正式剧情丁。\n第一更未完待续。~好搜搜篮色，即可最快阅读后面章节\n第九篇 第二十九章 醒来\n正式剧情戊。\n第二更到，还有第三章\n未完待续。~好搜搜篮色，即可最快阅读后面章节";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        let titles = split
+            .chapters
+            .iter()
+            .map(|chapter| chapter.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec![
+                "第九篇 第二十五章 坠落",
+                "第九篇 第二十六章 救治",
+                "第九篇 第二十七章 夏族先辈降临",
+                "第九篇 第二十八章 救",
+                "第九篇 第二十九章 醒来",
+            ]
+        );
+        assert!(split.chapters.iter().all(|chapter| {
+            !chapter.original_text.contains("更到")
+                && !chapter.original_text.contains("继续写")
+                && !chapter.original_text.contains("最快阅读")
+        }));
+        assert_eq!(split.chapters[4].original_text, "正式剧情戊。");
+    }
+
+    #[test]
+    fn strict_chapter_split_preserves_real_geng_headings_and_special_chapters() {
+        let text = "第1更 潮声\n这里是第一段完整剧情，标题中的“更”是这篇小说稳定使用的章节单位。\n第2更 月下\n这里是第二段完整剧情，继续推动人物关系和主要冲突。\n番外 她们后来\n这是独立番外剧情，应当继续保留。\n第九篇结束。\n作者总结这一篇的剧情并引出下一篇。";
+        let split = split_chapters("novel-1", text);
+
+        assert!(split.detected_chapters);
+        assert_eq!(split.chapters.len(), 4);
+        assert_eq!(split.chapters[0].title, "第1更 潮声");
+        assert_eq!(split.chapters[1].title, "第2更 月下");
+        assert_eq!(split.chapters[2].title, "番外 她们后来");
+        assert_eq!(split.chapters[3].title, "第九篇结束。");
     }
 
     #[test]

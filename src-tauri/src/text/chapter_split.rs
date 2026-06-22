@@ -12,7 +12,7 @@ pub(crate) fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
         };
     }
 
-    let mut chapters = Vec::new();
+    let mut segments = Vec::new();
     for (idx, mat) in matches.iter().enumerate() {
         let start = mat.start();
         let content_start = mat.end();
@@ -24,24 +24,153 @@ pub(crate) fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
             title.to_string()
         };
         let original_text = text[content_start..end].trim().to_string();
-        chapters.push(Chapter {
+        segments.push(DetectedChapterSegment {
+            title,
+            original_text,
+        });
+    }
+    let segments = normalize_detected_chapter_segments(segments);
+    let chapters = segments
+        .into_iter()
+        .enumerate()
+        .map(|(idx, segment)| Chapter {
             id: Uuid::new_v4().to_string(),
             novel_id: novel_id.to_string(),
             index: (idx + 1) as i64,
-            title,
-            original_text,
+            title: segment.title,
+            original_text: segment.original_text,
             analysis_json: None,
             rewrite_text: None,
             rewrite_edited: false,
             single_rewrite_original_available: false,
             analysis_status: "pending".to_string(),
             rewrite_status: "pending".to_string(),
-        });
-    }
+        })
+        .collect();
     SplitResult {
         chapters,
         detected_chapters: true,
     }
+}
+
+struct DetectedChapterSegment {
+    title: String,
+    original_text: String,
+}
+
+#[derive(Clone, Copy)]
+struct NumberedHeadingSignature {
+    ordinal: u64,
+    unit: char,
+}
+
+fn normalize_detected_chapter_segments(
+    mut segments: Vec<DetectedChapterSegment>,
+) -> Vec<DetectedChapterSegment> {
+    for segment in &mut segments {
+        segment.original_text = trim_boundary_author_notes(&segment.original_text);
+    }
+
+    let pseudo_titles = segments
+        .iter()
+        .map(|segment| is_extended_update_notice(&compact_heading_line(&segment.title)))
+        .collect::<Vec<_>>();
+    let signatures = segments
+        .iter()
+        .map(|segment| numbered_heading_signature(&segment.title))
+        .collect::<Vec<_>>();
+    let mut normalized: Vec<DetectedChapterSegment> = Vec::with_capacity(segments.len());
+    for (idx, mut segment) in segments.into_iter().enumerate() {
+        if !pseudo_titles[idx] {
+            normalized.push(segment);
+            continue;
+        }
+
+        let previous_formal = (0..idx).rev().find(|candidate| !pseudo_titles[*candidate]);
+        let next_formal =
+            ((idx + 1)..pseudo_titles.len()).find(|candidate| !pseudo_titles[*candidate]);
+        let is_between_sequential_formal_headings =
+            previous_formal
+                .zip(next_formal)
+                .is_some_and(|(previous, next)| {
+                    signatures[previous]
+                        .zip(signatures[next])
+                        .is_some_and(|(previous, next)| {
+                            headings_are_sequential_peers(previous, next)
+                        })
+                });
+
+        if is_between_sequential_formal_headings {
+            if !segment.original_text.is_empty() {
+                if let Some(previous) = normalized.last_mut() {
+                    append_chapter_body(&mut previous.original_text, &segment.original_text);
+                }
+            }
+            continue;
+        }
+
+        if segment.original_text.is_empty()
+            || is_obvious_droppable_author_note_text(&segment.original_text)
+        {
+            continue;
+        }
+        segment.original_text = trim_boundary_author_notes(&segment.original_text);
+        normalized.push(segment);
+    }
+    normalized
+}
+
+fn headings_are_sequential_peers(
+    previous: NumberedHeadingSignature,
+    next: NumberedHeadingSignature,
+) -> bool {
+    previous.unit == next.unit && previous.unit != '更' && next.ordinal == previous.ordinal + 1
+}
+
+fn numbered_heading_signature(title: &str) -> Option<NumberedHeadingSignature> {
+    static NUMBERED_RE: OnceLock<Regex> = OnceLock::new();
+    let numbered_re = NUMBERED_RE.get_or_init(|| {
+        Regex::new(
+            r#"第([0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+)([章节回卷部集篇话幕节页季段册夜案场弹折更])"#,
+        )
+        .expect("valid numbered heading signature regex")
+    });
+    numbered_re
+        .captures_iter(&compact_heading_line(title))
+        .last()
+        .and_then(|captures| {
+            let ordinal = captures.get(1)?.as_str();
+            let unit = captures.get(2)?.as_str().chars().next()?;
+            let ordinal =
+                parse_fullwidth_digits(ordinal).or_else(|| parse_chinese_ordinal(ordinal))?;
+            Some(NumberedHeadingSignature { ordinal, unit })
+        })
+}
+
+fn append_chapter_body(target: &mut String, body: &str) {
+    if body.is_empty() {
+        return;
+    }
+    if !target.is_empty() {
+        target.push_str("\n\n");
+    }
+    target.push_str(body);
+}
+
+fn trim_boundary_author_notes(text: &str) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut start = 0;
+    let mut end = lines.len();
+    while start < end && is_obvious_droppable_author_note_line(lines[start]) {
+        start += 1;
+    }
+    while end > start && is_obvious_droppable_author_note_line(lines[end - 1]) {
+        end -= 1;
+    }
+    if start == 0 && end == lines.len() {
+        return text.to_string();
+    }
+    lines[start..end].join("\n").trim().to_string()
 }
 
 pub(crate) fn chapter_heading_matches(text: &str) -> Vec<regex::Match<'_>> {
@@ -241,6 +370,87 @@ pub(crate) fn strict_heading_is_obvious_update_notice(compact: &str) -> bool {
     contains_update_notice_language(rest)
 }
 
+fn is_extended_update_notice(compact: &str) -> bool {
+    if strict_heading_is_obvious_update_notice(compact) || contains_update_notice_language(compact)
+    {
+        return true;
+    }
+
+    static UPDATE_PREFIX_RE: OnceLock<Regex> = OnceLock::new();
+    let update_prefix_re = UPDATE_PREFIX_RE.get_or_init(|| {
+        Regex::new(
+            r#"^(?:正文)?第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+更(.*)$"#,
+        )
+        .expect("valid extended update notice prefix regex")
+    });
+    let Some(rest) = update_prefix_re
+        .captures(compact)
+        .and_then(|captures| captures.get(1))
+        .map(|mat| mat.as_str())
+    else {
+        return false;
+    };
+    let rest = rest.trim_matches(|ch| {
+        matches!(
+            ch,
+            '：' | ':'
+                | '、'
+                | '-'
+                | '—'
+                | '_'
+                | '·'
+                | '|'
+                | '.'
+                | '．'
+                | '，'
+                | ','
+                | '。'
+                | '！'
+                | '!'
+                | '？'
+                | '?'
+                | '（'
+                | '）'
+                | '('
+                | ')'
+                | '~'
+                | '～'
+                | '…'
+        )
+    });
+    if rest.is_empty() || rest.starts_with('到') {
+        return true;
+    }
+
+    static FOLLOWUP_UPDATE_RE: OnceLock<Regex> = OnceLock::new();
+    let followup_update_re = FOLLOWUP_UPDATE_RE.get_or_init(|| {
+        Regex::new(
+            r#"第[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+(?:更|章)(?:也?快了|快了|马上|稍后|未完|$)"#,
+        )
+        .expect("valid follow-up update notice regex")
+    });
+    followup_update_re.is_match(rest)
+        || contains_any_text(
+            rest,
+            &[
+                "继续写",
+                "继续码字",
+                "继续更新",
+                "还有一更",
+                "还有两更",
+                "还有三更",
+                "还有第",
+                "未完待续",
+                "最快阅读",
+                "搜搜",
+                "求月票",
+                "求推荐票",
+                "求收藏",
+                "求订阅",
+            ],
+        )
+}
+
 pub(crate) fn contains_update_notice_language(text: &str) -> bool {
     contains_any_text(
         text,
@@ -279,9 +489,7 @@ pub(crate) fn is_obvious_droppable_author_note_line(line: &str) -> bool {
     ) {
         return false;
     }
-    if strict_heading_is_obvious_update_notice(&compact)
-        || contains_update_notice_language(&compact)
-    {
+    if is_extended_update_notice(&compact) || contains_update_notice_language(&compact) {
         return true;
     }
     if compact.chars().all(|ch| {
