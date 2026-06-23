@@ -17,7 +17,8 @@ import type {
   ProfileDraft,
   TokenUsageReport,
   UpdateCheckResult,
-  UpdateDownloadResult
+  UpdateDownloadResult,
+  UpdateInstallResult
 } from "./types";
 
 type CommandMap = {
@@ -98,8 +99,10 @@ type CommandMap = {
   terminate_analyze_rewrite_all: { args: { novelId: string }; result: Job };
   export_novel: { args: { novelId: string; format: "txt" }; result: ExportResult };
   open_github_url: { args?: undefined; result: void };
+  open_github_release_url: { args?: undefined; result: void };
   check_for_updates: { args?: undefined; result: UpdateCheckResult };
   download_latest_update: { args?: undefined; result: UpdateDownloadResult };
+  take_update_install_result: { args?: undefined; result: UpdateInstallResult | null };
   record_frontend_error: {
     args: { message: string; stack: string | null; componentStack: string | null };
     result: void;

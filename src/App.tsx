@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -28,6 +29,7 @@ import { CompareView } from "./components/Compare/CompareView";
 import { DeleteNovelDialog } from "./components/common/DeleteNovelDialog";
 import { Modal } from "./components/common/Modal";
 import { getStatusTone, StatusBadge } from "./components/common/StatusBadge";
+import { UpdateInstallDialog } from "./components/common/UpdateInstallDialog";
 import { ModelProfiles } from "./components/Settings/ModelProfiles";
 import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/NovelSettings";
 import { CoreSettingsPage } from "./components/pages/CoreSettingsPage";
@@ -66,7 +68,8 @@ import type {
   NovelSettingsDraft,
   ProfileDraft,
   TokenUsageReport,
-  UpdateCheckResult
+  UpdateCheckResult,
+  UpdateProgress
 } from "./types";
 import { type AutoRunProgress, useAutoRunProgress } from "./useAutoRunProgress";
 
@@ -335,6 +338,8 @@ export default function App() {
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const { notice, setNotice, showNotice } = useNotice(setPendingUpdate);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
+  const [showUpdateInstallDialog, setShowUpdateInstallDialog] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
   const [autoRunRecoveries, setAutoRunRecoveries] = useState<AutoRunRecovery[]>([]);
   const [autoRunMode, setAutoRunMode] = useState<"range" | "batch" | null>(null);
@@ -554,7 +559,35 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<UpdateProgress>("update-progress", (event) => {
+      if (!cancelled) setUpdateProgress(event.payload);
+    }).then((handler) => {
+      if (cancelled) handler();
+      else unlisten = handler;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     async function checkStartupUpdate() {
+      try {
+        const result = await invoke("take_update_install_result");
+        if (!cancelled && result) {
+          showNotice(
+            result.status === "success"
+              ? result.message
+              : `${result.message} 更新日志：${result.log_path}`,
+            result.status === "success" ? 5000 : 60_000
+          );
+        }
+      } catch {
+        // A missing or unreadable updater result must not block normal startup.
+      }
       try {
         const update = await invoke("check_for_updates");
         if (!cancelled) {
@@ -1457,6 +1490,17 @@ export default function App() {
     }
   }
 
+  async function openGithubReleasePage() {
+    setBusy("open-github");
+    try {
+      await invoke("open_github_release_url");
+    } catch (error) {
+      showNotice(String(error), 60_000, Boolean(pendingUpdate));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function checkForUpdates() {
     setBusy("check-updates");
     setNotice("");
@@ -1480,20 +1524,35 @@ export default function App() {
   }
 
   async function downloadPendingUpdate() {
+    setShowUpdateInstallDialog(false);
     setBusy("download-update");
+    setUpdateProgress(null);
+    setNotice("正在准备下载最新版…");
+    let installStarted = false;
     try {
       const result = await invoke("download_latest_update");
+      if (result.install_started) {
+        installStarted = true;
+        setNotice(result.message);
+        return;
+      }
       setPendingUpdate(null);
-      setHasAvailableUpdate(false);
-      showNotice(`已下载 ${result.version}：${result.path}`);
+      showNotice(
+        `已下载 v${result.version}：${result.path}。${result.message}`,
+        60_000
+      );
     } catch (error) {
-      showNotice(String(error));
+      showNotice(String(error), 60_000, true);
     } finally {
-      setBusy("");
+      if (!installStarted) {
+        setUpdateProgress(null);
+        setBusy("");
+      }
     }
   }
 
   function cancelPendingUpdateDownload() {
+    setShowUpdateInstallDialog(false);
     setPendingUpdate(null);
     setNotice("");
     setActiveView("workspace");
@@ -1537,6 +1596,12 @@ export default function App() {
     const estimatedSecondsPerBatch = jobEstimate.estimated_full_run_seconds / estimatedBatchCount;
     return estimatedSecondsPerBatch * remainingBatches;
   }, [job, jobEstimate]);
+  const displayedNotice = busy === "download-update" && updateProgress
+    ? updateProgress.message
+    : notice;
+  const updateProgressPercent = updateProgress?.total_bytes
+    ? Math.min(100, Math.round((updateProgress.downloaded_bytes / updateProgress.total_bytes) * 100))
+    : null;
 
   const selectedRecovery = useMemo(
     () => autoRunRecoveries.find((recovery) => recovery.novel_id === detail?.novel.id),
@@ -1950,17 +2015,35 @@ export default function App() {
         </header>
         )}
 
-        {notice && (
+        {displayedNotice && (
           <div className="notice notice-panel">
-            <span>{notice}</span>
-            {pendingUpdate && (
+            <span>{displayedNotice}</span>
+            {busy === "download-update" && updateProgress?.stage === "downloading" && (
+              <div className="update-download-progress" aria-label="更新包下载进度">
+                <div className="update-download-progress-track">
+                  <div
+                    className="update-download-progress-fill"
+                    style={{ width: updateProgressPercent === null ? "18%" : `${updateProgressPercent}%` }}
+                  />
+                </div>
+                <strong>{updateProgressPercent === null ? "下载中" : `${updateProgressPercent}%`}</strong>
+              </div>
+            )}
+            {pendingUpdate && busy !== "download-update" && (
               <div className="notice-actions">
-                <button onClick={downloadPendingUpdate} disabled={busy === "download-update"}>
-                  {busy === "download-update" ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-                  下载最新版
+                <button
+                  onClick={() => setShowUpdateInstallDialog(true)}
+                  disabled={processingTaskActive || busy !== ""}
+                  title={processingTaskActive ? "当前任务结束后才能安装更新" : undefined}
+                >
+                  <Download size={16} />
+                  下载并安装最新版
                 </button>
-                <button onClick={cancelPendingUpdateDownload} disabled={busy === "download-update"}>
-                  不下载最新版
+                <button onClick={openGithubReleasePage} disabled={busy !== ""}>
+                  查看发布页
+                </button>
+                <button onClick={cancelPendingUpdateDownload} disabled={busy !== ""}>
+                  暂不更新
                 </button>
               </div>
             )}
@@ -2318,6 +2401,15 @@ export default function App() {
           novel={novelPendingDeletion}
           onCancel={() => setNovelPendingDeletion(null)}
           onConfirm={confirmDeleteNovel}
+        />
+      )}
+      {pendingUpdate && showUpdateInstallDialog && (
+        <UpdateInstallDialog
+          busy={busy === "download-update"}
+          processingTaskActive={processingTaskActive}
+          update={pendingUpdate}
+          onCancel={() => setShowUpdateInstallDialog(false)}
+          onConfirm={downloadPendingUpdate}
         />
       )}
       {showQuickStart && (

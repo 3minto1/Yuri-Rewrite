@@ -331,12 +331,36 @@ pub(crate) struct UpdateCheckResult {
     pub(crate) release_url: String,
     pub(crate) asset_name: String,
     pub(crate) asset_download_url: String,
+    pub(crate) asset_digest: Option<String>,
+    pub(crate) asset_size: Option<u64>,
+    pub(crate) auto_install_supported: bool,
+    pub(crate) auto_install_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct UpdateDownloadResult {
     pub(crate) path: String,
     pub(crate) version: String,
+    pub(crate) install_started: bool,
+    pub(crate) manual_install_required: bool,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct UpdateProgress {
+    pub(crate) stage: String,
+    pub(crate) source: Option<String>,
+    pub(crate) downloaded_bytes: u64,
+    pub(crate) total_bytes: Option<u64>,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UpdateInstallResult {
+    pub(crate) status: String,
+    pub(crate) version: String,
+    pub(crate) message: String,
+    pub(crate) log_path: String,
 }
 
 #[derive(Debug, Deserialize)]

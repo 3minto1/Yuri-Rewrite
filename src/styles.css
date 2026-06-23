@@ -635,6 +635,50 @@ pre {
   position: relative;
 }
 
+.update-download-progress {
+  align-items: center;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: minmax(180px, 360px) 48px;
+  width: min(100%, 430px);
+}
+
+.update-download-progress-track {
+  background: color-mix(in srgb, var(--color-warning, #b88722) 18%, transparent);
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.update-download-progress-fill {
+  background: var(--color-warning, #b88722);
+  border-radius: inherit;
+  height: 100%;
+  transition: width 180ms ease;
+}
+
+.update-install-dialog {
+  max-width: 620px;
+}
+
+.update-install-dialog-body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.update-install-dialog-body p,
+.update-install-dialog-body ul {
+  margin: 0;
+}
+
+.update-install-warning {
+  background: var(--warning-soft, #fff5d8);
+  border: 1px solid var(--warning-border, #e8cd82);
+  border-radius: var(--radius-control);
+  color: var(--warning-text, #6b5012);
+  padding: var(--space-3);
+}
+
 .novel-recovery-badge {
   background: #80642f;
   border-radius: 999px;

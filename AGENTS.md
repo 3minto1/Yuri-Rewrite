@@ -180,6 +180,17 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - If the cumulative TXT cannot be updated because it is open or otherwise locked, do not fail the one-click task immediately. Show a confirmation dialog asking the user to manually close the reader/editor that occupies the file, wait for confirmation, then retry the same cumulative TXT update. Do not attempt to close external programs automatically.
 - After normal rewrite completion, navigate to Compare. Preserve the selected batch after refreshes.
 
+### Portable Updates
+
+- In-app automatic installation applies only to Windows x64 portable packages running from a standard `YuriRewrite-v...-windows-x64` directory.
+- Resolve the latest full GitHub Release through release metadata and require the exact `YuriRewrite-vX.Y.Z-windows-x64.zip` asset.
+- Download GitHub first, then the fixed mirror list when a source times out or stalls. Every source must receive the same ZIP size and SHA-256 validation.
+- Automatic installation requires a valid GitHub-provided SHA-256 digest. If the digest is unavailable, the runtime directory is nonstandard, or the parent directory is not writable, download the ZIP for manual installation without replacing files.
+- Accept only portable ZIPs containing exactly `Yuri Rewrite.exe` and `README.md` at archive root. Reject traversal, nested paths, extra files, missing files, oversized entries, and hash mismatches.
+- Never overwrite a running executable in-process. Launch the generated updater from the application data update directory, exit the app, back up the old portable directory, extract to the versioned sibling directory, and restart the new executable.
+- A failed apply must restore and restart the old version when possible, persist a result marker and log, and report that result on the next application startup.
+- Do not start an update while analysis, rewrite, auto-run, import, deletion, or single-chapter rewrite work is active. Updating program files must never mutate the SQLite database, credentials, novels, rewrites, logs, Token records, or exports.
+
 ## Credentials and Destructive Operations
 
 - Prefer Windows Credential Manager for API keys.

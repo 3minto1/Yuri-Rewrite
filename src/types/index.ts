@@ -188,11 +188,33 @@ export type UpdateCheckResult = {
   release_url: string;
   asset_name: string;
   asset_download_url: string;
+  asset_digest?: string | null;
+  asset_size?: number | null;
+  auto_install_supported?: boolean;
+  auto_install_reason?: string | null;
 };
 
 export type UpdateDownloadResult = {
   path: string;
   version: string;
+  install_started: boolean;
+  manual_install_required: boolean;
+  message: string;
+};
+
+export type UpdateProgress = {
+  stage: "downloading" | "switching" | "validating" | "preparing" | "restarting";
+  source?: string | null;
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+  message: string;
+};
+
+export type UpdateInstallResult = {
+  status: "success" | "failed";
+  version: string;
+  message: string;
+  log_path: string;
 };
 
 export type JobEstimate = {

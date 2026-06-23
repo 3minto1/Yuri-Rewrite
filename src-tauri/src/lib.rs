@@ -48,6 +48,8 @@ use uuid::Uuid;
 
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/3minto1/Yuri-Rewrite";
 const GITHUB_LATEST_RELEASE_URL: &str = "https://github.com/3minto1/Yuri-Rewrite/releases/latest";
+const GITHUB_LATEST_RELEASE_API_URL: &str =
+    "https://api.github.com/repos/3minto1/Yuri-Rewrite/releases/latest";
 const AUTO_RUN_PAUSED: &str = "__YURI_AUTO_RUN_PAUSED__";
 const AUTO_RUN_TERMINATED: &str = "__YURI_AUTO_RUN_TERMINATED__";
 const SYSTEM_ANALYSIS_EXPERT: &str = "你是严谨的中文长篇小说结构分析专家，擅长从原文中提取事实、人物、关系、地点、术语和性别线索。工作方式必须精确、克制、基于证据；只输出合法 JSON，不输出 Markdown 或解释。";
@@ -132,8 +134,10 @@ pub fn run() {
             restore_single_chapter_rewrite,
             export_novel,
             open_github_url,
+            open_github_release_url,
             check_for_updates,
             download_latest_update,
+            take_update_install_result,
             record_frontend_error
         ])
         .run(tauri::generate_context!())

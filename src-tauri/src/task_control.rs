@@ -129,6 +129,11 @@ impl CancellableTaskRegistry {
         signal.notify.notify_waiters();
         Ok(true)
     }
+
+    pub(crate) fn any_active(&self) -> Result<bool, String> {
+        let tasks = self.tasks.lock().map_err(|error| error.to_string())?;
+        Ok(!tasks.is_empty())
+    }
 }
 
 impl CancellableTaskPermit<'_> {

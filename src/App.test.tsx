@@ -4,14 +4,21 @@ import App from "./App";
 import { clearDiffCache } from "./components/Compare/compareDiffCache";
 import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
-import type { AiLog, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelDetail } from "./types";
+import type { AiLog, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelDetail, UpdateProgress } from "./types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  progressCallback: undefined as ((progress: AutoRunProgress) => void) | undefined
+  progressCallback: undefined as ((progress: AutoRunProgress) => void) | undefined,
+  updateCallback: undefined as ((progress: UpdateProgress) => void) | undefined
 }));
 
 vi.mock("./tauriApi", () => ({ invokeCommand: mocks.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (_event: string, callback: (event: { payload: UpdateProgress }) => void) => {
+    mocks.updateCallback = (payload: UpdateProgress) => callback({ payload });
+    return vi.fn();
+  })
+}));
 vi.mock("./useAutoRunProgress", () => ({
   useAutoRunProgress: (_novelId: string | null, callback: (progress: AutoRunProgress) => void) => {
     mocks.progressCallback = callback;
@@ -137,6 +144,7 @@ describe("App feature behavior", () => {
     useAppStore.getState().reset();
     mocks.invoke.mockReset();
     mocks.progressCallback = undefined;
+    mocks.updateCallback = undefined;
     recoveryRows = [];
     window.localStorage.setItem("yuri-rewrite.quick-start-seen", "true");
     installDefaultCommands();
@@ -147,6 +155,110 @@ describe("App feature behavior", () => {
     expect(await screen.findByRole("heading", { name: "测试小说" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-1");
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+  });
+
+  it("confirms an available update and shows throttled download progress", async () => {
+    let resolveDownload: ((value: unknown) => void) | undefined;
+    const download = new Promise((resolve) => {
+      resolveDownload = resolve;
+    });
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "take_update_install_result") return null;
+      if (command === "check_for_updates") {
+        return {
+          current_version: "0.3.10",
+          latest_version: "0.3.11",
+          latest_tag: "v0.3.11",
+          is_latest: false,
+          release_url: "https://github.com/3minto1/Yuri-Rewrite/releases/tag/v0.3.11",
+          asset_name: "YuriRewrite-v0.3.11-windows-x64.zip",
+          asset_download_url: "https://github.com/download.zip",
+          asset_digest: `sha256:${"a".repeat(64)}`,
+          asset_size: 10_000_000,
+          auto_install_supported: true,
+          auto_install_reason: null
+        };
+      }
+      if (command === "download_latest_update") return download;
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: /检查更新/ }));
+    expect(await screen.findByRole("button", { name: "下载并安装最新版" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "下载并安装最新版" }));
+    expect(screen.getByRole("dialog", { name: "安装 Yuri Rewrite v0.3.11" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下载并安装" }));
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("download_latest_update"));
+    act(() => {
+      mocks.updateCallback?.({
+        stage: "downloading",
+        source: "国内镜像 1",
+        downloaded_bytes: 5_000_000,
+        total_bytes: 10_000_000,
+        message: "正在从国内镜像 1 下载最新版：4.8 / 9.5 MB"
+      });
+    });
+    expect(screen.getByText("正在从国内镜像 1 下载最新版：4.8 / 9.5 MB")).toBeInTheDocument();
+    expect(screen.getByText("50%")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveDownload?.({
+        path: "C:/Users/test/Downloads/YuriRewrite-v0.3.11-windows-x64.zip",
+        version: "0.3.11",
+        install_started: false,
+        manual_install_required: true,
+        message: "当前环境只能手动安装。"
+      });
+      await download;
+    });
+    expect(await screen.findByText(/已下载 v0.3.11/)).toBeInTheDocument();
+  });
+
+  it("keeps the release-page fallback after automatic update download fails", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "take_update_install_result") return null;
+      if (command === "check_for_updates") {
+        return {
+          current_version: "0.3.10",
+          latest_version: "0.3.11",
+          latest_tag: "v0.3.11",
+          is_latest: false,
+          release_url: "https://github.com/3minto1/Yuri-Rewrite/releases/tag/v0.3.11",
+          asset_name: "YuriRewrite-v0.3.11-windows-x64.zip",
+          asset_download_url: "https://github.com/download.zip",
+          auto_install_supported: true
+        };
+      }
+      if (command === "download_latest_update") {
+        throw new Error("自动下载失败，请手动访问 GitHub 发布页下载 portable ZIP");
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: /检查更新/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "下载并安装最新版" }));
+    fireEvent.click(screen.getByRole("button", { name: "下载并安装" }));
+    expect(await screen.findByText(/自动下载失败/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看发布页" })).toBeInTheDocument();
   });
 
   it("switches the workspace content between the main panels and canon assets", async () => {
