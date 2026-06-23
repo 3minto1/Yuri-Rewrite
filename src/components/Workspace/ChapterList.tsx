@@ -6,7 +6,6 @@ import { StatusBadge } from "../common/StatusBadge";
 
 export const CHAPTER_VIRTUALIZATION_THRESHOLD = 300;
 const CHAPTER_ROW_HEIGHT = 76;
-const CHAPTER_EDIT_ROW_HEIGHT = 88;
 
 type ChapterListProps = {
   chapters: Chapter[];
@@ -55,16 +54,6 @@ const ChapterButton = memo(function ChapterButton({
             aria-label={`第 ${chapter.index} 章名称`}
           />
         </label>
-        <span className="chapter-status-row">
-          <StatusBadge
-            status={chapter.analysis_status}
-            label={`分析 ${statusText[chapter.analysis_status] ?? chapter.analysis_status}`}
-          />
-          <StatusBadge
-            status={chapter.rewrite_status}
-            label={`改写 ${statusText[chapter.rewrite_status] ?? chapter.rewrite_status}`}
-          />
-        </span>
       </div>
     );
   }
@@ -138,7 +127,7 @@ export const ChapterList = memo(function ChapterList({
     return chapters.filter((chapter) => displayTitle(chapter).toLowerCase().includes(query));
   }, [chapters, displayTitle, normalizedJumpQuery]);
   const virtualized = visibleChapters.length >= CHAPTER_VIRTUALIZATION_THRESHOLD;
-  const rowHeight = editingTitles ? CHAPTER_EDIT_ROW_HEIGHT : CHAPTER_ROW_HEIGHT;
+  const rowHeight = CHAPTER_ROW_HEIGHT;
   const selectedIndex = useMemo(() => visibleChapters.findIndex((chapter) => chapter.id === selectedChapterId), [visibleChapters, selectedChapterId]);
   const rowProps = useMemo(() => ({
     chapters: visibleChapters,

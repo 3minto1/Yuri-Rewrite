@@ -96,6 +96,28 @@ describe("ChapterList", () => {
     expect(onRenameChapter).toHaveBeenCalledTimes(1);
   });
 
+  it("hides analysis and rewrite status badges while editing titles", () => {
+    const rows = chapters(2);
+    render(
+      <ChapterList
+        chapters={rows}
+        selectedChapterId="chapter-1"
+        onSelect={vi.fn()}
+        displayTitle={displayTitle}
+        statusText={statusText}
+        onRenameChapter={vi.fn()}
+      />
+    );
+
+    expect(screen.getAllByText("分析 待处理")).toHaveLength(2);
+    expect(screen.getAllByText("改写 待处理")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+
+    expect(screen.queryByText("分析 待处理")).not.toBeInTheDocument();
+    expect(screen.queryByText("改写 待处理")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "第 1 章名称" })).toHaveValue("第1章");
+  });
+
   it("keeps editing mode and blocks empty chapter titles", async () => {
     const onRenameChapter = vi.fn(async () => undefined);
     const rows = chapters(2);
