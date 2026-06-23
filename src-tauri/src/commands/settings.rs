@@ -488,7 +488,7 @@ pub(crate) fn default_chapter_batch_size() -> usize {
 
 pub(crate) fn normalize_chapter_batch_size(value: usize) -> usize {
     match value {
-        30 | 50 | 100 => value,
+        10 | 30 | 50 | 100 => value,
         _ => default_chapter_batch_size(),
     }
 }
@@ -699,6 +699,20 @@ mod tests {
     }
 
     #[test]
+    fn ten_chapter_batches_allow_parallelism_up_to_ten() {
+        assert_eq!(normalize_chapter_batch_size(10), 10);
+        for parallelism in [1, 3, 6, 10] {
+            assert_eq!(
+                clamp_parallelism_for_batch_size(parallelism, 10),
+                parallelism
+            );
+        }
+        for parallelism in [25, 50] {
+            assert_eq!(clamp_parallelism_for_batch_size(parallelism, 10), 10);
+        }
+    }
+
+    #[test]
     fn analysis_profile_defaults_to_current_model_and_can_be_saved() {
         let conn = Connection::open_in_memory().expect("open database");
         init_db(&conn).expect("initialize schema");
@@ -803,6 +817,40 @@ mod tests {
             .join("novel-1")
             .join("batch-002.txt")
             .exists());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn rebuilds_detected_batches_in_groups_of_ten() {
+        let mut conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        let data_dir = temp_data_dir();
+        seed_detected_novel(&conn, &data_dir);
+
+        rebuild_detected_chapter_batches_and_save(&mut conn, &data_dir, &test_settings(10, 10))
+            .expect("rebuild ten chapter batches");
+
+        let ranges = conn
+            .prepare(
+                "SELECT start_chapter, end_chapter FROM chapter_batches WHERE novel_id = 'novel-1' ORDER BY batch_index",
+            )
+            .expect("prepare ranges")
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .expect("query ranges")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect ranges");
+        assert_eq!(
+            ranges,
+            vec![
+                (1, 10),
+                (11, 20),
+                (21, 30),
+                (31, 40),
+                (41, 50),
+                (51, 60),
+                (61, 61),
+            ]
+        );
         let _ = fs::remove_dir_all(data_dir);
     }
 

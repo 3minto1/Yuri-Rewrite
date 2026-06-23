@@ -291,6 +291,15 @@ function localDateString(date: Date) {
   ].join("-");
 }
 
+function defaultTokenStatsDateRange(now = new Date()) {
+  const start = new Date(now);
+  start.setDate(start.getDate() - 29);
+  return {
+    startDate: localDateString(start),
+    endDate: localDateString(now)
+  };
+}
+
 export default function App() {
   const {
     novels, setNovels, detail, setDetail, selectedChapterId, setSelectedChapterId,
@@ -319,12 +328,10 @@ export default function App() {
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "token-stats" | "settings">("workspace");
   const [workspaceSection, setWorkspaceSection] = useState<"main" | "canon">("main");
   const [tokenStats, setTokenStats] = useState<TokenUsageReport | null>(null);
-  const [tokenStatsStartDate, setTokenStatsStartDate] = useState(() => {
-    const date = new Date();
-    date.setDate(date.getDate() - 29);
-    return localDateString(date);
-  });
-  const [tokenStatsEndDate, setTokenStatsEndDate] = useState(() => localDateString(new Date()));
+  const initialTokenStatsRangeRef = useRef(defaultTokenStatsDateRange());
+  const [tokenStatsStartDate, setTokenStatsStartDate] = useState(initialTokenStatsRangeRef.current.startDate);
+  const [tokenStatsEndDate, setTokenStatsEndDate] = useState(initialTokenStatsRangeRef.current.endDate);
+  const [tokenStatsLoading, setTokenStatsLoading] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const { notice, setNotice, showNotice } = useNotice(setPendingUpdate);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
@@ -345,6 +352,10 @@ export default function App() {
   const importInProgressRef = useRef(false);
   const processingTaskActiveRef = useRef(processingTaskActive);
   const autoRunMenuRef = useRef<HTMLDivElement | null>(null);
+  const activeViewRef = useRef(activeView);
+  const tokenStatsRangeCustomizedRef = useRef(false);
+  const tokenStatsDirtyRef = useRef(false);
+  const tokenStatsLoadingRef = useRef(false);
 
   const autoProgressPercent = useMemo(() => {
     if (!job || !["auto", "auto_batch"].includes(job.job_type) || job.total_chapters <= 0) return 0;
@@ -435,6 +446,10 @@ export default function App() {
   }, [processingTaskActive]);
 
   useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
+  useEffect(() => {
     if (!autoRunMenuOpen) return undefined;
     const closeMenu = (event: MouseEvent) => {
       if (!autoRunMenuRef.current?.contains(event.target as Node)) {
@@ -493,6 +508,7 @@ export default function App() {
       setJob(progress);
       setAutoRunMode(progress.job_type === "auto_batch" ? "batch" : "range");
       if (progress.status === "running") {
+        tokenStatsDirtyRef.current = true;
         setAutoRunState("running");
         if (progress.current_chapter > lastAutoExportedBatchRef.current) {
           lastAutoExportedBatchRef.current = progress.current_chapter;
@@ -512,6 +528,19 @@ export default function App() {
       }
       if (["completed", "paused", "failed", "terminated"].includes(progress.status)) {
         void invoke("list_auto_run_recoveries").then(setAutoRunRecoveries);
+        if (tokenStatsDirtyRef.current && activeViewRef.current === "token-stats") {
+          tokenStatsDirtyRef.current = false;
+          const range = tokenStatsRangeCustomizedRef.current
+            ? { startDate: tokenStatsStartDate, endDate: tokenStatsEndDate }
+            : defaultTokenStatsDateRange();
+          if (!tokenStatsRangeCustomizedRef.current) {
+            setTokenStatsStartDate(range.startDate);
+            setTokenStatsEndDate(range.endDate);
+          }
+          void refreshTokenStats(range.startDate, range.endDate).then((refreshed) => {
+            if (!refreshed) tokenStatsDirtyRef.current = true;
+          });
+        }
       }
   });
 
@@ -713,26 +742,51 @@ export default function App() {
     setLogs(rows);
   }
 
-  async function refreshTokenStats() {
-    if (!tokenStatsStartDate || !tokenStatsEndDate) return;
-    setBusy("token-stats");
+  async function refreshTokenStats(
+    startDate = tokenStatsStartDate,
+    endDate = tokenStatsEndDate
+  ) {
+    if (!startDate || !endDate || tokenStatsLoadingRef.current) return false;
+    tokenStatsLoadingRef.current = true;
+    setTokenStatsLoading(true);
     setNotice("");
     try {
       const report = await invoke("get_token_usage_stats", {
-        startDate: tokenStatsStartDate,
-        endDate: tokenStatsEndDate
+        startDate,
+        endDate
       });
       setTokenStats(report);
+      tokenStatsDirtyRef.current = false;
+      return true;
     } catch (error) {
       showNotice(String(error));
+      return false;
     } finally {
-      setBusy("");
+      tokenStatsLoadingRef.current = false;
+      setTokenStatsLoading(false);
     }
   }
 
   function openTokenStats() {
+    const range = tokenStatsRangeCustomizedRef.current
+      ? { startDate: tokenStatsStartDate, endDate: tokenStatsEndDate }
+      : defaultTokenStatsDateRange();
+    if (!tokenStatsRangeCustomizedRef.current) {
+      setTokenStatsStartDate(range.startDate);
+      setTokenStatsEndDate(range.endDate);
+    }
     setActiveView("token-stats");
-    void refreshTokenStats();
+    void refreshTokenStats(range.startDate, range.endDate);
+  }
+
+  function changeTokenStatsStartDate(value: string) {
+    tokenStatsRangeCustomizedRef.current = true;
+    setTokenStatsStartDate(value);
+  }
+
+  function changeTokenStatsEndDate(value: string) {
+    tokenStatsRangeCustomizedRef.current = true;
+    setTokenStatsEndDate(value);
   }
 
   async function persistSelectedProfileId(profileId: string) {
@@ -1286,7 +1340,7 @@ export default function App() {
     }
   }
 
-  async function setChapterBatchSize(value: 30 | 50 | 100) {
+  async function setChapterBatchSize(value: 10 | 30 | 50 | 100) {
     setBusy("batch-size-setting");
     setNotice("");
     try {
@@ -2043,10 +2097,10 @@ export default function App() {
             report={tokenStats}
             startDate={tokenStatsStartDate}
             endDate={tokenStatsEndDate}
-            busy={busy === "token-stats"}
-            onStartDateChange={setTokenStatsStartDate}
-            onEndDateChange={setTokenStatsEndDate}
-            onRefresh={refreshTokenStats}
+            busy={tokenStatsLoading}
+            onStartDateChange={changeTokenStatsStartDate}
+            onEndDateChange={changeTokenStatsEndDate}
+            onRefresh={() => { void refreshTokenStats(); }}
             onBack={() => setActiveView("workspace")}
           />
         )}

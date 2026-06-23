@@ -13,7 +13,7 @@ type SettingsPageProps = {
   onToggleReview: () => void;
   onReviewProfileChange: (profileId: string) => void;
   onAnalysisProfileChange: (profileId: string) => void;
-  onBatchSizeChange: (value: 30 | 50 | 100) => void;
+  onBatchSizeChange: (value: 10 | 30 | 50 | 100) => void;
   onParallelismChange: (value: 1 | 3 | 6 | 10 | 25 | 50) => void;
 };
 

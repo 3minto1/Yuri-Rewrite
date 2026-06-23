@@ -13,7 +13,7 @@ type AppSettingsViewProps = {
   onToggleReview: () => void;
   onReviewProfileChange: (profileId: string) => void;
   onAnalysisProfileChange: (profileId: string) => void;
-  onBatchSizeChange: (value: 30 | 50 | 100) => void;
+  onBatchSizeChange: (value: 10 | 30 | 50 | 100) => void;
   onParallelismChange: (value: 1 | 3 | 6 | 10 | 25 | 50) => void;
 };
 
@@ -69,8 +69,8 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <span className="setting-help" tabIndex={0} aria-label="每批次章节数说明"><HelpCircle size={16} /><span className="setting-help-tooltip" role="tooltip">仅影响能够识别正式章节标题的小说。修改后会立即重新生成所有已导入章节型小说的批次文件和批次范围，不会删除章节、分析结果、改写稿、人工编辑或一致性资产。按字符自动分段的小说仍保持每批最多约 10 万字。</span></span>
         </div>
         <div className="setting-toggle-row">
-          <div className="mode-toggle mode-toggle-three setting-batch-size" role="radiogroup" aria-label="每批次章节数">
-            {([30, 50, 100] as const).map((value) => <button key={value} type="button" className={batchSize === value ? "active" : ""} aria-checked={batchSize === value} role="radio" disabled={busy === "batch-size-setting" || processing} onClick={() => onBatchSizeChange(value)}>{value} 章</button>)}
+          <div className="mode-toggle mode-toggle-four setting-batch-size" role="radiogroup" aria-label="每批次章节数">
+            {([10, 30, 50, 100] as const).map((value) => <button key={value} type="button" className={batchSize === value ? "active" : ""} aria-checked={batchSize === value} role="radio" disabled={busy === "batch-size-setting" || processing} onClick={() => onBatchSizeChange(value)}>{value} 章</button>)}
           </div>
           <span>默认 30 章。任务运行或一键任务暂停时不能重新分批。</span>
         </div>

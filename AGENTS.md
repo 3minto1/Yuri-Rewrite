@@ -97,7 +97,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Preserve genuine `第X更 标题` chapter series, protected extras such as `番外`, `外传`, `后记`, `卷末后记`, and `完本感言`, and uncertain nonstandard headings with substantive content.
 - Chapter parsing improvements apply to new imports. Never automatically re-split existing novels on startup because chapter IDs, batches, checkpoints, analyses, rewrites, and manual edits may already depend on the current structure.
 - If no chapters can be detected, split by text length.
-- Chapter-based batches contain 30, 50, or 100 chapters according to application settings. Non-chapter batches contain at most 100,000 characters.
+- Chapter-based batches contain 10, 30, 50, or 100 chapters according to application settings. Non-chapter batches contain at most 100,000 characters.
 
 ### Analysis and Rewrite
 
@@ -172,8 +172,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Novel settings are keyed by `novel_id`; the protagonist name is required before analysis or rewrite.
 - Do not automatically open novel settings after import. Open them when a required operation is attempted without valid settings.
 - Application settings include export directory, global core prompt, analysis/review model selection, review configuration, chapter batch size, and shared analysis/rewrite concurrency.
-- Allowed batch sizes are `30`, `50`, and `100`, with `30` as the default.
-- Allowed concurrency values are `1`, `3`, `6`, `10`, `25`, and `50`, with `10` as the default. Batch size 30 allows at most 10, batch size 50 allows at most 25, and batch size 100 allows at most 50. The backend must enforce these constraints.
+- Allowed batch sizes are `10`, `30`, `50`, and `100`, with `30` as the default.
+- Allowed concurrency values are `1`, `3`, `6`, `10`, `25`, and `50`, with `10` as the default. Batch sizes 10 and 30 allow at most 10, batch size 50 allows at most 25, and batch size 100 allows at most 50. The backend must enforce these constraints.
 - Changing chapter batch size rebuilds chapter-based batch rows and internal TXT files atomically without changing chapter IDs, source text, analyses, rewrites, manual edits, canon assets, or logs. Reject the change while any active or paused one-click task exists.
 - Export TXT only. Include only chapters with completed rewrite status and non-empty rewrite text. Never fall back to the original text.
 - Full one-click must keep a single cumulative TXT for the selected run range. After each completed batch, rewrite that same file so it contains all completed batches from the run start through the latest completed batch; do not create one TXT per batch.

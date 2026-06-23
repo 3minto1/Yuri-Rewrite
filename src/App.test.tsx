@@ -132,6 +132,7 @@ describe("App feature behavior", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
+    vi.useRealTimers();
     clearDiffCache();
     useAppStore.getState().reset();
     mocks.invoke.mockReset();
@@ -444,6 +445,15 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("radio", { name: "25" })).toBeDisabled();
     expect(screen.getByRole("radio", { name: "50" })).toBeDisabled();
 
+    expect(screen.getByRole("radio", { name: "10 章" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("radio", { name: "10 章" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_app_settings", {
+      settings: expect.objectContaining({ chapter_batch_size: 10 })
+    }));
+    expect(screen.getByRole("radio", { name: "10" })).toBeEnabled();
+    expect(screen.getByRole("radio", { name: "25" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "50" })).toBeDisabled();
+
     fireEvent.click(screen.getByRole("radio", { name: "50 章" }));
     await waitFor(() => expect(screen.getByRole("radio", { name: "25" })).toBeEnabled());
     expect(screen.getByRole("radio", { name: "50" })).toBeDisabled();
@@ -522,6 +532,84 @@ describe("App feature behavior", () => {
       startDate: expect.any(String),
       endDate: expect.any(String)
     }));
+  });
+
+  it("rolls the default token statistics range forward after the app crosses midnight", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-06-22T12:00:00+08:00"));
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("get_token_usage_stats", {
+      startDate: "2026-05-24",
+      endDate: "2026-06-22"
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    vi.setSystemTime(new Date("2026-06-23T00:10:00+08:00"));
+    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("get_token_usage_stats", {
+      startDate: "2026-05-25",
+      endDate: "2026-06-23"
+    }));
+  });
+
+  it("refreshes token statistics once at task terminal state instead of on every progress event", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    await waitFor(() => expect(
+      mocks.invoke.mock.calls.filter(([command]) => command === "get_token_usage_stats")
+    ).toHaveLength(1));
+
+    act(() => mocks.progressCallback?.({
+      id: "job-auto-batch",
+      novel_id: "novel-1",
+      job_type: "auto_batch",
+      status: "running",
+      current_chapter: 0,
+      total_chapters: 1,
+      message: "分片 1/10"
+    }));
+    act(() => mocks.progressCallback?.({
+      id: "job-auto-batch",
+      novel_id: "novel-1",
+      job_type: "auto_batch",
+      status: "running",
+      current_chapter: 0,
+      total_chapters: 1,
+      message: "分片 9/10"
+    }));
+    expect(
+      mocks.invoke.mock.calls.filter(([command]) => command === "get_token_usage_stats")
+    ).toHaveLength(1);
+
+    act(() => mocks.progressCallback?.({
+      id: "job-auto-batch",
+      novel_id: "novel-1",
+      job_type: "auto_batch",
+      status: "completed",
+      current_chapter: 1,
+      total_chapters: 1,
+      message: "完成"
+    }));
+    await waitFor(() => expect(
+      mocks.invoke.mock.calls.filter(([command]) => command === "get_token_usage_stats")
+    ).toHaveLength(2));
+
+    act(() => mocks.progressCallback?.({
+      id: "job-auto-batch",
+      novel_id: "novel-1",
+      job_type: "auto_batch",
+      status: "completed",
+      current_chapter: 1,
+      total_chapters: 1,
+      message: "重复终态"
+    }));
+    expect(
+      mocks.invoke.mock.calls.filter(([command]) => command === "get_token_usage_stats")
+    ).toHaveLength(2);
   });
 
   it("removes the repeated topbar from secondary operational pages", async () => {

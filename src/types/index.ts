@@ -150,7 +150,7 @@ export type AppSettings = {
   review_profile_id?: string | null;
   analysis_profile_id?: string | null;
   selected_profile_id?: string | null;
-  chapter_batch_size?: 30 | 50 | 100;
+  chapter_batch_size?: 10 | 30 | 50 | 100;
   rewrite_parallelism?: 1 | 3 | 6 | 10 | 25 | 50;
 };
 
