@@ -1669,6 +1669,17 @@ export default function App() {
     }
   }, [showNotice, updateChapterFromBackend]);
 
+  const updateChapterTitle = useCallback(async (chapterId: string, title: string) => {
+    try {
+      const chapter = await invoke("update_chapter_title", { chapterId, title });
+      updateChapterFromBackend(chapter);
+      showNotice("章节名称已保存。");
+    } catch (error) {
+      showNotice(String(error));
+      throw error;
+    }
+  }, [showNotice, updateChapterFromBackend]);
+
   const rewriteSingleChapter = useCallback(async (
     chapterId: string,
     instructions: string,
@@ -2293,6 +2304,12 @@ export default function App() {
                 onSelect={setSelectedChapterId}
                 displayTitle={displayChapterTitle}
                 statusText={statusText}
+                onRenameChapter={updateChapterTitle}
+                titleEditDisabledReason={processingTaskActive || autoRunState !== "idle"
+                  ? "任务运行或暂停期间不能修改章节名称"
+                  : busy
+                    ? "当前操作完成后可编辑章节名称"
+                    : undefined}
               />
             </div>
           ) : (

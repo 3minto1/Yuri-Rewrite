@@ -108,7 +108,7 @@ const estimate: JobEstimate = {
 let recoveryRows: AutoRunRecovery[] = [];
 
 function installDefaultCommands() {
-  mocks.invoke.mockImplementation(async (command: string) => {
+  mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
     if (command === "list_novels") return novels;
     if (command === "list_model_profiles") return [profile];
     if (command === "get_app_settings") return settings;
@@ -130,6 +130,10 @@ function installDefaultCommands() {
     }
     if (command === "save_model_profile") return profile;
     if (command === "save_selected_profile_id") return settings;
+    if (command === "update_chapter_title") {
+      const payload = args as { chapterId: string; title: string } | undefined;
+      return { ...detail.chapters[0], title: payload?.title ?? detail.chapters[0].title };
+    }
     if (command === "export_novel") return { path: "C:/exports/test.txt" };
     return undefined;
   });
@@ -1062,6 +1066,32 @@ describe("App feature behavior", () => {
     expect(screen.getByText("原文内容")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "TXT" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("export_novel", { novelId: "novel-1", format: "txt" }));
+  });
+
+  it("keeps renamed chapter titles in sync with the compare chapter selector", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "第 1 章名称" }), {
+      target: { value: "第一章 修改后" }
+    });
+    const titleSaveButton = screen
+      .getAllByRole("button", { name: "保存" })
+      .find((button) => button.className.includes("compact-button"));
+    expect(titleSaveButton).toBeDefined();
+    fireEvent.click(titleSaveButton!);
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("update_chapter_title", {
+      chapterId: "chapter-1",
+      title: "第一章 修改后"
+    }));
+    await waitFor(() => expect(useAppStore.getState().detail?.chapters[0].title).toBe("第一章 修改后"));
+
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("1. 第一章 修改后");
+    fireEvent.click(screen.getByRole("combobox", { name: "章节" }));
+    expect(screen.getByRole("option", { name: /1\. 第一章 修改后/ })).toBeInTheDocument();
   });
 
   it("closes compare search before Escape returns to the workspace", async () => {

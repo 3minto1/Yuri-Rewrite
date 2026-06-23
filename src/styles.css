@@ -84,6 +84,18 @@ button:disabled {
   opacity: 0.64;
 }
 
+.sr-only {
+  border: 0;
+  clip: rect(0, 0, 0, 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 input,
 select,
 textarea {
@@ -110,6 +122,22 @@ textarea {
 .action-primary:hover:not(:disabled) {
   background: var(--color-brand-hover);
   border-color: var(--color-brand-hover);
+}
+
+.secondary-button {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.secondary-button:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  color: var(--color-brand);
+}
+
+.compact-button {
+  min-height: 36px;
+  padding: 7px 12px;
 }
 
 .action-primary:active:not(:disabled) {
@@ -1883,6 +1911,17 @@ label {
   padding: 7px 9px;
 }
 
+.chapter-title-edit-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.chapter-title-edit-error {
+  color: var(--color-danger);
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
 .chapter-list {
   flex: 1;
   min-height: 0;
@@ -1898,6 +1937,10 @@ label {
   height: 76px;
 }
 
+.virtual-chapter-list .chapter-item-editing {
+  height: 88px;
+}
+
 .chapter-item {
   align-items: flex-start;
   display: flex;
@@ -1905,6 +1948,22 @@ label {
   height: 76px;
   padding: 10px 11px;
   position: relative;
+}
+
+.chapter-item-editing {
+  align-items: stretch;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  height: 88px;
+  justify-content: flex-start;
+  padding: 11px 14px;
+}
+
+.chapter-item-editing span {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .chapter-title {
@@ -1919,6 +1978,38 @@ label {
   text-overflow: ellipsis;
   white-space: nowrap;
   width: 100%;
+}
+
+.chapter-title-edit-label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 36px;
+  width: 100%;
+}
+
+.chapter-title-index {
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 36px;
+  min-width: 30px;
+  text-align: right;
+}
+
+.chapter-title-edit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+}
+
+.chapter-item-editing .chapter-status-row {
+  flex-wrap: wrap;
+  margin-top: 8px;
+  min-height: 24px;
+  overflow: visible;
 }
 
 .chapter-item.active {

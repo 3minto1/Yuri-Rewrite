@@ -71,4 +71,71 @@ describe("ChapterList", () => {
 
     expect(onSelect).toHaveBeenCalledWith("chapter-250");
   });
+
+  it("edits chapter titles and saves only changed rows", async () => {
+    const onRenameChapter = vi.fn(async () => undefined);
+    const rows = chapters(3);
+    render(
+      <ChapterList
+        chapters={rows}
+        selectedChapterId="chapter-1"
+        onSelect={vi.fn()}
+        displayTitle={displayTitle}
+        statusText={statusText}
+        onRenameChapter={onRenameChapter}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "第 2 章名称" }), {
+      target: { value: "第二章 新标题" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onRenameChapter).toHaveBeenCalledWith("chapter-2", "第二章 新标题"));
+    expect(onRenameChapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps editing mode and blocks empty chapter titles", async () => {
+    const onRenameChapter = vi.fn(async () => undefined);
+    const rows = chapters(2);
+    render(
+      <ChapterList
+        chapters={rows}
+        selectedChapterId="chapter-1"
+        onSelect={vi.fn()}
+        displayTitle={displayTitle}
+        statusText={statusText}
+        onRenameChapter={onRenameChapter}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "第 1 章名称" }), {
+      target: { value: "   " }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("第 1 章名称不能为空。")).toBeInTheDocument();
+    expect(onRenameChapter).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "第 1 章名称" })).toBeInTheDocument();
+  });
+
+  it("disables title editing when the parent reports an unsafe state", () => {
+    render(
+      <ChapterList
+        chapters={chapters(1)}
+        selectedChapterId="chapter-1"
+        onSelect={vi.fn()}
+        displayTitle={displayTitle}
+        statusText={statusText}
+        onRenameChapter={vi.fn()}
+        titleEditDisabledReason="任务运行期间不能修改章节名称"
+      />
+    );
+
+    const editButton = screen.getByRole("button", { name: "编辑" });
+    expect(editButton).toBeDisabled();
+    expect(editButton).toHaveAttribute("title", "任务运行期间不能修改章节名称");
+  });
 });

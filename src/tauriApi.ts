@@ -59,6 +59,10 @@ type CommandMap = {
     result: JobEstimate;
   };
   update_canon_assets: { args: { novelId: string; assets: CanonAssetInput[] }; result: CanonAsset[] };
+  update_chapter_title: {
+    args: { chapterId: string; title: string };
+    result: import("./types").Chapter;
+  };
   save_chapter_rewrite_edit: {
     args: { chapterId: string; rewriteText: string };
     result: import("./types").Chapter;

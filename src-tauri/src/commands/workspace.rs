@@ -40,6 +40,24 @@ fn chapter_edit_is_allowed(
     Ok(())
 }
 
+fn chapter_title_edit_is_allowed(
+    state: &State<'_, AppState>,
+    chapter: &Chapter,
+) -> Result<(), String> {
+    if state.active_tasks.novel_is_active(&chapter.novel_id)? {
+        return Err("当前小说任务正在运行，不能修改章节名称。".to_string());
+    }
+    if state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .contains_key(&chapter.novel_id)
+    {
+        return Err("当前一键任务正在运行或暂停，不能修改章节名称。".to_string());
+    }
+    Ok(())
+}
+
 fn load_chapter_by_id(conn: &rusqlite::Connection, chapter_id: &str) -> Result<Chapter, String> {
     conn.query_row(
         "SELECT id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text,
@@ -51,6 +69,27 @@ fn load_chapter_by_id(conn: &rusqlite::Connection, chapter_id: &str) -> Result<C
         row_to_chapter,
     )
     .map_err(to_string)
+}
+
+#[tauri::command]
+pub(crate) fn update_chapter_title(
+    chapter_id: String,
+    title: String,
+    state: State<AppState>,
+) -> Result<Chapter, String> {
+    let normalized_title = title.trim();
+    if normalized_title.is_empty() {
+        return Err("章节名称不能为空。".to_string());
+    }
+    let conn = state.conn.lock().map_err(to_string)?;
+    let chapter = load_chapter_by_id(&conn, &chapter_id)?;
+    chapter_title_edit_is_allowed(&state, &chapter)?;
+    conn.execute(
+        "UPDATE chapters SET title = ?1 WHERE id = ?2",
+        params![normalized_title, chapter_id],
+    )
+    .map_err(to_string)?;
+    load_chapter_by_id(&conn, &chapter_id)
 }
 
 #[tauri::command]

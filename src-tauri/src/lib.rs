@@ -119,6 +119,7 @@ pub fn run() {
             save_novel_settings,
             list_chapter_batches,
             update_canon_assets,
+            update_chapter_title,
             start_analysis,
             start_rewrite,
             rewrite_single_chapter,
