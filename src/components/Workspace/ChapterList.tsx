@@ -43,7 +43,7 @@ const ChapterButton = memo(function ChapterButton({
   if (editing) {
     return (
       <div className={selectedChapterId === chapter.id ? "chapter-item chapter-item-editing active" : "chapter-item chapter-item-editing"}>
-        <label className="chapter-title-edit-label">
+        <div className="chapter-title-edit-label">
           <span className="sr-only">第 {chapter.index} 章名称</span>
           <span className="chapter-title-index" aria-hidden="true">{chapter.index}.</span>
           <input
@@ -53,7 +53,7 @@ const ChapterButton = memo(function ChapterButton({
             onFocus={() => onSelect(chapter.id)}
             aria-label={`第 ${chapter.index} 章名称`}
           />
-        </label>
+        </div>
       </div>
     );
   }
