@@ -1,4 +1,5 @@
 import { ArrowLeft, FolderOpen, HelpCircle } from "lucide-react";
+import { modelProfileDisplayName, modelProfileTitle } from "../../config/modelProfileDisplay";
 import type { AppSettings, ModelProfile } from "../../types";
 
 type AppSettingsViewProps = {
@@ -41,7 +42,11 @@ export function AppSettingsView(props: AppSettingsViewProps) {
         <div className="setting-row">
           <select value={settings.analysis_profile_id ?? ""} onChange={(event) => onAnalysisProfileChange(event.target.value)} disabled={busy === "analysis-profile-setting" || adjustmentDisabled} title="选择独立分析模型；留空则使用左侧当前改写模型">
             <option value="">默认使用当前模型分析</option>
-            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.model}</option>)}
+            {profiles.map((profile) => (
+              <option key={profile.id} value={profile.id} title={modelProfileTitle(profile)}>
+                {modelProfileDisplayName(profile)}
+              </option>
+            ))}
           </select>
           <span>左侧当前模型仍作为改写模型；一键任务会分别使用这里的分析模型和当前改写模型。</span>
         </div>
@@ -58,7 +63,11 @@ export function AppSettingsView(props: AppSettingsViewProps) {
         <div className="setting-row">
           <select value={settings.review_profile_id ?? ""} onChange={(event) => onReviewProfileChange(event.target.value)} disabled={busy === "review-profile-setting" || adjustmentDisabled} title="选择第二个 AI 作为审查专家；留空则使用当前改写模型审查">
             <option value="">使用当前改写模型审查</option>
-            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.model}</option>)}
+            {profiles.map((profile) => (
+              <option key={profile.id} value={profile.id} title={modelProfileTitle(profile)}>
+                {modelProfileDisplayName(profile)}
+              </option>
+            ))}
           </select>
           <span>审查专家只判定并列出问题；不通过时会打回改写模型重写，再由审查专家复判。</span>
         </div>

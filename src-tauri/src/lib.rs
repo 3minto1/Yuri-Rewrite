@@ -28,6 +28,7 @@ use regex::Regex;
 use repositories::{chapters::*, jobs::*, logs::*};
 use reqwest::Client;
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
 use services::progress::*;
@@ -42,7 +43,9 @@ use std::{
 use task_control::{
     should_terminate_paused_run, ActiveTaskRegistry, AutoRunControl, CancellableTaskRegistry,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
+};
 use text::*;
 use uuid::Uuid;
 
@@ -52,6 +55,7 @@ const GITHUB_LATEST_RELEASE_API_URL: &str =
     "https://api.github.com/repos/3minto1/Yuri-Rewrite/releases/latest";
 const AUTO_RUN_PAUSED: &str = "__YURI_AUTO_RUN_PAUSED__";
 const AUTO_RUN_TERMINATED: &str = "__YURI_AUTO_RUN_TERMINATED__";
+const WINDOW_STATE_FILE: &str = "window-state.json";
 const SYSTEM_ANALYSIS_EXPERT: &str = "你是严谨的中文长篇小说结构分析专家，擅长从原文中提取事实、人物、关系、地点、术语和性别线索。工作方式必须精确、克制、基于证据；只输出合法 JSON，不输出 Markdown 或解释。";
 const SYSTEM_ANALYSIS_JSON_REPAIR: &str = "你是中文小说分析 JSON 格式修复专家，只负责把输入修复为合法 JSON 对象，不新增事实、不改写正文、不输出 Markdown 或解释。";
 const SYSTEM_NAME_MAPPING_EXPERT: &str = "你是中文小说姓名女性化映射专家，擅长在保留姓氏、读音和人物辨识度的前提下生成稳定姓名映射。必须只输出合法 JSON，不输出 Markdown 或解释。";
@@ -75,6 +79,8 @@ pub fn run() {
                 .unwrap_or_else(|| data_dir.clone());
             fs::create_dir_all(&data_dir)?;
             fs::create_dir_all(data_dir.join("exports"))?;
+            restore_main_window_state(app, &data_dir);
+            install_main_window_state_listener(app, data_dir.clone());
             cleanup_deletion_trash(&data_dir);
             let conn = Connection::open(data_dir.join("yuri-rewrite.sqlite3"))?;
             init_db(&conn)?;
@@ -147,6 +153,127 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuri Rewrite");
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct StoredWindowState {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowStateBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+fn restore_main_window_state(app: &tauri::App, data_dir: &Path) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Some(state) = read_window_state(data_dir) else {
+        return;
+    };
+    if !stored_window_state_is_reasonable(&state) {
+        return;
+    }
+    let monitor_bounds = window
+        .available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            WindowStateBounds {
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !monitor_bounds.is_empty()
+        && !window_state_intersects_any_monitor(
+            WindowStateBounds {
+                x: state.x,
+                y: state.y,
+                width: state.width,
+                height: state.height,
+            },
+            &monitor_bounds,
+        )
+    {
+        return;
+    }
+    let _ = window.set_size(PhysicalSize::new(state.width, state.height));
+    let _ = window.set_position(PhysicalPosition::new(state.x, state.y));
+}
+
+fn install_main_window_state_listener(app: &tauri::App, data_dir: PathBuf) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let window_for_state = window.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::CloseRequested { .. }) {
+            save_window_state(&window_for_state, &data_dir);
+        }
+    });
+}
+
+fn read_window_state(data_dir: &Path) -> Option<StoredWindowState> {
+    let text = fs::read_to_string(data_dir.join(WINDOW_STATE_FILE)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn save_window_state(window: &WebviewWindow, data_dir: &Path) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.inner_size() else {
+        return;
+    };
+    let state = StoredWindowState {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    };
+    if !stored_window_state_is_reasonable(&state) {
+        return;
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&state) {
+        let _ = fs::write(data_dir.join(WINDOW_STATE_FILE), text);
+    }
+}
+
+fn stored_window_state_is_reasonable(state: &StoredWindowState) -> bool {
+    state.width >= 1040 && state.height >= 700 && state.width <= 20000 && state.height <= 20000
+}
+
+fn window_state_intersects_any_monitor(
+    window: WindowStateBounds,
+    monitors: &[WindowStateBounds],
+) -> bool {
+    monitors
+        .iter()
+        .any(|monitor| rectangles_intersect(window, *monitor))
+}
+
+fn rectangles_intersect(a: WindowStateBounds, b: WindowStateBounds) -> bool {
+    let a_left = i64::from(a.x);
+    let a_top = i64::from(a.y);
+    let a_right = a_left + i64::from(a.width);
+    let a_bottom = a_top + i64::from(a.height);
+    let b_left = i64::from(b.x);
+    let b_top = i64::from(b.y);
+    let b_right = b_left + i64::from(b.width);
+    let b_bottom = b_top + i64::from(b.height);
+    a_left < b_right && a_right > b_left && a_top < b_bottom && a_bottom > b_top
 }
 
 fn restore_auto_run_controls(

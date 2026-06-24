@@ -158,6 +158,11 @@ describe("App feature behavior", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "测试小说" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-1");
+    expect(screen.getByRole("combobox", { name: "改写模型" })).toHaveDisplayValue("测试模型");
+    expect(screen.getByRole("option", { name: "测试模型" })).toHaveAttribute(
+      "title",
+      expect.stringContaining("模型名：test-model")
+    );
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
   });
 
@@ -366,6 +371,7 @@ describe("App feature behavior", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByRole("combobox", { name: "改写模型" })).toHaveValue("profile-2"));
+    expect(screen.getByRole("combobox", { name: "改写模型" })).toHaveDisplayValue("备用模型");
     expect(screen.getAllByDisplayValue("second-model")).not.toHaveLength(0);
   });
 

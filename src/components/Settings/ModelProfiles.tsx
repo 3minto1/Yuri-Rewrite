@@ -1,4 +1,5 @@
 import { MoreHorizontal, Trash2 } from "lucide-react";
+import { modelProfileDisplayName, modelProfileTitle } from "../../config/modelProfileDisplay";
 import type { ModelProfile } from "../../types";
 
 type ModelProfilesProps = {
@@ -18,7 +19,11 @@ export function ModelProfiles(props: ModelProfilesProps) {
     <div className="model-row">
       <select aria-label="改写模型" value={selectedProfileId} onChange={(event) => onSelect(event.target.value)} disabled={processing}>
         <option value="">未选择</option>
-        {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.model}</option>)}
+        {profiles.map((profile) => (
+          <option key={profile.id} value={profile.id} title={modelProfileTitle(profile)}>
+            {modelProfileDisplayName(profile)}
+          </option>
+        ))}
       </select>
       <button className="icon-button menu-trigger" aria-label="打开模型菜单" onClick={() => onMenuOpenChange(!menuOpen)} disabled={!selectedProfileId || processing}><MoreHorizontal size={17} /></button>
       {menuOpen && selectedProfileId && <div className="context-menu"><button onClick={onDelete} disabled={busy === "delete-model" || processing}><Trash2 size={15} />删除当前模型</button></div>}

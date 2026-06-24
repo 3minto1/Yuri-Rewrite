@@ -43,6 +43,7 @@ import {
   getModelSuggestions as detectModelSuggestions,
   normalizeThinkingMode
 } from "./config/modelRecommendations";
+import { modelProfileDisplayName } from "./config/modelProfileDisplay";
 import { useModelProfiles } from "./hooks/useModelProfiles";
 import { useNovels } from "./hooks/useNovels";
 import { useNotice } from "./hooks/useNotice";
@@ -1082,7 +1083,8 @@ export default function App() {
       showNotice("请先选择一个模型配置。");
       return;
     }
-    if (!window.confirm(`删除模型配置「${profile.model}」及其保存的 API Key？`)) return;
+    const displayName = modelProfileDisplayName(profile);
+    if (!window.confirm(`删除模型配置「${displayName}」及其保存的 API Key？`)) return;
     setBusy("delete-model");
     setNotice("");
     try {
@@ -1095,7 +1097,7 @@ export default function App() {
       await persistSelectedProfileId(nextSelected);
       if (!nextSelected) setProfileDraft(defaultProfile);
       await refreshLogs();
-      showNotice(`已删除模型配置「${profile.model}」。`);
+      showNotice(`已删除模型配置「${displayName}」。`);
     } catch (error) {
       showNotice(String(error));
     } finally {
