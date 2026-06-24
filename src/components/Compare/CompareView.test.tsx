@@ -15,6 +15,7 @@ function Harness({
   onRewriteChapter = vi.fn(async () => undefined),
   onTerminateRewrite = vi.fn(async () => undefined),
   onRestoreInitialRewrite = vi.fn(async () => undefined),
+  onDirtyChange,
   initialChapters = chapters
 }: {
   onBack?: () => void;
@@ -25,6 +26,7 @@ function Harness({
   ) => Promise<void>;
   onTerminateRewrite?: () => Promise<void>;
   onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
   initialChapters?: Chapter[];
 }) {
   const [chapterRows, setChapterRows] = useState(initialChapters);
@@ -54,6 +56,7 @@ function Harness({
       onRewriteChapter={onRewriteChapter}
       onTerminateRewrite={onTerminateRewrite}
       onRestoreInitialRewrite={onRestoreInitialRewrite}
+      onDirtyChange={onDirtyChange}
     />
   );
 }
@@ -100,6 +103,30 @@ describe("CompareView", () => {
 
     await waitFor(() => expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("人工修改后的目标正文"));
     expect(screen.getByRole("button", { name: "恢复 AI 稿" })).toBeInTheDocument();
+  });
+
+  it("reports dirty state while editing and clears it after saving or cancelling", async () => {
+    const onDirtyChange = vi.fn();
+    render(<Harness onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "人工修改后的目标正文" }
+    });
+
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "再次修改但不保存" }
+    });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole("button", { name: "关闭编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
   });
 
   it("asks before navigating away from unsaved edits", async () => {

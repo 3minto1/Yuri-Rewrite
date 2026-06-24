@@ -29,6 +29,7 @@ type CompareViewProps = {
   ) => Promise<void>;
   onTerminateRewrite?: () => Promise<void>;
   onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
 };
 
 type DiffState = DiffResult & {
@@ -295,7 +296,8 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     onSaveRewrite = async () => undefined, onRestoreRewrite = async () => undefined,
     onRewriteChapter = async () => undefined,
     onTerminateRewrite = async () => undefined,
-    onRestoreInitialRewrite = async () => undefined
+    onRestoreInitialRewrite = async () => undefined,
+    onDirtyChange
   } = props;
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -339,6 +341,10 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const originalMatches = useMemo(() => chapterMatches.filter((match) => match.side === "original"), [chapterMatches]);
   const rewriteMatches = useMemo(() => chapterMatches.filter((match) => match.side === "rewrite"), [chapterMatches]);
   const editDirty = editing && editDraft !== rewriteText;
+
+  useEffect(() => {
+    onDirtyChange?.(editDirty);
+  }, [editDirty, onDirtyChange]);
 
   function runOrConfirmNavigation(action: () => void) {
     if (!editDirty) {

@@ -2645,33 +2645,50 @@ fn build_batch_revision_prompt_with_context(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let base_prompt = build_batch_rewrite_prompt_with_context(
-        chapters,
-        canon_text,
-        settings,
-        core_prompt,
-        shard_context,
-    );
     format!(
         r#"{}
 
+{}
+
+{}
+
+{}
+
 审查专家已打回上一版改写稿。请你作为原改写专家，根据下面的问题清单重新输出当前分片的完整改写结果。
 
-必须遵守：
+修复要求：
 1. 不要只局部补丁，必须重新输出当前分片所有章节的完整标题和正文。
 2. 保留原章节顺序和所有 `<<<YURI_REWRITE_CHAPTER_START ...>>>` / `<<<YURI_REWRITE_CHAPTER_END ...>>>` marker，marker 的 index 和 id 必须逐字复制。
-3. 逐条修复审查问题，同时继续遵守姓名映射、女性化要求、未指定角色性别保持、外貌一致性和原文逻辑。主角与男性共同被指代或群体含男性成员时必须使用“他们”或准确群体称呼，只有确认全员女性时才使用“她们”。
-4. 只输出当前分片章节，不要解释、不要 Markdown、不要输出审查意见。
+3. 逐条修复审查问题，同时继续遵守姓名映射、女性化要求、未指定角色性别保持、外貌一致性、百合关系连续性和原文逻辑。
+4. {}
+5. 主角与男性共同被指代或群体含男性成员时必须使用“他们”或准确群体称呼，只有确认全员女性时才使用“她们”；性别不明非人生物保留原文代词和称谓可通过。
+6. 只输出当前分片章节，不要解释、不要 Markdown、不要输出审查意见。
 
 审查打回问题：
+{}
+
+相关一致性资产：
+{}
+
+处理范围约束：
+{}
+
+当前章节原文：
 {}
 
 上一版改写稿：
 {}
 
 {}"#,
-        base_prompt,
+        rewrite_marker_format_guard("当前分片章节"),
+        build_rewrite_priority_prompt(),
+        build_core_prompt_section(core_prompt),
+        build_compact_revision_settings_prompt(settings),
+        cleanup_text_rule(),
         issue_text,
+        canon_text,
+        prompt_context_or_none(shard_context),
+        build_batch_chapter_text(chapters, false),
         build_batch_rewrite_text(chapters, rewrites),
         rewrite_marker_final_reminder("当前分片章节")
     )
@@ -2724,6 +2741,8 @@ fn build_targeted_revision_prompt(
 
 {}
 
+{}
+
 必须遵守：
 - 主角原名：{}；主角改写名：{}；其他指定女性化姓名：{}。
 - 身材/体型：{} / {}；改写模式：{}。
@@ -2731,6 +2750,7 @@ fn build_targeted_revision_prompt(
 - 高级设定：{}
 - 保留原章节顺序、原文主线、因果、战力、伏笔、人物动机和目标章节 marker。
 - 只修复 blocking 问题，不改动已合格内容；未指定性转角色保持原文性别；主角与男性共同被指代或群体含男性成员时使用“他们”或准确群体称呼，只有全员女性时才使用“她们”；性别不明的动物、灵兽等非人生物保留原文代词可通过。
+- {}
 - 每个目标章节必须完整输出原 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 和 `<<<YURI_REWRITE_CHAPTER_END ...>>>`，marker 的 index 和 id 逐字复制。
 - 只输出目标章节的 marker、标题、正文；不要解释、不要 Markdown。
 
@@ -2754,6 +2774,7 @@ fn build_targeted_revision_prompt(
 
 {}"#,
         rewrite_marker_format_guard("目标章节"),
+        build_rewrite_priority_prompt(),
         settings.protagonist_name.trim(),
         rewritten_name,
         if settings.additional_feminize_names.trim().is_empty() {
@@ -2766,6 +2787,7 @@ fn build_targeted_revision_prompt(
         rewrite_mode_label(&settings.rewrite_mode),
         core_prompt,
         advanced_settings,
+        cleanup_text_rule(),
         shard_context,
         issue_text,
         canon_text,
@@ -7434,6 +7456,8 @@ mod tests {
 
         assert!(prompt.contains("当前改写稿是本次修改的主要底稿"));
         assert!(prompt.contains("不能抛弃现稿、退回原文重新生成"));
+        assert!(prompt.contains("【规则优先级】"));
+        assert!(prompt.contains("保守清理正文"));
         assert!(prompt.contains("当前改写稿正文"));
         assert!(prompt.contains("原文仅用于核对事实"));
         assert!(prompt.contains("前一章已完成改写摘要"));
@@ -7877,9 +7901,34 @@ mod tests {
         );
 
         assert!(prompt.contains("处理范围约束："));
+        assert!(prompt.contains("【规则优先级】"));
+        assert!(prompt.contains("保守清理正文"));
+        assert!(prompt.contains("修正明显错别字"));
+        assert!(prompt.contains("不得借此删除剧情正文、番外、后记"));
+        assert!(prompt.contains("人名"));
+        assert!(prompt.contains("地名"));
+        assert!(prompt.contains("功法术语"));
+        assert!(prompt.contains("姓名映射表"));
+        assert!(prompt.contains("未指定角色必须保持原文性别"));
+        assert!(prompt.contains("复数群体代词必须按群体实际构成判断"));
+        assert!(prompt.contains("标题原则上保留原标题和原编号"));
+        assert!(prompt.contains("一致性资产：\n## 姓名映射表\n萧炎 -> 萧妍"));
+        assert!(prompt.contains("处理范围约束：\n本次目标只包含第1章"));
         assert!(!prompt.contains("并发分片上下文"));
         assert!(!prompt.contains("当前设置的并发请求数"));
         assert!(!prompt.contains("分片 4/10"));
+        assert!(
+            prompt.find("【输出格式硬性要求】").expect("format guard")
+                < prompt.find("【规则优先级】").expect("priority block")
+        );
+        assert!(
+            prompt.find("【规则优先级】").expect("priority block")
+                < prompt.find("最高优先级核心设定").expect("core prompt")
+        );
+        assert!(
+            prompt.find("最高优先级核心设定").expect("core prompt")
+                < prompt.find("改写要求").expect("rewrite rules")
+        );
         assert!(
             prompt.find("改写要求").expect("stable rewrite rules")
                 < prompt.find("处理范围约束：").expect("dynamic scope")
@@ -7988,16 +8037,17 @@ mod tests {
             .find("最高优先级核心设定")
             .expect("core prompt section");
         let rewrite_pos = prompt.find("改写要求").expect("rewrite rules");
+        let priority_pos = prompt.find("【规则优先级】").expect("priority block");
+        let format_pos = prompt.find("【输出格式硬性要求】").expect("format guard");
+        assert!(format_pos < priority_pos);
+        assert!(priority_pos < core_pos);
         assert!(core_pos < rewrite_pos);
         assert!(prompt.contains("文风克制，动作描写细腻"));
         assert!(prompt.contains("优先级高于本次改写中的其他风格"));
         assert!(prompt.contains("【输出格式硬性要求】"));
         assert!(prompt.contains("每章必须完整复制输入中的 START marker 和 END marker"));
         assert!(prompt.contains("再次确认：只输出当前输入章节的结果"));
-        assert!(
-            prompt.find("【输出格式硬性要求】").expect("format guard")
-                < prompt.find("改写要求").expect("rewrite rules")
-        );
+        assert!(format_pos < rewrite_pos);
         assert!(
             prompt
                 .rfind("再次确认：只输出当前输入章节的结果")
@@ -8100,13 +8150,13 @@ mod tests {
         assert!(prompt.contains("清除所有原男性主角痕迹"));
         assert!(prompt.contains("人物外貌特征必须前后一致"));
         assert!(prompt.contains("上一章是金发，下一章不能无理由变成红发"));
-        assert!(prompt.contains("百合向关系推进必须承接前文"));
+        assert!(prompt.contains("百合向关系推进必须承接一致性资产及相邻上下文"));
         assert!(prompt.contains("不能突然重置或跳跃"));
-        assert!(prompt.contains("其他配角、敌人、长辈、师父、兄弟、父亲、旁观者必须保持原文性别"));
-        assert!(prompt.contains("原文男性继续使用男性代词/称谓"));
-        assert!(prompt.contains("主角与男性角色共同被指代"));
-        assert!(prompt.contains("禁止改成“她们”"));
-        assert!(prompt.contains("只有确认全员女性时才能使用“她们”"));
+        assert!(prompt.contains("不得因为百合改写目标而把所有重要配角"));
+        assert!(prompt.contains("原文男性配角继续使用男性身份"));
+        assert!(prompt.contains("主角与一个或多个男性角色共同被指代"));
+        assert!(prompt.contains("不能因为主角已女性化就改成“她们”"));
+        assert!(prompt.contains("只有能够确认群体成员全部为女性时才使用“她们”"));
         assert!(prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
     }
 
@@ -9035,6 +9085,52 @@ mod tests {
     }
 
     #[test]
+    fn full_revision_prompt_is_compact_but_keeps_repair_context() {
+        let chapters = vec![sample_chapter(1, "第一章", "原文主线内容。")];
+        let rewrites = vec![ParsedChapterRewrite {
+            id: chapters[0].id.clone(),
+            index: chapters[0].index,
+            title: chapters[0].title.clone(),
+            text: "上一版改写稿正文。".to_string(),
+        }];
+        let decision = ReviewDecision {
+            approved: false,
+            issues: vec![sample_review_issue(
+                vec![1],
+                "chapter",
+                "gender_residue",
+                "第一章仍有主角男性称谓。",
+            )],
+        };
+
+        let prompt = build_batch_revision_prompt_with_context(
+            &chapters,
+            &rewrites,
+            "## 姓名映射表\n萧炎 -> 萧妍",
+            &sample_novel_settings(),
+            "核心规则",
+            "第1分片",
+            &decision,
+        );
+
+        assert!(prompt.contains("【输出格式硬性要求】"));
+        assert!(prompt.contains("【规则优先级】"));
+        assert!(prompt.contains("【压缩小说设定】"));
+        assert!(prompt.contains("审查打回问题"));
+        assert!(prompt.contains("第一章仍有主角男性称谓"));
+        assert!(prompt.contains("相关一致性资产"));
+        assert!(prompt.contains("当前章节原文"));
+        assert!(prompt.contains("原文主线内容"));
+        assert!(prompt.contains("上一版改写稿"));
+        assert!(prompt.contains("上一版改写稿正文"));
+        assert!(prompt.contains("保守清理正文"));
+        assert!(prompt.contains("姓名映射表和用户指定改名最高优先级"));
+        assert!(prompt.contains("未指定角色、性别不明者和非人生物必须按原文"));
+        assert!(!prompt.contains("改写要求：\n1. 将原本男女性别叙事自然改写为双女主百合叙事。"));
+        assert!(!prompt.contains("采用中度再创作：保留主线、冲突、章节顺序"));
+    }
+
+    #[test]
     fn targeted_revision_prompt_contains_only_full_target_chapter_body() {
         let chapters = (1..=3)
             .map(|index| {
@@ -9082,6 +9178,8 @@ mod tests {
         assert!(prompt.contains("目标章节当前改写稿"));
         assert!(prompt.contains("改写内容 2"));
         assert!(prompt.contains("【输出格式硬性要求】"));
+        assert!(prompt.contains("【规则优先级】"));
+        assert!(prompt.contains("保守清理正文"));
         assert!(prompt.contains("再次确认：只输出目标章节的结果"));
         assert!(prompt.contains("相邻章节只读上下文"));
         assert!(prompt.contains("主角与男性共同被指代或群体含男性成员时使用“他们”"));

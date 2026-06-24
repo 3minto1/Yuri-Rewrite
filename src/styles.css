@@ -1905,6 +1905,7 @@ label {
   width: min(760px, 100%);
 }
 
+/* Shared dialog chrome */
 .dialog-titlebar {
   align-items: center;
   background: #ffffff;
@@ -2272,6 +2273,7 @@ label {
   padding-top: var(--space-2);
 }
 
+/* Compare toolbar compact status */
 .compare-word-count {
   align-items: center;
   color: var(--color-text-muted);
@@ -3273,6 +3275,7 @@ label textarea {
   gap: 7px;
 }
 
+/* Workspace task estimate */
 .estimate-panel {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 251, 244, 0.96)),
@@ -3463,6 +3466,7 @@ mark.search-match.active-search-match {
   box-shadow: var(--shadow-dialog);
 }
 
+/* Dark theme surface and component overrides */
 :root[data-theme="dark"] body {
   background:
     linear-gradient(180deg, rgb(21 23 19 / 94%), rgb(18 20 17 / 98%)),

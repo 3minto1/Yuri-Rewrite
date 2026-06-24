@@ -242,11 +242,12 @@ describe("App feature behavior", () => {
         version: "0.3.11",
         install_started: false,
         manual_install_required: true,
-        message: "当前环境只能手动安装。"
+        message: "未获得 GitHub SHA-256 摘要，仅保存为手动安装包，不能自动安装。"
       });
       await download;
     });
     expect(await screen.findByText(/已下载 v0.3.11/)).toBeInTheDocument();
+    expect(screen.getByText(/未获得 GitHub SHA-256 摘要/)).toBeInTheDocument();
   });
 
   it("keeps the release-page fallback after automatic update download fails", async () => {
@@ -1114,6 +1115,31 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("1. 第一章 修改后");
     fireEvent.click(screen.getByRole("combobox", { name: "章节" }));
     expect(screen.getByRole("option", { name: /1\. 第一章 修改后/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["设置", () => fireEvent.click(screen.getByRole("button", { name: "设置" })), "设置"],
+    ["日志", () => fireEvent.click(screen.getByRole("button", { name: "日志" })), "AI 调用日志"],
+    ["品牌返回", () => fireEvent.click(screen.getByRole("button", { name: /Yuri Rewrite/ })), "章节"],
+    ["Esc 返回", () => fireEvent.keyDown(window, { key: "Escape" }), "章节"]
+  ])("guards unsaved compare edits before app-level navigation: %s", async (_label, triggerNavigation, expectedHeading) => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "尚未保存的 App 级导航草稿" }
+    });
+
+    triggerNavigation();
+    const dialog = screen.getByRole("dialog", { name: "改写稿尚未保存" });
+    expect(within(dialog).getByText(/离开对比页面会放弃这些修改/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByRole("textbox", { name: "编辑改写稿正文" })).toHaveValue("尚未保存的 App 级导航草稿");
+
+    triggerNavigation();
+    fireEvent.click(screen.getByRole("button", { name: "放弃并离开" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: expectedHeading })).toBeInTheDocument());
   });
 
   it("closes compare search before Escape returns to the workspace", async () => {

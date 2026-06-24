@@ -4,6 +4,9 @@ import type { Job } from "./types";
 
 export type AutoRunProgress = Job;
 
+const terminalStatuses = ["completed", "failed", "terminated", "paused"];
+const replacementStatuses = ["running", "paused"];
+
 export function useAutoRunProgress(
   novelId: string | null,
   onProgress: (progress: AutoRunProgress) => void
@@ -32,10 +35,14 @@ export function useAutoRunProgress(
         || progress.novel_id !== novelId
       ) return;
       if (terminalJobIdRef.current === progress.id) return;
-      if (activeJobIdRef.current && activeJobIdRef.current !== progress.id) return;
+      if (
+        activeJobIdRef.current
+        && activeJobIdRef.current !== progress.id
+        && !replacementStatuses.includes(progress.status)
+      ) return;
       activeJobIdRef.current = progress.id;
       callbackRef.current(progress);
-      if (["completed", "failed", "terminated", "paused"].includes(progress.status)) {
+      if (terminalStatuses.includes(progress.status)) {
         terminalJobIdRef.current = progress.id;
         activeJobIdRef.current = "";
       }

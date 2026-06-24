@@ -112,11 +112,8 @@ pub(crate) async fn download_latest_update(
         .asset_digest
         .as_deref()
         .and_then(normalize_sha256_digest);
-    let auto_install_reason = update.auto_install_reason.clone().or_else(|| {
-        digest
-            .is_none()
-            .then(|| "GitHub 未提供该资产的 SHA-256 摘要，不能安全自动安装。".to_string())
-    });
+    let auto_install_reason =
+        update_auto_install_reason(update.auto_install_reason.clone(), digest.as_deref());
 
     if !update.auto_install_supported || digest.is_none() {
         let manual_path = copy_update_for_manual_install(&zip_path, &update.asset_name, &state)?;
@@ -536,6 +533,17 @@ fn normalize_sha256_digest(value: &str) -> Option<String> {
     (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(digest)
 }
 
+fn update_auto_install_reason(
+    configured_reason: Option<String>,
+    digest: Option<&str>,
+) -> Option<String> {
+    configured_reason.or_else(|| {
+        digest
+            .is_none()
+            .then(|| "未获得 GitHub SHA-256 摘要，仅保存为手动安装包，不能自动安装。".to_string())
+    })
+}
+
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
     let mut file = File::open(path).map_err(to_string)?;
     let mut hasher = Sha256::new();
@@ -934,6 +942,23 @@ mod tests {
         );
         assert_eq!(normalize_sha256_digest("sha256:1234"), None);
         assert_eq!(normalize_sha256_digest(&"z".repeat(64)), None);
+    }
+
+    #[test]
+    fn missing_digest_explains_manual_install_only() {
+        assert_eq!(
+            update_auto_install_reason(None, None).as_deref(),
+            Some("未获得 GitHub SHA-256 摘要，仅保存为手动安装包，不能自动安装。")
+        );
+        assert_eq!(
+            update_auto_install_reason(Some("当前运行目录不支持自动安装。".to_string()), None)
+                .as_deref(),
+            Some("当前运行目录不支持自动安装。")
+        );
+        assert_eq!(
+            update_auto_install_reason(None, Some("abc")).as_deref(),
+            None
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "name": "yuri-rewrite",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,8 @@
     "tauri:build": "tauri build",
     "verify": "powershell -ExecutionPolicy Bypass -File scripts/verify.ps1",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
-    "package:portable:fresh": "powershell -ExecutionPolicy Bypass -File scripts/package-portable-fresh.ps1"
+    "package:portable:fresh": "powershell -ExecutionPolicy Bypass -File scripts/package-portable-fresh.ps1",
+    "release:check": "powershell -ExecutionPolicy Bypass -File scripts/release-check.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

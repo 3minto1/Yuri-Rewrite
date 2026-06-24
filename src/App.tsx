@@ -94,6 +94,7 @@ type ModelSuggestionGroup = {
 };
 
 type ThemeMode = "light" | "dark";
+type ActiveView = "workspace" | "compare" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings";
 
 
 const emptyProfile: ProfileDraft = {
@@ -351,7 +352,9 @@ export default function App() {
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => readInitialTheme());
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings">("workspace");
+  const [activeView, setActiveView] = useState<ActiveView>("workspace");
+  const [compareDirty, setCompareDirty] = useState(false);
+  const [pendingActiveView, setPendingActiveView] = useState<ActiveView | null>(null);
   const [workspaceSection, setWorkspaceSection] = useState<"main" | "canon">("main");
   const [tokenStats, setTokenStats] = useState<TokenUsageReport | null>(null);
   const initialTokenStatsRangeRef = useRef(defaultTokenStatsDateRange());
@@ -382,9 +385,48 @@ export default function App() {
   const processingTaskActiveRef = useRef(processingTaskActive);
   const autoRunMenuRef = useRef<HTMLDivElement | null>(null);
   const activeViewRef = useRef(activeView);
+  const compareDirtyRef = useRef(false);
   const tokenStatsRangeCustomizedRef = useRef(false);
   const tokenStatsDirtyRef = useRef(false);
   const tokenStatsLoadingRef = useRef(false);
+  const pendingActiveViewActionRef = useRef<(() => void) | null>(null);
+
+  const commitActiveView = useCallback((nextView: ActiveView) => {
+    if (nextView !== "compare") {
+      compareDirtyRef.current = false;
+      setCompareDirty(false);
+    }
+    setActiveView(nextView);
+  }, []);
+
+  const requestActiveView = useCallback((nextView: ActiveView, afterNavigate?: () => void) => {
+    if (nextView === activeView) {
+      afterNavigate?.();
+      return;
+    }
+    if (activeView === "compare" && compareDirtyRef.current) {
+      pendingActiveViewActionRef.current = afterNavigate ?? null;
+      setPendingActiveView(nextView);
+      return;
+    }
+    commitActiveView(nextView);
+    afterNavigate?.();
+  }, [activeView, commitActiveView]);
+
+  const cancelPendingActiveView = useCallback(() => {
+    pendingActiveViewActionRef.current = null;
+    setPendingActiveView(null);
+  }, []);
+
+  const confirmPendingActiveView = useCallback(() => {
+    const nextView = pendingActiveView;
+    const action = pendingActiveViewActionRef.current;
+    pendingActiveViewActionRef.current = null;
+    setPendingActiveView(null);
+    if (!nextView) return;
+    commitActiveView(nextView);
+    action?.();
+  }, [commitActiveView, pendingActiveView]);
 
   const autoProgressPercent = useMemo(() => {
     if (!job || !["auto", "auto_batch"].includes(job.job_type) || job.total_chapters <= 0) return 0;
@@ -487,6 +529,10 @@ export default function App() {
   useEffect(() => {
     activeViewRef.current = activeView;
   }, [activeView]);
+
+  useEffect(() => {
+    compareDirtyRef.current = compareDirty;
+  }, [compareDirty]);
 
   useEffect(() => {
     if (!autoRunMenuOpen) return undefined;
@@ -645,14 +691,14 @@ export default function App() {
         setNovelPendingDeletion(null);
         return;
       }
-      if (activeView !== "workspace" && !settingsDialog && !novelPendingDeletion) {
-        setActiveView("workspace");
+      if (activeView !== "workspace" && !settingsDialog && !novelPendingDeletion && !pendingActiveView) {
+        requestActiveView("workspace");
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, busy, novelPendingDeletion, settingsDialog]);
+  }, [activeView, busy, novelPendingDeletion, pendingActiveView, requestActiveView, settingsDialog]);
 
   useEffect(() => {
     const profile = selectedProfile;
@@ -842,8 +888,9 @@ export default function App() {
       setTokenStatsStartDate(range.startDate);
       setTokenStatsEndDate(range.endDate);
     }
-    setActiveView("token-stats");
-    void refreshTokenStats(range.startDate, range.endDate);
+    requestActiveView("token-stats", () => {
+      void refreshTokenStats(range.startDate, range.endDate);
+    });
   }
 
   function changeTokenStatsStartDate(value: string) {
@@ -1014,7 +1061,7 @@ export default function App() {
       showNotice("请先导入或选择一本小说。");
       return;
     }
-    setActiveView("chapter-rules");
+    requestActiveView("chapter-rules");
   }
 
   function deleteNovel(novel: Novel) {
@@ -1622,7 +1669,7 @@ export default function App() {
     setShowUpdateInstallDialog(false);
     setPendingUpdate(null);
     setNotice("");
-    setActiveView("workspace");
+    requestActiveView("workspace");
   }
 
   function updateCanon(kind: string, content: string) {
@@ -1698,7 +1745,7 @@ export default function App() {
         ? "当前操作完成后可编辑"
         : undefined;
 
-  const handleCompareBack = useCallback(() => setActiveView("workspace"), []);
+  const handleCompareBack = useCallback(() => requestActiveView("workspace"), [requestActiveView]);
   const handleCompareExport = useCallback(() => {
     void exportNovel("txt");
   }, [exportNovel]);
@@ -1842,7 +1889,7 @@ export default function App() {
         )}
         <button
           className={activeView === "compare" ? "app-menu-item active" : "app-menu-item"}
-          onClick={() => setActiveView("compare")}
+          onClick={() => requestActiveView("compare")}
           disabled={!detail || selectedNovelPendingSplit}
           title={selectedNovelPendingSplit ? "请先生成章节列表" : undefined}
         >
@@ -1857,7 +1904,7 @@ export default function App() {
         </button>
         <button
           className={activeView === "core-settings" ? "app-menu-item active" : "app-menu-item"}
-          onClick={() => setActiveView("core-settings")}
+          onClick={() => requestActiveView("core-settings")}
         >
           核心设定
         </button>
@@ -1889,7 +1936,7 @@ export default function App() {
       </nav>
 
       <aside className="sidebar">
-        <button className="brand brand-button" onClick={() => setActiveView("workspace")}>
+        <button className="brand brand-button" onClick={() => requestActiveView("workspace")}>
           <Sparkles size={22} />
           <div>
             <strong>Yuri Rewrite</strong>
@@ -1909,7 +1956,9 @@ export default function App() {
               <div className="novel-row" key={novel.id}>
                 <button
                   className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"}
-                  onClick={() => loadNovel(novel.id)}
+                  onClick={() => requestActiveView("workspace", () => {
+                    void loadNovel(novel.id);
+                  })}
                   disabled={(autoRunState === "running" || autoRunState === "stopping" || ["analysis", "rewrite", "auto-batch"].includes(busy)) && detail?.novel.id !== novel.id}
                 >
                   <BookOpen size={16} />
@@ -1957,7 +2006,7 @@ export default function App() {
         <div className="side-section nav-section">
           <button
             className={activeView === "logs" ? "nav-button active" : "nav-button"}
-            onClick={() => setActiveView("logs")}
+            onClick={() => requestActiveView("logs")}
           >
             <ClipboardList size={17} />
             日志
@@ -1987,7 +2036,7 @@ export default function App() {
 
         <button
           className={activeView === "settings" ? "nav-button active" : "nav-button"}
-          onClick={() => setActiveView("settings")}
+          onClick={() => requestActiveView("settings")}
         >
           <Settings size={17} />
           设置
@@ -2277,7 +2326,7 @@ export default function App() {
           <LogsPage
             logs={logs}
             busy={busy}
-            onBack={() => setActiveView("workspace")}
+            onBack={() => requestActiveView("workspace")}
             onClear={clearLogs}
             onRefresh={() => refreshLogs()}
           />
@@ -2292,7 +2341,7 @@ export default function App() {
             onStartDateChange={changeTokenStatsStartDate}
             onEndDateChange={changeTokenStatsEndDate}
             onRefresh={() => { void refreshTokenStats(); }}
-            onBack={() => setActiveView("workspace")}
+            onBack={() => requestActiveView("workspace")}
           />
         )}
 
@@ -2303,7 +2352,7 @@ export default function App() {
             disabled={processingTaskActive}
             hasNovel={Boolean(detail)}
             busy={busy}
-            onBack={() => setActiveView("workspace")}
+            onBack={() => requestActiveView("workspace")}
             onSave={saveNovelSettings}
           />
         )}
@@ -2314,7 +2363,7 @@ export default function App() {
             busy={busy === "core-settings"}
             disabled={processingTaskActive}
             onChange={setCorePromptDraft}
-            onBack={() => setActiveView("workspace")}
+            onBack={() => requestActiveView("workspace")}
             onSave={saveCoreSettings}
           />
         )}
@@ -2324,7 +2373,7 @@ export default function App() {
             novel={detail?.novel ?? null}
             busy={busy}
             processing={processingTaskActive}
-            onBack={() => setActiveView("workspace")}
+            onBack={() => requestActiveView("workspace")}
             onApplied={handleChapterRuleApplied}
             onUseBuiltin={splitNovelWithBuiltinRule}
             showNotice={showNotice}
@@ -2338,7 +2387,7 @@ export default function App() {
             busy={busy}
             processing={processingTaskActive}
             pausedAutoRun={pausedAutoRun}
-            onBack={() => setActiveView("workspace")}
+            onBack={() => requestActiveView("workspace")}
             onChooseExportDir={chooseExportDir}
             onClearExportDir={clearExportDir}
             onToggleReview={toggleReviewEnabled}
@@ -2367,6 +2416,7 @@ export default function App() {
             onRewriteChapter={rewriteSingleChapter}
             onTerminateRewrite={terminateSingleChapterRewrite}
             onRestoreInitialRewrite={restoreSingleChapterRewrite}
+            onDirtyChange={setCompareDirty}
           />
         )}
 
@@ -2506,7 +2556,7 @@ export default function App() {
               type="button"
               onClick={() => {
                 setPendingSplitPrompt(null);
-                setActiveView("chapter-rules");
+                requestActiveView("chapter-rules");
               }}
               disabled={processingTaskActive}
             >
@@ -2599,6 +2649,37 @@ export default function App() {
           onCancel={() => setShowUpdateInstallDialog(false)}
           onConfirm={downloadPendingUpdate}
         />
+      )}
+      {pendingActiveView && (
+        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="app-compare-unsaved-title">
+          <header className="dialog-titlebar">
+            <h2 id="app-compare-unsaved-title">改写稿尚未保存</h2>
+            <button
+              className="dialog-close"
+              type="button"
+              aria-label="关闭未保存提示"
+              title="继续编辑"
+              onClick={cancelPendingActiveView}
+            >
+              <X size={16} />
+            </button>
+          </header>
+          <div className="dialog-body">
+            <p>当前改写稿还有未保存的修改。离开对比页面会放弃这些修改。</p>
+          </div>
+          <footer className="dialog-actions">
+            <button type="button" onClick={cancelPendingActiveView}>
+              继续编辑
+            </button>
+            <button
+              type="button"
+              className="dialog-primary"
+              onClick={confirmPendingActiveView}
+            >
+              放弃并离开
+            </button>
+          </footer>
+        </Modal>
       )}
       {showQuickStart && (
         <Modal className="quickstart-dialog" labelledBy="quickstart-title">

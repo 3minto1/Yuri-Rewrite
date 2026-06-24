@@ -31,7 +31,7 @@ describe("useAutoRunProgress", () => {
     unlisten.mockClear();
   });
 
-  it("ignores other novels and stale job ids", async () => {
+  it("ignores other novels and stale terminal job ids", async () => {
     const onProgress = vi.fn();
     renderHook(() => useAutoRunProgress("novel-1", onProgress));
     await waitFor(() => expect(progressHandler).toBeDefined());
@@ -40,9 +40,21 @@ describe("useAutoRunProgress", () => {
     expect(onProgress).not.toHaveBeenCalled();
 
     act(() => progressHandler?.({ payload: progress() }));
-    act(() => progressHandler?.({ payload: progress({ id: "stale-job" }) }));
+    act(() => progressHandler?.({ payload: progress({ id: "stale-job", status: "completed" }) }));
     expect(onProgress).toHaveBeenCalledTimes(1);
     expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ id: "job-1" }));
+  });
+
+  it("accepts a new running job when the previous active job missed its terminal event", async () => {
+    const onProgress = vi.fn();
+    renderHook(() => useAutoRunProgress("novel-1", onProgress));
+    await waitFor(() => expect(progressHandler).toBeDefined());
+
+    act(() => progressHandler?.({ payload: progress({ id: "job-1", status: "running", current_chapter: 1 }) }));
+    act(() => progressHandler?.({ payload: progress({ id: "job-2", status: "running", current_chapter: 0 }) }));
+
+    expect(onProgress).toHaveBeenCalledTimes(2);
+    expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ id: "job-2", status: "running" }));
   });
 
   it("accepts a new job after the previous job reaches a terminal state", async () => {
