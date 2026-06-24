@@ -143,6 +143,37 @@ describe("CompareView", () => {
     expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
   });
 
+  it("shows compact non-whitespace character counts in the second toolbar row", () => {
+    render(<Harness initialChapters={[
+      { ...chapters[0], original_text: "一 二\n三", rewrite_text: "一二三四" }
+    ]} />);
+
+    expect(screen.getByLabelText("字数对比")).toHaveTextContent("字数：原文 3 · 改写稿 4 · +1（+33.3%）");
+  });
+
+  it("shows an empty rewrite character count without per-chapter progress", () => {
+    render(<Harness initialChapters={[
+      { ...chapters[0], original_text: "一 二\n三", rewrite_text: null, rewrite_status: "pending" }
+    ]} />);
+
+    expect(screen.getByLabelText("字数对比")).toHaveTextContent("字数：原文 3 · 改写稿 0 · 未改写");
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("updates the rewrite character count while editing", () => {
+    render(<Harness initialChapters={[
+      { ...chapters[0], original_text: "一二三四", rewrite_text: "一二" }
+    ]} />);
+
+    expect(screen.getByLabelText("字数对比")).toHaveTextContent("字数：原文 4 · 改写稿 2 · -2（-50.0%）");
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "一 二 三 四 五" }
+    });
+
+    expect(screen.getByLabelText("字数对比")).toHaveTextContent("字数：原文 4 · 改写稿 5 · +1（+25.0%）");
+  });
+
   it("collects optional instructions before rewriting the current chapter", async () => {
     const onRewriteChapter = vi.fn(async () => undefined);
     render(<Harness onRewriteChapter={onRewriteChapter} />);

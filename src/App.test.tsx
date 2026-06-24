@@ -151,6 +151,8 @@ describe("App feature behavior", () => {
     mocks.updateCallback = undefined;
     recoveryRows = [];
     window.localStorage.setItem("yuri-rewrite.quick-start-seen", "true");
+    window.localStorage.removeItem("yuri-rewrite.theme");
+    delete document.documentElement.dataset.theme;
     installDefaultCommands();
   });
 
@@ -164,6 +166,20 @@ describe("App feature behavior", () => {
       expect.stringContaining("模型名：test-model")
     );
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+  });
+
+  it("toggles and stores the local theme preference", async () => {
+    render(<App />);
+    const themeButton = await screen.findByRole("button", { name: "夜间模式" });
+
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(window.localStorage.getItem("yuri-rewrite.theme")).toBe("light");
+
+    fireEvent.click(themeButton);
+
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(window.localStorage.getItem("yuri-rewrite.theme")).toBe("dark");
+    expect(screen.getByRole("button", { name: "日间模式" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("confirms an available update and shows throttled download progress", async () => {

@@ -172,6 +172,19 @@ const ChapterSelector = memo(function ChapterSelector({
 
 const EMPTY_RANGES: DiffRange[] = [];
 
+function countNonWhitespaceCharacters(text: string) {
+  return text.replace(/\s/g, "").length;
+}
+
+function formatCharacterDelta(originalCount: number, rewriteCount: number) {
+  if (rewriteCount === 0) return "未改写";
+  const delta = rewriteCount - originalCount;
+  if (delta === 0) return "持平";
+  const prefix = delta > 0 ? "+" : "";
+  if (originalCount === 0) return `${prefix}${delta}`;
+  return `${prefix}${delta}（${prefix}${((delta / originalCount) * 100).toFixed(1)}%）`;
+}
+
 function emptyDiffState(chapterId: string, original: string, rewrite: string, loading = false): DiffState {
   return { ranges: [], mode: "mixed", loading, chapterId, original, rewrite, cached: false };
 }
@@ -313,6 +326,13 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const activeMatch = activeMatchIndex === null ? undefined : globalMatches[activeMatchIndex];
   const originalText = selectedChapter?.original_text ?? "";
   const rewriteText = selectedChapter?.rewrite_text ?? "";
+  const visibleRewriteText = editing ? editDraft : rewriteText;
+  const originalCharacterCount = useMemo(() => countNonWhitespaceCharacters(originalText), [originalText]);
+  const rewriteCharacterCount = useMemo(() => countNonWhitespaceCharacters(visibleRewriteText), [visibleRewriteText]);
+  const characterDelta = useMemo(
+    () => formatCharacterDelta(originalCharacterCount, rewriteCharacterCount),
+    [originalCharacterCount, rewriteCharacterCount]
+  );
   const diff = useChapterDiff(selectedChapterId, originalText, rewriteText, diffEnabled);
   const visibleDiffRanges = diffEnabled ? diff.ranges : EMPTY_RANGES;
   const chapterMatches = useMemo(() => globalMatches.filter((match) => match.chapter_id === selectedChapterId), [globalMatches, selectedChapterId]);
@@ -554,6 +574,9 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
           </button>
           <button className={searchOpen ? "active" : ""} aria-pressed={searchOpen} onClick={() => searchOpen ? closeSearch() : setSearchOpen(true)}><Search size={17} />查找</button>
           <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
+          </div>
+          <div className="compare-word-count" aria-label="字数对比">
+            字数：原文 {originalCharacterCount} · 改写稿 {rewriteCharacterCount} · {characterDelta}
           </div>
           <div className="compare-toolbar-actions compare-toolbar-right-actions">
           <button onClick={() => runOrConfirmNavigation(onBack)}><ArrowLeft size={17} />返回</button>

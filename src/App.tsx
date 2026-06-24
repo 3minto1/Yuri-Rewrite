@@ -11,6 +11,7 @@ import {
   HelpCircle,
   Loader2,
   MoreHorizontal,
+  Moon,
   Pause,
   Play,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  Sun,
   Trash2,
   X
 } from "lucide-react";
@@ -91,6 +93,8 @@ type ModelSuggestionGroup = {
   models: ModelSuggestion[];
 };
 
+type ThemeMode = "light" | "dark";
+
 
 const emptyProfile: ProfileDraft = {
   name: "OpenAI 兼容接口",
@@ -117,6 +121,7 @@ const emptyNovelSettings: NovelSettingsDraft = {
 
 const savedApiKeyMask = "********";
 const quickStartSeenKey = "yuri-rewrite.quick-start-seen";
+const themePreferenceKey = "yuri-rewrite.theme";
 const modelSuggestionGroups: ModelSuggestionGroup[] = [
   {
     id: "deepseek",
@@ -312,6 +317,14 @@ function defaultTokenStatsDateRange(now = new Date()) {
   };
 }
 
+function readInitialTheme(): ThemeMode {
+  try {
+    return window.localStorage.getItem(themePreferenceKey) === "dark" ? "dark" : "light";
+  } catch {
+    return "light";
+  }
+}
+
 export default function App() {
   const {
     novels, setNovels, detail, setDetail, selectedChapterId, setSelectedChapterId,
@@ -336,6 +349,7 @@ export default function App() {
   const [estimateCollapsed, setEstimateCollapsed] = useState(false);
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(() => readInitialTheme());
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
   const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings">("workspace");
   const [workspaceSection, setWorkspaceSection] = useState<"main" | "canon">("main");
@@ -429,6 +443,15 @@ export default function App() {
       selectedProfileId || null
     );
   }, [detail?.novel.id, requestJobEstimate, selectedBatchId, selectedProfileId]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(themePreferenceKey, theme);
+    } catch {
+      // Theme is a local display preference; storage failures should not block the app.
+    }
+  }, [theme]);
 
   useEffect(() => {
     void refreshAll();
@@ -1950,6 +1973,17 @@ export default function App() {
         </div>
 
         <div className="sidebar-spacer" />
+
+        <button
+          className="nav-button theme-toggle-button"
+          type="button"
+          aria-pressed={theme === "dark"}
+          title={theme === "dark" ? "切换到日间模式" : "切换到夜间模式"}
+          onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+        >
+          {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          {theme === "dark" ? "日间模式" : "夜间模式"}
+        </button>
 
         <button
           className={activeView === "settings" ? "nav-button active" : "nav-button"}
