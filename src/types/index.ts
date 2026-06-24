@@ -60,6 +60,35 @@ export type NovelDetail = {
   settings?: NovelSettings | null;
 };
 
+export type ChapterRule = {
+  mode: "simple" | "regex";
+  line_start: boolean;
+  prefix: string;
+  number_type: "mixed" | "chinese" | "arabic";
+  unit: string;
+  include_pattern: string;
+  extra_pattern: string;
+  regex_pattern: string;
+};
+
+export type StoredChapterRule = {
+  novel_id: string;
+  rule: ChapterRule;
+  updated_at: string;
+};
+
+export type ChapterRulePreviewItem = {
+  index: number;
+  title: string;
+};
+
+export type ChapterRulePreview = {
+  total_chapters: number;
+  chapters: ChapterRulePreviewItem[];
+  can_apply: boolean;
+  message: string;
+};
+
 export type ModelProfile = {
   id: string;
   name: string;

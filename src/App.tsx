@@ -1,6 +1,3 @@
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
-import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
   BookOpen,
@@ -33,6 +30,7 @@ import { UpdateInstallDialog } from "./components/common/UpdateInstallDialog";
 import { ModelProfiles } from "./components/Settings/ModelProfiles";
 import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/NovelSettings";
 import { CoreSettingsPage } from "./components/pages/CoreSettingsPage";
+import { ChapterRulesPage } from "./components/pages/ChapterRulesPage";
 import { LogsPage } from "./components/pages/LogsPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
 import { TokenStatsPage } from "./components/pages/TokenStatsPage";
@@ -49,6 +47,13 @@ import { useModelProfiles } from "./hooks/useModelProfiles";
 import { useNovels } from "./hooks/useNovels";
 import { useNotice } from "./hooks/useNotice";
 import { useTaskState } from "./hooks/useTaskState";
+import {
+  browserMockEnabled,
+  type DragDropPayload,
+  listenAppEvent,
+  listenDragDrop,
+  openPathDialog
+} from "./platform/runtime";
 import { useAppStore } from "./store/appStore";
 import { invokeCommand as invoke } from "./tauriApi";
 import type {
@@ -268,7 +273,8 @@ const statusText: Record<string, string> = {
   terminated: "已终止",
   completed: "完成",
   failed: "失败",
-  imported: "已导入"
+  imported: "已导入",
+  pending_split: "待生成章节"
 };
 
 function batchIdContainingChapter(detail: NovelDetail, chapterId: string): string {
@@ -330,7 +336,7 @@ export default function App() {
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
-  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "logs" | "token-stats" | "settings">("workspace");
+  const [activeView, setActiveView] = useState<"workspace" | "compare" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings">("workspace");
   const [workspaceSection, setWorkspaceSection] = useState<"main" | "canon">("main");
   const [tokenStats, setTokenStats] = useState<TokenUsageReport | null>(null);
   const initialTokenStatsRangeRef = useRef(defaultTokenStatsDateRange());
@@ -343,6 +349,7 @@ export default function App() {
   const [showUpdateInstallDialog, setShowUpdateInstallDialog] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
+  const [pendingSplitPrompt, setPendingSplitPrompt] = useState<Novel | null>(null);
   const [autoRunRecoveries, setAutoRunRecoveries] = useState<AutoRunRecovery[]>([]);
   const [autoRunMode, setAutoRunMode] = useState<"range" | "batch" | null>(null);
   const [autoRunMenuOpen, setAutoRunMenuOpen] = useState(false);
@@ -388,6 +395,7 @@ export default function App() {
   const hasCompleteNovelSettings = Boolean(
     detail?.settings?.protagonist_name?.trim() && detail.settings.bust?.trim() && detail.settings.body_type?.trim()
   );
+  const selectedNovelPendingSplit = detail?.novel.status === "pending_split";
   const pausedAutoRun = autoRunState === "paused";
   const adjustableWhilePaused = processingTaskActive && !pausedAutoRun;
 
@@ -471,7 +479,7 @@ export default function App() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
 
-    function handleDragDrop(event: { payload: DragDropEvent }) {
+    function handleDragDrop(event: { payload: DragDropPayload }) {
       const payload = event.payload;
       if (payload.type === "enter") {
         setDragActive(payload.paths.some(isTxtFilePath));
@@ -496,7 +504,7 @@ export default function App() {
       void importTxtFile(txtPath);
     }
 
-    void getCurrentWebview().onDragDropEvent(handleDragDrop).then((handler) => {
+    void listenDragDrop(handleDragDrop).then((handler) => {
       if (cancelled) {
         handler();
       } else {
@@ -562,7 +570,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    void listen<UpdateProgress>("update-progress", (event) => {
+    void listenAppEvent<UpdateProgress>("update-progress", (event) => {
       if (!cancelled) setUpdateProgress(event.payload);
     }).then((handler) => {
       if (cancelled) handler();
@@ -922,7 +930,8 @@ export default function App() {
       const novel = await invoke("import_txt", { filePath });
       await refreshAll();
       await loadNovel(novel.id);
-      showNotice(`已导入《${novel.title}》。`);
+      setPendingSplitPrompt(novel);
+      showNotice(`已导入《${novel.title}》，请生成章节列表。`);
     } catch (error) {
       showNotice(String(error));
     } finally {
@@ -937,7 +946,7 @@ export default function App() {
     setBusy("import");
     setNotice("");
     try {
-      const selected = await open({
+      const selected = await openPathDialog({
         multiple: false,
         filters: [{ name: "TXT 小说", extensions: ["txt"] }]
       });
@@ -951,6 +960,37 @@ export default function App() {
         setBusy("");
       }
     }
+  }
+
+  async function splitNovelWithBuiltinRule(novelId: string) {
+    setBusy("chapter-split");
+    setNotice("");
+    try {
+      await invoke("split_novel_with_builtin_rule", { novelId });
+      setPendingSplitPrompt(null);
+      await refreshAll();
+      await loadNovel(novelId);
+      showNotice("已使用内置规则生成章节列表。");
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleChapterRuleApplied(novelId: string) {
+    setPendingSplitPrompt(null);
+    await refreshAll();
+    await loadNovel(novelId);
+    showNotice("章节规则已保存，并已生成章节列表。");
+  }
+
+  function openChapterRules() {
+    if (!detail) {
+      showNotice("请先导入或选择一本小说。");
+      return;
+    }
+    setActiveView("chapter-rules");
   }
 
   function deleteNovel(novel: Novel) {
@@ -1327,7 +1367,7 @@ export default function App() {
     setBusy("choose-export-dir");
     setNotice("");
     try {
-      const selected = await open({ directory: true, multiple: false });
+      const selected = await openPathDialog({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
       const saved = await invoke("save_app_settings", {
         settings: appSettingsPayload({ export_dir: selected })
@@ -1770,10 +1810,16 @@ export default function App() {
         </div>
       )}
       <nav className="app-menu">
+        {browserMockEnabled && (
+          <span className="browser-mock-badge" title="使用内存测试数据，不会访问本地数据库或模型服务">
+            浏览器测试模式
+          </span>
+        )}
         <button
           className={activeView === "compare" ? "app-menu-item active" : "app-menu-item"}
           onClick={() => setActiveView("compare")}
-          disabled={!detail}
+          disabled={!detail || selectedNovelPendingSplit}
+          title={selectedNovelPendingSplit ? "请先生成章节列表" : undefined}
         >
           对比
         </button>
@@ -1789,6 +1835,13 @@ export default function App() {
           onClick={() => setActiveView("core-settings")}
         >
           核心设定
+        </button>
+        <button
+          className={activeView === "chapter-rules" ? "app-menu-item active" : "app-menu-item"}
+          onClick={openChapterRules}
+          disabled={!detail}
+        >
+          章节规则
         </button>
         <button className="app-menu-item" onClick={() => setShowQuickStart(true)}>
           <HelpCircle size={16} />
@@ -1906,7 +1959,7 @@ export default function App() {
       </aside>
 
       <section className="workspace">
-        {!["compare", "settings", "token-stats", "logs"].includes(activeView) && (
+        {!["compare", "settings", "token-stats", "logs", "chapter-rules"].includes(activeView) && (
         <header className="topbar">
           <div>
             <h1>
@@ -1918,6 +1971,8 @@ export default function App() {
                   ? "设置"
                   : activeView === "novel-settings"
                     ? "基本设定"
+                  : activeView === "chapter-rules"
+                    ? "章节规则"
                   : activeView === "compare"
                     ? "对比"
                     : detail?.novel.title ?? "工作台"}
@@ -1933,6 +1988,10 @@ export default function App() {
                     ? detail
                       ? `绑定《${detail.novel.title}》的改写规则`
                       : "导入小说后配置基本设定"
+                  : activeView === "chapter-rules"
+                    ? detail
+                      ? `配置《${detail.novel.title}》的章节拆分规则`
+                      : "导入小说后配置章节拆分规则"
                   : activeView === "compare"
                     ? "左侧原文，右侧改写稿"
                     : detail
@@ -2224,6 +2283,18 @@ export default function App() {
           />
         )}
 
+        {activeView === "chapter-rules" && (
+          <ChapterRulesPage
+            novel={detail?.novel ?? null}
+            busy={busy}
+            processing={processingTaskActive}
+            onBack={() => setActiveView("workspace")}
+            onApplied={handleChapterRuleApplied}
+            onUseBuiltin={splitNovelWithBuiltinRule}
+            showNotice={showNotice}
+          />
+        )}
+
         {activeView === "settings" && (
           <SettingsPage
             settings={settings}
@@ -2265,7 +2336,7 @@ export default function App() {
 
         {activeView === "workspace" && (
           <>
-          {detail && (
+          {detail && !selectedNovelPendingSplit && (
             <BatchPanel
               batches={detail.batches}
               selectedBatch={selectedBatch}
@@ -2274,7 +2345,7 @@ export default function App() {
               onOpenCanon={() => setWorkspaceSection("canon")}
             />
           )}
-          {detail && jobEstimate && (
+          {detail && !selectedNovelPendingSplit && jobEstimate && (
             <TaskEstimate
               estimate={jobEstimate}
               collapsed={estimateCollapsed}
@@ -2300,19 +2371,39 @@ export default function App() {
                 onDiagnose={diagnoseProfile}
                 onSave={saveProfile}
               />
-              <ChapterList
-                chapters={detail?.chapters ?? []}
-                selectedChapterId={selectedChapter?.id}
-                onSelect={setSelectedChapterId}
-                displayTitle={displayChapterTitle}
-                statusText={statusText}
-                onRenameChapter={updateChapterTitle}
-                titleEditDisabledReason={processingTaskActive || autoRunState !== "idle"
-                  ? "任务运行或暂停期间不能修改章节名称"
-                  : busy
-                    ? "当前操作完成后可编辑章节名称"
-                    : undefined}
-              />
+              {selectedNovelPendingSplit ? (
+                <section className="panel pending-split-panel">
+                  <div>
+                    <h2>尚未生成章节</h2>
+                    <p>
+                      这本小说已导入，但还没有生成章节列表。可以使用内置识别规则，也可以先配置自定义章节规则并预览。
+                    </p>
+                  </div>
+                  <div className="pending-split-actions">
+                    <button type="button" onClick={() => void splitNovelWithBuiltinRule(detail.novel.id)} disabled={busy !== "" || processingTaskActive}>
+                      {busy === "chapter-split" ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
+                      使用内置规则
+                    </button>
+                    <button type="button" className="action-primary" onClick={openChapterRules} disabled={busy !== "" || processingTaskActive}>
+                      章节规则
+                    </button>
+                  </div>
+                </section>
+              ) : (
+                <ChapterList
+                  chapters={detail?.chapters ?? []}
+                  selectedChapterId={selectedChapter?.id}
+                  onSelect={setSelectedChapterId}
+                  displayTitle={displayChapterTitle}
+                  statusText={statusText}
+                  onRenameChapter={updateChapterTitle}
+                  titleEditDisabledReason={processingTaskActive || autoRunState !== "idle"
+                    ? "任务运行或暂停期间不能修改章节名称"
+                    : busy
+                      ? "当前操作完成后可编辑章节名称"
+                      : undefined}
+                />
+              )}
             </div>
           ) : (
             <section className="panel canon-workspace-page">
@@ -2346,6 +2437,48 @@ export default function App() {
           </>
         )}
       </section>
+      {pendingSplitPrompt && (
+        <Modal labelledBy="pending-split-dialog-title">
+          <header className="dialog-titlebar">
+            <h2 id="pending-split-dialog-title">是否设置章节规则？</h2>
+            <button
+              className="dialog-close"
+              type="button"
+              aria-label="关闭章节规则提示"
+              title="关闭"
+              onClick={() => setPendingSplitPrompt(null)}
+            >
+              <X size={16} />
+            </button>
+          </header>
+          <div className="dialog-body">
+            <p>
+              《{pendingSplitPrompt.title}》已导入。软件内置章节识别规则，不设置也可以正常运行；如果这本小说章节格式特殊，可以先配置章节规则并生成预览。
+            </p>
+          </div>
+          <footer className="dialog-actions">
+            <button
+              type="button"
+              onClick={() => void splitNovelWithBuiltinRule(pendingSplitPrompt.id)}
+              disabled={busy === "chapter-split" || processingTaskActive}
+            >
+              {busy === "chapter-split" ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
+              使用内置规则
+            </button>
+            <button
+              className="dialog-primary"
+              type="button"
+              onClick={() => {
+                setPendingSplitPrompt(null);
+                setActiveView("chapter-rules");
+              }}
+              disabled={processingTaskActive}
+            >
+              自己设置章节规则
+            </button>
+          </footer>
+        </Modal>
+      )}
       {settingsDialog && (
         <Modal labelledBy="settings-dialog-title">
             {settingsDialog === "basic" ? (

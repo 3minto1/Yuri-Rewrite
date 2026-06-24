@@ -81,9 +81,7 @@ pub(crate) fn save_app_settings(
         core_prompt: settings.core_prompt.trim().to_string(),
         review_enabled: settings.review_enabled,
         review_profile_id: normalize_review_profile_id(settings.review_profile_id.as_deref()),
-        analysis_profile_id: normalize_analysis_profile_id(
-            settings.analysis_profile_id.as_deref(),
-        ),
+        analysis_profile_id: normalize_analysis_profile_id(settings.analysis_profile_id.as_deref()),
         selected_profile_id: normalize_profile_id(settings.selected_profile_id.as_deref()),
         chapter_batch_size,
         rewrite_parallelism,

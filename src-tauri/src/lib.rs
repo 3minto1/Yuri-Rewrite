@@ -13,8 +13,8 @@ mod text;
 use ai::*;
 use chrono::Utc;
 use commands::{
-    analysis::*, auto_run::*, export::*, frontend_errors::*, jobs::*, logs::*, models::*,
-    novels::*, rewrite::*, settings::*, updates::*, workspace::*,
+    analysis::*, auto_run::*, chapter_rules::*, export::*, frontend_errors::*, jobs::*, logs::*,
+    models::*, novels::*, rewrite::*, settings::*, updates::*, workspace::*,
 };
 use credentials::{classify_api_key_storage, read_api_key, write_api_key, ApiKeyStorage};
 use db::init_db;
@@ -100,6 +100,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             import_txt,
+            get_chapter_rule,
+            preview_chapter_rule,
+            save_chapter_rule_and_split,
+            split_novel_with_builtin_rule,
             list_novels,
             get_novel_detail,
             delete_novel,
@@ -186,9 +190,7 @@ fn restore_auto_run_controls(
     Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
 }
 
-fn restore_orphaned_rewrite_statuses(
-    conn: &Connection,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn restore_orphaned_rewrite_statuses(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     conn.execute(
         "UPDATE chapters
          SET rewrite_status = CASE
@@ -429,13 +431,7 @@ async fn analyze_batch_with_parallelism(
                     }
                 };
                 if let Some(batch_index) = checkpoint_batch_index {
-                    stage_analysis_shard(
-                        state,
-                        novel_id,
-                        batch_index,
-                        &shard,
-                        &parsed,
-                    )?;
+                    stage_analysis_shard(state, novel_id, batch_index, &shard, &parsed)?;
                 }
                 report_auto_shard_completed(state, novel_id, idx, &shard)?;
                 parsed_by_shard.push((idx, parsed));
@@ -830,7 +826,10 @@ fn apply_staged_analyses(
             .map_err(to_string)?;
         rows
     };
-    if chapters.iter().any(|chapter| !staged.contains_key(&chapter.id)) {
+    if chapters
+        .iter()
+        .any(|chapter| !staged.contains_key(&chapter.id))
+    {
         return Err("分析分片恢复数据不完整，未写入章节结果。".to_string());
     }
 
@@ -1428,14 +1427,7 @@ async fn generate_rewrite_shards(
             &readonly_context,
         );
         async move {
-            report_auto_shard_started(
-                state,
-                novel_id,
-                "rewrite",
-                idx,
-                shard_total,
-                &shard,
-            )?;
+            report_auto_shard_started(state, novel_id, "rewrite", idx, shard_total, &shard)?;
             let parsed = generate_single_rewrite_shard(
                 state,
                 novel_id,
@@ -1831,14 +1823,7 @@ async fn generate_reviewed_rewrite_pipeline(
             &readonly_context,
         );
         async move {
-            report_auto_shard_started(
-                state,
-                novel_id,
-                "rewrite",
-                idx,
-                shard_total,
-                &shard,
-            )?;
+            report_auto_shard_started(state, novel_id, "rewrite", idx, shard_total, &shard)?;
             let rewrite_shard = generate_single_rewrite_shard(
                 state,
                 novel_id,
@@ -5218,9 +5203,7 @@ fn apply_staged_rewrites(
 
     let tx = conn.transaction().map_err(to_string)?;
     for chapter in chapters {
-        let (title, content) = staged
-            .get(&chapter.id)
-            .expect("validated staged rewrite");
+        let (title, content) = staged.get(&chapter.id).expect("validated staged rewrite");
         tx.execute(
             "DELETE FROM chapter_rewrite_snapshots WHERE chapter_id = ?1",
             params![chapter.id],
@@ -7480,8 +7463,10 @@ mod tests {
         )
         .expect("insert chapter");
 
-        assert!(restore_orphaned_rewrite_status_for_chapter(&conn, "chapter-1")
-            .expect("restore chapter"));
+        assert!(
+            restore_orphaned_rewrite_status_for_chapter(&conn, "chapter-1")
+                .expect("restore chapter")
+        );
         let status: String = conn
             .query_row(
                 "SELECT rewrite_status FROM chapters WHERE id = 'chapter-1'",

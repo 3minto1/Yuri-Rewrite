@@ -1,6 +1,4 @@
-use crate::domain::{
-    AiLog, AppState, TokenUsageDay, TokenUsageModel, TokenUsageReport,
-};
+use crate::domain::{AiLog, AppState, TokenUsageDay, TokenUsageModel, TokenUsageReport};
 use crate::{row_to_ai_log, to_string};
 use chrono::{DateTime, Local, NaiveDate};
 use rusqlite::{params, Connection};
@@ -49,10 +47,7 @@ pub(crate) fn clear_ai_logs(
     clear_ai_logs_from_connection(&conn, novel_id.as_deref())
 }
 
-fn clear_ai_logs_from_connection(
-    conn: &Connection,
-    novel_id: Option<&str>,
-) -> Result<(), String> {
+fn clear_ai_logs_from_connection(conn: &Connection, novel_id: Option<&str>) -> Result<(), String> {
     if let Some(novel_id) = novel_id {
         conn.execute(
             "DELETE FROM ai_logs WHERE novel_id = ?1 OR novel_id IS NULL",
@@ -180,12 +175,9 @@ fn build_token_usage_report(
                 .collect(),
         });
     }
-    report
-        .models
-        .sort_by(|left, right| {
-            (right.input_tokens + right.output_tokens)
-                .cmp(&(left.input_tokens + left.output_tokens))
-        });
+    report.models.sort_by(|left, right| {
+        (right.input_tokens + right.output_tokens).cmp(&(left.input_tokens + left.output_tokens))
+    });
     Ok(report)
 }
 

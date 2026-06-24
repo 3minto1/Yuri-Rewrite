@@ -25,8 +25,7 @@ pub(crate) async fn rewrite_and_save(
     context: RewriteRunContext<'_>,
 ) -> Result<(), String> {
     let pending_chapters = if let Some(batch_index) = context.checkpoint_batch_index {
-        let staged =
-            load_staged_chapter_ids(state, context.novel_id, batch_index, "rewrite")?;
+        let staged = load_staged_chapter_ids(state, context.novel_id, batch_index, "rewrite")?;
         chapters_without_staged_outputs(context.chapters, &staged)
     } else {
         context.chapters.to_vec()

@@ -80,10 +80,10 @@ pub(crate) async fn download_latest_update(
         return Err(format!("当前已是最新版：{}", update.current_version));
     }
 
-    let update_root = state
-        .data_dir
-        .join("updates")
-        .join(format!("update-{}", sanitize_file_name(&update.latest_version)));
+    let update_root = state.data_dir.join("updates").join(format!(
+        "update-{}",
+        sanitize_file_name(&update.latest_version)
+    ));
     fs::create_dir_all(&update_root).map_err(to_string)?;
     let zip_path = update_root.join(sanitize_file_name(&update.asset_name));
     let sources = update_download_sources(&update.asset_download_url);
@@ -108,11 +108,15 @@ pub(crate) async fn download_latest_update(
     );
     validate_portable_zip(&zip_path)?;
 
-    let digest = update.asset_digest.as_deref().and_then(normalize_sha256_digest);
-    let auto_install_reason = update
-        .auto_install_reason
-        .clone()
-        .or_else(|| digest.is_none().then(|| "GitHub 未提供该资产的 SHA-256 摘要，不能安全自动安装。".to_string()));
+    let digest = update
+        .asset_digest
+        .as_deref()
+        .and_then(normalize_sha256_digest);
+    let auto_install_reason = update.auto_install_reason.clone().or_else(|| {
+        digest
+            .is_none()
+            .then(|| "GitHub 未提供该资产的 SHA-256 摘要，不能安全自动安装。".to_string())
+    });
 
     if !update.auto_install_supported || digest.is_none() {
         let manual_path = copy_update_for_manual_install(&zip_path, &update.asset_name, &state)?;
@@ -121,7 +125,8 @@ pub(crate) async fn download_latest_update(
             version: update.latest_version,
             install_started: false,
             manual_install_required: true,
-            message: auto_install_reason.unwrap_or_else(|| "当前运行环境不支持自动安装。".to_string()),
+            message: auto_install_reason
+                .unwrap_or_else(|| "当前运行环境不支持自动安装。".to_string()),
         });
     }
 
@@ -222,11 +227,7 @@ async fn fetch_latest_release_api(client: &Client) -> Result<UpdateCheckResult, 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.map_err(to_string)?;
-        return Err(format!(
-            "HTTP {}: {}",
-            status,
-            compact_error_body(&body)
-        ));
+        return Err(format!("HTTP {}: {}", status, compact_error_body(&body)));
     }
     let release = response.json::<GithubRelease>().await.map_err(to_string)?;
     let latest_version = normalize_release_version(&release.tag_name);
@@ -257,11 +258,7 @@ async fn fetch_latest_release_redirect(client: &Client) -> Result<UpdateCheckRes
     let final_url = response.url().to_string();
     if !status.is_success() {
         let body = response.text().await.map_err(to_string)?;
-        return Err(format!(
-            "HTTP {}: {}",
-            status,
-            compact_error_body(&body)
-        ));
+        return Err(format!("HTTP {}: {}", status, compact_error_body(&body)));
     }
 
     let latest_tag = release_tag_from_url(&final_url)
@@ -389,11 +386,7 @@ async fn download_one_source(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.map_err(to_string)?;
-        return Err(format!(
-            "HTTP {}: {}",
-            status,
-            compact_error_body(&body)
-        ));
+        return Err(format!("HTTP {}: {}", status, compact_error_body(&body)));
     }
 
     let response_total = response.content_length().or(expected_size);
@@ -460,8 +453,14 @@ fn emit_update_progress(state: &State<'_, AppState>, progress: UpdateProgress) {
 fn update_download_sources(original_url: &str) -> Vec<DownloadSource> {
     [
         ("GitHub", original_url.to_string()),
-        ("国内镜像 1", format!("https://gh-proxy.com/{}", original_url)),
-        ("国内镜像 2", format!("https://ghproxy.net/{}", original_url)),
+        (
+            "国内镜像 1",
+            format!("https://gh-proxy.com/{}", original_url),
+        ),
+        (
+            "国内镜像 2",
+            format!("https://ghproxy.net/{}", original_url),
+        ),
         ("国内镜像 3", format!("https://ghfast.top/{}", original_url)),
     ]
     .into_iter()
@@ -534,8 +533,7 @@ fn normalize_sha256_digest(value: &str) -> Option<String> {
         .strip_prefix("sha256:")
         .unwrap_or(value.trim())
         .to_ascii_lowercase();
-    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(digest)
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(digest)
 }
 
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
@@ -593,10 +591,7 @@ fn portable_install_paths(
         .parent()
         .ok_or_else(|| "当前 portable 目录没有可用的上级目录。".to_string())?
         .to_path_buf();
-    let target_dir = parent_dir.join(format!(
-        "YuriRewrite-v{}-windows-x64",
-        latest_version
-    ));
+    let target_dir = parent_dir.join(format!("YuriRewrite-v{}-windows-x64", latest_version));
     if target_dir == current_dir {
         return Err("目标版本目录与当前目录相同。".to_string());
     }
@@ -625,8 +620,7 @@ fn verify_parent_is_writable(parent: &Path) -> Result<(), String> {
     File::create(&probe)
         .and_then(|mut file| file.write_all(b"ok"))
         .map_err(|error| format!("portable 上级目录不可写，不能自动安装：{}", error))?;
-    fs::remove_file(probe)
-        .map_err(|error| format!("无法清理更新写入测试文件：{}", error))
+    fs::remove_file(probe).map_err(|error| format!("无法清理更新写入测试文件：{}", error))
 }
 
 fn copy_update_for_manual_install(
@@ -653,10 +647,7 @@ struct UpdaterScriptOptions<'a> {
 }
 
 fn build_updater_script(options: UpdaterScriptOptions<'_>) -> String {
-    let parent_dir = options
-        .current_dir
-        .parent()
-        .unwrap_or(options.current_dir);
+    let parent_dir = options.current_dir.parent().unwrap_or(options.current_dir);
     let staging_dir = parent_dir.join(format!(
         ".yuri-update-staging-{}",
         sanitize_file_name(options.version)
@@ -929,18 +920,9 @@ mod tests {
         let sources = update_download_sources(original);
         assert_eq!(sources[0].label, "GitHub");
         assert_eq!(sources[0].url, original);
-        assert_eq!(
-            sources[1].url,
-            format!("https://gh-proxy.com/{}", original)
-        );
-        assert_eq!(
-            sources[2].url,
-            format!("https://ghproxy.net/{}", original)
-        );
-        assert_eq!(
-            sources[3].url,
-            format!("https://ghfast.top/{}", original)
-        );
+        assert_eq!(sources[1].url, format!("https://gh-proxy.com/{}", original));
+        assert_eq!(sources[2].url, format!("https://ghproxy.net/{}", original));
+        assert_eq!(sources[3].url, format!("https://ghfast.top/{}", original));
     }
 
     #[test]

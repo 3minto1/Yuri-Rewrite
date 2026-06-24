@@ -2,7 +2,7 @@ use crate::domain::{AppState, Novel, NovelDetail};
 use crate::{
     create_chapter_batches, decode_text, fill_empty_canon_assets_from_analysis, load_canon_assets,
     load_chapter_batch_size, load_chapter_batches, load_chapters, load_novel_settings,
-    review_warning_file_paths, row_to_novel, seed_canon_assets, split_chapters, to_string,
+    review_warning_file_paths, row_to_novel, to_string,
 };
 use chrono::Utc;
 use rusqlite::params;
@@ -110,7 +110,7 @@ fn restore_staged_files(staged: &StagedNovelFiles, database_error: String) -> St
 #[tauri::command]
 pub(crate) fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String> {
     let bytes = fs::read(&file_path).map_err(to_string)?;
-    let (text, encoding) = decode_text(&bytes);
+    let (_, encoding) = decode_text(&bytes);
     let source = Path::new(&file_path);
     let title = source
         .file_stem()
@@ -122,36 +122,16 @@ pub(crate) fn import_txt(file_path: String, state: State<AppState>) -> Result<No
         title,
         source_path: file_path,
         encoding,
-        status: "imported".to_string(),
+        status: "pending_split".to_string(),
         created_at: Utc::now().to_rfc3339(),
     };
-    let split = split_chapters(&novel.id, &text);
     let mut conn = state.conn.lock().map_err(to_string)?;
     let tx = conn.transaction().map_err(to_string)?;
     tx.execute(
         "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![novel.id, novel.title, novel.source_path, novel.encoding, novel.status, split.detected_chapters, novel.created_at],
+        params![novel.id, novel.title, novel.source_path, novel.encoding, novel.status, true, novel.created_at],
     )
     .map_err(to_string)?;
-
-    for chapter in &split.chapters {
-        tx.execute(
-            "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_status, rewrite_status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 'pending')",
-            params![chapter.id, chapter.novel_id, chapter.index, chapter.title, chapter.original_text],
-        )
-        .map_err(to_string)?;
-    }
-
-    create_chapter_batches(
-        &tx,
-        &state.data_dir,
-        &novel.id,
-        &split.chapters,
-        split.detected_chapters,
-        load_chapter_batch_size(&tx)?,
-    )
-    .map_err(to_string)?;
-    seed_canon_assets(&tx, &novel.id).map_err(to_string)?;
     tx.commit().map_err(to_string)?;
     Ok(novel)
 }

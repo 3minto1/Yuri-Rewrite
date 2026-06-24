@@ -1,5 +1,6 @@
 pub(crate) mod analysis;
 pub(crate) mod auto_run;
+pub(crate) mod chapter_rules;
 pub(crate) mod export;
 pub(crate) mod frontend_errors;
 pub(crate) mod jobs;

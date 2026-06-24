@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
+import { browserMockEnabled } from "./platform/runtime";
 import type {
   AiLog,
   AppSettings,
   AutoRunRecovery,
   CanonAsset,
   CanonAssetInput,
+  ChapterRule,
+  ChapterRulePreview,
   ExportResult,
   Job,
   JobEstimate,
@@ -16,6 +19,7 @@ import type {
   NovelSettings,
   ProfileDraft,
   TokenUsageReport,
+  StoredChapterRule,
   UpdateCheckResult,
   UpdateDownloadResult,
   UpdateInstallResult
@@ -26,6 +30,10 @@ type CommandMap = {
   get_novel_detail: { args: { novelId: string }; result: NovelDetail };
   list_auto_run_recoveries: { args?: undefined; result: AutoRunRecovery[] };
   import_txt: { args: { filePath: string }; result: Novel };
+  get_chapter_rule: { args: { novelId: string }; result: StoredChapterRule | null };
+  preview_chapter_rule: { args: { novelId: string; rule: ChapterRule }; result: ChapterRulePreview };
+  save_chapter_rule_and_split: { args: { novelId: string; rule: ChapterRule }; result: StoredChapterRule };
+  split_novel_with_builtin_rule: { args: { novelId: string }; result: void };
   delete_novel: { args: { novelId: string }; result: void };
   list_model_profiles: { args?: undefined; result: ModelProfile[] };
   save_model_profile: { args: { input: ModelProfileInput }; result: ModelProfile };
@@ -119,5 +127,10 @@ export function invokeCommand<C extends TauriCommand>(
   command: C,
   ...args: CommandMap[C] extends { args: infer A } ? [args: A] : [args?: undefined]
 ): Promise<CommandMap[C]["result"]> {
+  if (browserMockEnabled) {
+    return import("./platform/browserMock").then(({ invokeBrowserMock }) =>
+      invokeBrowserMock(command, args[0] as Record<string, unknown> | undefined)
+    ) as Promise<CommandMap[C]["result"]>;
+  }
   return invoke<CommandMap[C]["result"]>(command, args[0] as Record<string, unknown> | undefined);
 }

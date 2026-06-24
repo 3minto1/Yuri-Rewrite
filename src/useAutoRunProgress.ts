@@ -1,5 +1,5 @@
-import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
+import { listenAppEvent } from "./platform/runtime";
 import type { Job } from "./types";
 
 export type AutoRunProgress = Job;
@@ -24,7 +24,7 @@ export function useAutoRunProgress(
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    void listen<AutoRunProgress>("job-progress", (event) => {
+    void listenAppEvent<AutoRunProgress>("job-progress", (event) => {
       const progress = event.payload;
       if (
         !novelId

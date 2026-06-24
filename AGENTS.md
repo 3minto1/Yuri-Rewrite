@@ -58,6 +58,7 @@ Use explicit UTF-8 encoding when reading or writing text files that may contain 
 ```powershell
 npm install
 npm run tauri:dev
+npm run dev:browser
 npm test
 npm run build
 cargo test --manifest-path .\src-tauri\Cargo.toml
@@ -66,6 +67,8 @@ npm run tauri:build
 npm run package:portable
 npm run package:portable:fresh
 ```
+
+`npm run dev:browser` enables an in-memory browser test mode for rendered UI and Playwright checks. It must remain development-only, must not access SQLite, credentials, local files, model APIs, or updater installation, and must never be enabled in production builds.
 
 Safe debug-cache cleanup:
 

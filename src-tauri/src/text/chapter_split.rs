@@ -1,4 +1,4 @@
-use crate::domain::{Chapter, SplitResult};
+use crate::domain::{Chapter, ChapterRule, SplitResult};
 use regex::Regex;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -50,6 +50,181 @@ pub(crate) fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
     SplitResult {
         chapters,
         detected_chapters: true,
+    }
+}
+
+pub(crate) fn split_chapters_with_custom_rule(
+    novel_id: &str,
+    text: &str,
+    rule: &ChapterRule,
+) -> Result<SplitResult, String> {
+    let heading_re = custom_chapter_heading_regex(rule)?;
+    let include_re = custom_optional_regex(rule.include_pattern.trim(), "附加规则")?;
+    let exclude_re = custom_optional_regex(rule.extra_pattern.trim(), "排除规则")?;
+    let mut headings = Vec::new();
+    let mut offset = 0usize;
+    for segment in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += segment.len();
+        let line = segment.trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.chars().count() > 120 {
+            continue;
+        }
+        if !custom_rule_matches_heading(&heading_re, include_re.as_ref(), line) {
+            continue;
+        }
+        if exclude_re
+            .as_ref()
+            .is_some_and(|exclude| exclude.is_match(line))
+        {
+            continue;
+        }
+        let content_start = offset;
+        headings.push(CustomHeadingMatch {
+            start: line_start,
+            content_start,
+            title: line.trim().to_string(),
+        });
+    }
+    if offset < text.len() {
+        let line = &text[offset..];
+        if !line.trim().is_empty()
+            && line.chars().count() <= 120
+            && custom_rule_matches_heading(&heading_re, include_re.as_ref(), line)
+            && !exclude_re
+                .as_ref()
+                .is_some_and(|exclude| exclude.is_match(line))
+        {
+            headings.push(CustomHeadingMatch {
+                start: offset,
+                content_start: text.len(),
+                title: line.trim().to_string(),
+            });
+        }
+    }
+    if headings.is_empty() {
+        return Err("自定义章节规则没有匹配到章节标题。".to_string());
+    }
+    let mut segments = Vec::new();
+    for (idx, heading) in headings.iter().enumerate() {
+        let end = headings.get(idx + 1).map_or(text.len(), |next| next.start);
+        segments.push(DetectedChapterSegment {
+            title: heading.title.clone(),
+            original_text: text[heading.content_start..end].trim().to_string(),
+        });
+    }
+    let segments = normalize_detected_chapter_segments(segments);
+    if segments.is_empty() {
+        return Err("自定义章节规则匹配结果均被识别为非正文提示，未生成章节。".to_string());
+    }
+    let chapters = segments
+        .into_iter()
+        .enumerate()
+        .map(|(idx, segment)| Chapter {
+            id: Uuid::new_v4().to_string(),
+            novel_id: novel_id.to_string(),
+            index: (idx + 1) as i64,
+            title: segment.title,
+            original_text: segment.original_text,
+            analysis_json: None,
+            rewrite_text: None,
+            rewrite_edited: false,
+            single_rewrite_original_available: false,
+            analysis_status: "pending".to_string(),
+            rewrite_status: "pending".to_string(),
+        })
+        .collect();
+    Ok(SplitResult {
+        chapters,
+        detected_chapters: true,
+    })
+}
+
+struct CustomHeadingMatch {
+    start: usize,
+    content_start: usize,
+    title: String,
+}
+
+fn custom_rule_matches_heading(heading_re: &Regex, include_re: Option<&Regex>, line: &str) -> bool {
+    heading_re.is_match(line) || include_re.is_some_and(|include| include.is_match(line))
+}
+
+fn custom_optional_regex(pattern: &str, label: &str) -> Result<Option<Regex>, String> {
+    if pattern.is_empty() {
+        return Ok(None);
+    }
+    if pattern.contains('\n')
+        || pattern.contains('\r')
+        || pattern.contains("\\n")
+        || pattern.contains("\\r")
+    {
+        return Err(format!("{}必须按单行匹配，不能包含换行匹配。", label));
+    }
+    Regex::new(pattern)
+        .map(Some)
+        .map_err(|error| format!("{}不是有效正则：{}", label, error))
+}
+
+fn custom_chapter_heading_regex(rule: &ChapterRule) -> Result<Regex, String> {
+    if rule.mode == "regex" {
+        let pattern = rule.regex_pattern.trim();
+        if pattern.is_empty() {
+            return Err("正则表达式不能为空。".to_string());
+        }
+        if pattern.contains('\n')
+            || pattern.contains('\r')
+            || pattern.contains("\\n")
+            || pattern.contains("\\r")
+        {
+            return Err("章节标题正则必须按单行匹配，不能包含换行匹配。".to_string());
+        }
+        return Regex::new(pattern).map_err(|error| format!("正则表达式无效：{}", error));
+    }
+
+    let prefix = simple_rule_token_expression(&rule.prefix, "前缀")?;
+    let unit = simple_rule_token_expression(&rule.unit, "章节单位")?;
+    let number = match rule.number_type.as_str() {
+        "arabic" => r#"[0-9０-９]+"#,
+        "chinese" => r#"[零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+"#,
+        _ => r#"[0-9０-９零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟萬O]+"#,
+    };
+    let start = if rule.line_start {
+        r#"^[\s\u{feff}　]*"#
+    } else {
+        r#"[\s\u{feff}　]*"#
+    };
+    let pattern = format!(
+        r#"{}{}[ \t　]*{}[ \t　]*{}[ \t　:：、.．\-—_·|]*[^\r\n]{{0,80}}[ \t　]*$"#,
+        start, prefix, number, unit
+    );
+    Regex::new(&pattern).map_err(|error| format!("简易章节规则无效：{}", error))
+}
+
+fn simple_rule_token_expression(value: &str, label: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{}不能为空。", label));
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(format!("{}不能包含换行。", label));
+    }
+    if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.chars().count() >= 3 {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if inner.trim().is_empty() {
+            return Err(format!("{}字符组不能为空。", label));
+        }
+        let escaped = inner
+            .chars()
+            .map(|ch| regex::escape(&ch.to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        Ok(format!("[{}]", escaped))
+    } else {
+        Ok(regex::escape(trimmed))
     }
 }
 

@@ -6,14 +6,13 @@ use crate::{
     chinese_batch_label, clear_auto_run, create_job, emit_job_progress, finish_stopped_auto_run,
     load_analysis_profile_for_run, load_analysis_profile_id, load_chapter_batches,
     load_chapters_for_batch, load_job, load_model_profile, load_review_enabled,
-    load_review_profile_for_run, load_review_profile_id,
-    pause_auto_run_after_model_format_error, pause_auto_run_after_network_error,
-    pause_auto_run_after_rate_limit, pause_auto_run_after_temporary_gateway_error,
-    prepare_auto_run, read_stored_api_key, register_auto_run_job, request_auto_run_stop,
-    requested_auto_run_stop, require_novel_settings, resolve_rewrite_export_dir,
-    rewrite_chapters_for_auto, row_to_novel, sanitize_file_name, set_auto_progress_phase,
-    set_auto_run_completed, to_string, update_auto_run_checkpoint_phase, update_job,
-    AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
+    load_review_profile_for_run, load_review_profile_id, pause_auto_run_after_model_format_error,
+    pause_auto_run_after_network_error, pause_auto_run_after_rate_limit,
+    pause_auto_run_after_temporary_gateway_error, prepare_auto_run, read_stored_api_key,
+    register_auto_run_job, request_auto_run_stop, requested_auto_run_stop, require_novel_settings,
+    resolve_rewrite_export_dir, rewrite_chapters_for_auto, row_to_novel, sanitize_file_name,
+    set_auto_progress_phase, set_auto_run_completed, to_string, update_auto_run_checkpoint_phase,
+    update_job, AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
 };
 use crate::{
     is_recoverable_model_format_error, is_recoverable_network_error, is_temporary_gateway_error,
@@ -121,16 +120,15 @@ pub(crate) async fn start_analyze_rewrite_batch(
     emit_job_progress(&app, &job, "running", 0, &start_message);
 
     begin_auto_batch_progress(&state, &novel_id, "analysis", 1, 1, &batch.label)?;
-    if let Err(error) =
-        analyze_chapters_for_auto(
-            &state,
-            &novel_id,
-            &analysis_profile,
-            &analysis_api_key,
-            &chapters,
-            None,
-        )
-        .await
+    if let Err(error) = analyze_chapters_for_auto(
+        &state,
+        &novel_id,
+        &analysis_profile,
+        &analysis_api_key,
+        &chapters,
+        None,
+    )
+    .await
     {
         if error == AUTO_RUN_TERMINATED {
             return finish_stopped_auto_run(&state, &app, job, 0, 0, &error);
@@ -324,16 +322,15 @@ pub(crate) async fn start_analyze_rewrite_all(
         if chapters.is_empty() {
             continue;
         }
-        if let Err(error) =
-            analyze_chapters_for_auto(
-                &state,
-                &novel_id,
-                &analysis_profile,
-                &analysis_api_key,
-                &chapters,
-                Some(current),
-            )
-            .await
+        if let Err(error) = analyze_chapters_for_auto(
+            &state,
+            &novel_id,
+            &analysis_profile,
+            &analysis_api_key,
+            &chapters,
+            Some(current),
+        )
+        .await
         {
             if error == AUTO_RUN_PAUSED || error == AUTO_RUN_TERMINATED {
                 return finish_stopped_auto_run(
@@ -420,16 +417,15 @@ pub(crate) async fn start_analyze_rewrite_all(
             &rewrite_message,
         )?;
         emit_job_progress(&app, &job, "running", completed_in_range, &rewrite_message);
-        if let Err(error) =
-            rewrite_chapters_for_auto(
-                &state,
-                &novel_id,
-                &profile,
-                &api_key,
-                &batch.id,
-                Some(current),
-            )
-            .await
+        if let Err(error) = rewrite_chapters_for_auto(
+            &state,
+            &novel_id,
+            &profile,
+            &api_key,
+            &batch.id,
+            Some(current),
+        )
+        .await
         {
             if error == AUTO_RUN_PAUSED || error == AUTO_RUN_TERMINATED {
                 return finish_stopped_auto_run(

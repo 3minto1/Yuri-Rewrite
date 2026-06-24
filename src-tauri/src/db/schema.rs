@@ -112,6 +112,13 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS chapter_rules (
+            novel_id TEXT PRIMARY KEY,
+            rule_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS chapter_batches (
             id TEXT PRIMARY KEY,
             novel_id TEXT NOT NULL,
@@ -531,7 +538,10 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("load migrated usage");
-        assert_eq!(usage, ("历史模型".to_string(), "model-a".to_string(), 120, 45));
+        assert_eq!(
+            usage,
+            ("历史模型".to_string(), "model-a".to_string(), 120, 45)
+        );
     }
 
     #[test]

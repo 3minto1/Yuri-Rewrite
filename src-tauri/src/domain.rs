@@ -273,6 +273,63 @@ pub(crate) struct AppSettings {
     pub(crate) rewrite_parallelism: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct ChapterRule {
+    pub(crate) mode: String,
+    #[serde(default = "default_chapter_rule_line_start")]
+    pub(crate) line_start: bool,
+    #[serde(default)]
+    pub(crate) prefix: String,
+    #[serde(default = "default_chapter_rule_number_type")]
+    pub(crate) number_type: String,
+    #[serde(default)]
+    pub(crate) unit: String,
+    #[serde(default = "default_chapter_rule_include_pattern")]
+    pub(crate) include_pattern: String,
+    #[serde(default = "default_chapter_rule_exclude_pattern")]
+    pub(crate) extra_pattern: String,
+    #[serde(default)]
+    pub(crate) regex_pattern: String,
+}
+
+fn default_chapter_rule_line_start() -> bool {
+    true
+}
+
+fn default_chapter_rule_number_type() -> String {
+    "mixed".to_string()
+}
+
+fn default_chapter_rule_include_pattern() -> String {
+    r#"^\s*(序言|序章|序卷|序[1-9]|序曲|楔子|引子|引言|序幕|前言|终章|最终章|尾声|后记|卷末后记|完本感言|番外|番外篇|番外章|特别篇|外传|插曲|间章)"#.to_string()
+}
+
+fn default_chapter_rule_exclude_pattern() -> String {
+    "未完待续|作者的话|求月票|求推荐票|第二更|第三更".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct StoredChapterRule {
+    pub(crate) novel_id: String,
+    pub(crate) rule: ChapterRule,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct ChapterRulePreviewItem {
+    pub(crate) index: i64,
+    pub(crate) title: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct ChapterRulePreview {
+    pub(crate) total_chapters: usize,
+    pub(crate) chapters: Vec<ChapterRulePreviewItem>,
+    pub(crate) can_apply: bool,
+    pub(crate) message: String,
+}
+
 pub(crate) struct ModelOutput {
     pub(crate) text: String,
     pub(crate) reasoning: Option<String>,

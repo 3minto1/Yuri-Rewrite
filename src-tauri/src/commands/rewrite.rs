@@ -518,8 +518,7 @@ mod tests {
             text: "重新改写稿".to_string(),
         };
 
-        persist_single_chapter_rewrite(&mut conn, "chapter-1", &rewrite)
-            .expect("persist rewrite");
+        persist_single_chapter_rewrite(&mut conn, "chapter-1", &rewrite).expect("persist rewrite");
 
         let snapshot: (String, String, Option<String>, Option<String>) = conn
             .query_row(

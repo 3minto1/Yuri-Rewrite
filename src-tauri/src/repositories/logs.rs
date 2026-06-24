@@ -30,16 +30,18 @@ pub(crate) fn extract_token_usage(raw_response: Option<&str>) -> Option<(usize, 
             .get("totalTokenCount")
             .and_then(serde_json::Value::as_u64)
             .map(|value| value as usize);
-        let output = total.map(|value| value.saturating_sub(input)).unwrap_or_else(|| {
-            usage
-                .get("candidatesTokenCount")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as usize
-                + usage
-                    .get("thoughtsTokenCount")
+        let output = total
+            .map(|value| value.saturating_sub(input))
+            .unwrap_or_else(|| {
+                usage
+                    .get("candidatesTokenCount")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0) as usize
-        });
+                    + usage
+                        .get("thoughtsTokenCount")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize
+            });
         return Some((input, output));
     }
     if value.get("choices").is_some() || value.get("candidates").is_some() {
@@ -165,9 +167,7 @@ mod tests {
     #[test]
     fn counts_model_responses_without_usage_as_zero_tokens() {
         assert_eq!(
-            extract_token_usage(Some(
-                r#"{"choices":[{"message":{"content":"ok"}}]}"#
-            )),
+            extract_token_usage(Some(r#"{"choices":[{"message":{"content":"ok"}}]}"#)),
             Some((0, 0))
         );
         assert_eq!(extract_token_usage(Some(r#"{"status":"ok"}"#)), None);
@@ -215,6 +215,9 @@ mod tests {
             )
             .expect("load usage");
         assert_eq!(log_count, 1);
-        assert_eq!(usage, ("快照模型".to_string(), "model-a".to_string(), 120, 45));
+        assert_eq!(
+            usage,
+            ("快照模型".to_string(), "model-a".to_string(), 120, 45)
+        );
     }
 }
