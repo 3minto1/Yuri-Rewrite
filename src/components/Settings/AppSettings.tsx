@@ -53,7 +53,7 @@ export function AppSettingsView(props: AppSettingsViewProps) {
         </div>
         <div className="setting-toggle-row">
           <button className={settings.review_enabled ? "setting-switch active" : "setting-switch"} onClick={onToggleReview} disabled={busy === "review-setting" || adjustmentDisabled} title="开启复检时AI改写完成后会检查一遍是否有疏漏，会增加改写时间">{settings.review_enabled ? "开启" : "关闭"}</button>
-          <span>默认关闭，开启后每批改写会由审查专家判定；不通过时打回改写模型重写并复判。</span>
+          <span>默认开启，每批改写会由审查专家判定；不通过时打回改写模型重写并复判。优先速度时可关闭。</span>
         </div>
         <div className="setting-row">
           <select value={settings.review_profile_id ?? ""} onChange={(event) => onReviewProfileChange(event.target.value)} disabled={busy === "review-profile-setting" || adjustmentDisabled} title="选择第二个 AI 作为审查专家；留空则使用当前改写模型审查">

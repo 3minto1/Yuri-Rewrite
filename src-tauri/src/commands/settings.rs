@@ -334,10 +334,11 @@ pub(crate) fn load_review_enabled(conn: &Connection) -> Result<bool, String> {
         )
         .optional()
         .map_err(to_string)?;
-    Ok(matches!(
-        value.as_deref().map(str::trim),
-        Some("true") | Some("1") | Some("yes")
-    ))
+    Ok(value
+        .as_deref()
+        .map(str::trim)
+        .map(|value| matches!(value, "true" | "1" | "yes"))
+        .unwrap_or(true))
 }
 
 pub(crate) fn save_review_enabled(conn: &Connection, enabled: bool) -> Result<(), String> {

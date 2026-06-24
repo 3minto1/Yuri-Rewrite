@@ -6,9 +6,12 @@ type ModelSuggestion = {
 };
 
 type ModelSuggestionGroup = {
+  id: string;
   baseTerms: string[];
   modelTerms: string[];
   models: ModelSuggestion[];
+  openaiBaseUrl?: string;
+  anthropicBaseUrl?: string;
 };
 
 export type ThinkingModeSupport = {
@@ -30,17 +33,25 @@ export const emptyProfile: ProfileDraft = {
 
 const groups: ModelSuggestionGroup[] = [
   {
+    id: "deepseek",
     baseTerms: ["deepseek"],
     modelTerms: ["deepseek"],
+    openaiBaseUrl: "https://api.deepseek.com",
+    anthropicBaseUrl: "https://api.deepseek.com/anthropic",
     models: [
       { label: "DeepSeek V4 Pro", model: "deepseek-v4-pro" },
       { label: "DeepSeek V4 Flash", model: "deepseek-v4-flash" }
     ]
   },
   {
+    id: "volcengine",
     baseTerms: ["volcengine", "volces", "ark.cn-"],
     modelTerms: ["doubao-", "seed-"],
+    openaiBaseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+    anthropicBaseUrl: "https://ark.cn-beijing.volces.com/api/coding",
     models: [
+      { label: "Doubao Seed 2.1 Pro", model: "doubao-seed-2-1-pro-260628" },
+      { label: "Doubao Seed 2.1 Turbo", model: "doubao-seed-2-1-turbo-260628" },
       { label: "Doubao Seed 2.0 Pro", model: "doubao-seed-2-0-pro-260215" },
       { label: "Doubao Seed 2.0 Lite", model: "doubao-seed-2-0-lite-260428" },
       { label: "Doubao Seed 2.0 Mini", model: "doubao-seed-2-0-mini-260428" },
@@ -53,8 +64,10 @@ const groups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "openai",
     baseTerms: ["api.openai.com", "openai.azure.com"],
     modelTerms: ["gpt-", "o3", "o4"],
+    openaiBaseUrl: "https://api.openai.com/v1",
     models: [
       { label: "GPT-5.2", model: "gpt-5.2" },
       { label: "GPT-5.2 Pro", model: "gpt-5.2-pro" },
@@ -70,8 +83,11 @@ const groups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "zhipu",
     baseTerms: ["bigmodel", "zhipu", "z.ai", "智谱"],
     modelTerms: ["glm-"],
+    openaiBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    anthropicBaseUrl: "https://open.bigmodel.cn/api/anthropic",
     models: [
       { label: "GLM-5.2", model: "glm-5.2" },
       { label: "GLM-5.1", model: "glm-5.1" },
@@ -86,8 +102,11 @@ const groups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "kimi",
     baseTerms: ["moonshot", "kimi"],
     modelTerms: ["moonshot", "kimi"],
+    openaiBaseUrl: "https://api.moonshot.cn/v1",
+    anthropicBaseUrl: "https://api.moonshot.cn/anthropic",
     models: [
       { label: "Kimi K2.6", model: "kimi-k2.6" },
       { label: "Kimi K2.5", model: "kimi-k2.5" },
@@ -97,8 +116,11 @@ const groups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "minimax",
     baseTerms: ["minimax"],
     modelTerms: ["minimax", "m2-her"],
+    openaiBaseUrl: "https://api.minimaxi.com/v1",
+    anthropicBaseUrl: "https://api.minimaxi.com/anthropic",
     models: [
       { label: "MiniMax M3", model: "MiniMax-M3" },
       { label: "MiniMax M2.7", model: "MiniMax-M2.7" },
@@ -112,8 +134,11 @@ const groups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "mimo",
     baseTerms: ["xiaomimimo", "mimo.xiaomi", "mimo.mi.com", "mimo"],
     modelTerms: ["mimo-"],
+    openaiBaseUrl: "https://api.xiaomimimo.com/v1",
+    anthropicBaseUrl: "https://api.xiaomimimo.com/anthropic",
     models: [
       { label: "MiMo V2.5 Pro", model: "mimo-v2.5-pro" },
       { label: "MiMo V2.5", model: "mimo-v2.5" },
@@ -121,8 +146,11 @@ const groups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "siliconflow",
     baseTerms: ["siliconflow"],
     modelTerms: ["qwen/", "thudm/", "deepseek-ai/", "moonshotai/", "minimaxai/", "zai-org/", "bytedance-seed/", "internlm/", "mistralai/", "openai/"],
+    openaiBaseUrl: "https://api.siliconflow.cn/v1",
+    anthropicBaseUrl: "https://api.siliconflow.cn",
     models: [
       { label: "DeepSeek V3.2", model: "deepseek-ai/DeepSeek-V3.2" },
       { label: "DeepSeek V3.2 Exp", model: "deepseek-ai/DeepSeek-V3.2-Exp" },
@@ -146,8 +174,10 @@ const groups: ModelSuggestionGroup[] = [
     ]
   },
   {
+    id: "claude",
     baseTerms: ["anthropic", "claude"],
     modelTerms: ["claude-"],
+    anthropicBaseUrl: "https://api.anthropic.com",
     models: [
       { label: "Claude Opus 4.8", model: "claude-opus-4-8" },
       { label: "Claude Sonnet 4.6", model: "claude-sonnet-4-6" },
@@ -166,6 +196,47 @@ export function getModelSuggestions(profile: ProfileDraft): ModelSuggestion[] {
   return groups.find((group) =>
     group.modelTerms.some((term) => modelHint.includes(term))
   )?.models ?? [];
+}
+
+function getSuggestionGroup(profile: ProfileDraft): ModelSuggestionGroup | undefined {
+  const baseHint = profile.base_url.toLowerCase();
+  const modelHint = profile.model.toLowerCase();
+  return groups.find((group) =>
+    group.baseTerms.some((term) => baseHint.includes(term))
+  ) ?? groups.find((group) =>
+    group.modelTerms.some((term) => modelHint.includes(term))
+  );
+}
+
+export function getProviderBaseUrl(
+  profile: ProfileDraft,
+  provider: string
+): string {
+  if (provider === "gemini") {
+    return "https://generativelanguage.googleapis.com/v1beta";
+  }
+  const group = getSuggestionGroup(profile);
+  if (provider === "anthropic") {
+    if (group?.id === "volcengine") {
+      try {
+        return `${new URL(profile.base_url).origin}/api/coding`;
+      } catch {
+        return group.anthropicBaseUrl ?? "https://api.anthropic.com";
+      }
+    }
+    return group?.anthropicBaseUrl ?? "https://api.anthropic.com";
+  }
+  if (provider === "openai-compatible") {
+    if (group?.id === "volcengine") {
+      try {
+        return `${new URL(profile.base_url).origin}/api/coding/v3`;
+      } catch {
+        return group.openaiBaseUrl ?? "https://api.openai.com/v1";
+      }
+    }
+    return group?.openaiBaseUrl ?? "https://api.openai.com/v1";
+  }
+  return profile.base_url;
 }
 
 function includesAny(value: string, terms: string[]) {
@@ -239,10 +310,10 @@ export function getThinkingModeSupport(profile: ProfileDraft): ThinkingModeSuppo
   }
 
   if (includesAny(base, ["volcengine", "volces", "ark.cn-"])) {
-    if (model.replace(/\./g, "-").includes("doubao-seed-2-0")) {
+    if (/doubao-seed-2-[01](?:-|$)/.test(model.replace(/\./g, "-"))) {
       return {
         disabledModes: [],
-        guidance: "豆包 Seed 2.0 支持通过 thinking.type 开启或关闭深度思考。自动不覆盖接入点或模型的默认设置。"
+        guidance: "豆包 Seed 2.0 / 2.1 支持通过 thinking.type 开启或关闭深度思考。自动不覆盖接入点或模型的默认设置。"
       };
     }
     if (model.includes("thinking")) {
@@ -316,10 +387,34 @@ export function getThinkingModeSupport(profile: ProfileDraft): ThinkingModeSuppo
     };
   }
 
+  if (provider === "anthropic" && model.startsWith("claude-")) {
+    if (
+      model.startsWith("claude-opus-4-8")
+      || model.startsWith("claude-opus-4-7")
+      || model.startsWith("claude-opus-4-6")
+      || model.startsWith("claude-sonnet-4-6")
+    ) {
+      return {
+        disabledModes: [],
+        guidance: "Claude 原生 Messages API 支持 Adaptive Thinking。自动不附加参数；关闭不启用思考；开启发送 adaptive thinking 和 high effort。"
+      };
+    }
+    if (model.startsWith("claude-haiku-4-5")) {
+      return {
+        disabledModes: [],
+        guidance: "Claude Haiku 4.5 支持 Extended Thinking。自动或关闭不附加思考参数；开启会使用受限思考预算。"
+      };
+    }
+    return {
+      disabledModes: ["off", "on"],
+      guidance: "当前 Claude 型号未确认支持本应用的思考参数，请使用“自动”。"
+    };
+  }
+
   if (base.includes("anthropic") || model.startsWith("claude-")) {
     return {
       disabledModes: ["off", "on"],
-      guidance: "Claude 原生 API 使用 adaptive / extended thinking，但本应用当前调用的是 OpenAI 兼容 Chat Completions，不能直接发送 Anthropic 原生参数。通过第三方转发时请使用“自动”。"
+      guidance: "当前配置不是 Anthropic Messages Provider。通过 OpenAI 兼容转发调用 Claude 时，请使用“自动”，避免发送不兼容的原生思考参数。"
     };
   }
 

@@ -14,7 +14,7 @@ The user owns the AI account and API key. Novel content, SQLite data, internal b
 - Storage: SQLite through `rusqlite`
 - Credentials: Windows Credential Manager through `keyring`, with an explicit SQLite fallback
 - UI icons: `lucide-react`
-- AI providers: OpenAI-compatible chat completions and Gemini
+- AI providers: OpenAI-compatible chat completions, Anthropic Messages, and Gemini
 
 ## Current Repository Layout
 
@@ -125,7 +125,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 ### Optional Dual-Expert Review
 
-- Review is disabled by default because it substantially increases request count and wait time.
+- Review is enabled by default for new or missing settings because it improves rewrite quality, while preserving any existing user-saved enabled or disabled value.
 - When enabled, the rewrite model produces a full shard and the review model returns JSON approval/issues.
 - Review decision JSON requests should use provider-supported structured output where available. DeepSeek keeps `response_format: {"type":"json_object"}`; Doubao / Volcengine Ark uses `response_format.type = "json_schema"` with a permissive object schema.
 - Each shard enters review immediately after its draft is parsed while other shards continue drafting. The total number of active model requests must not exceed the configured rewrite concurrency.
@@ -161,6 +161,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Thinking controls are provider/model specific. Keep unsupported choices disabled in the frontend, use `auto` when support is unknown, and remove an injected thinking parameter for one compatibility retry only when the provider explicitly reports that parameter as unsupported.
 - Temperature defaults to `0.7`; Top P defaults to `1.0` and should be omitted from provider payloads at that unrestricted default where supported.
 - For OpenAI-compatible JSON requests, add structured `response_format` only for providers known to support it. Keep unknown compatible services unchanged to avoid parameter compatibility regressions.
+- Anthropic Messages requests use `/v1/messages`, the top-level `system` field, content blocks, `anthropic-version`, provider-appropriate authentication, and `max_tokens`. Preserve text and thinking blocks separately, and keep token usage from `usage.input_tokens` / `usage.output_tokens`.
+- The Anthropic provider also supports official compatible endpoints for DeepSeek, Volcengine Ark, Zhipu, Moonshot / Kimi, MiniMax, Xiaomi MiMo, and SiliconFlow. OpenAI's official API does not expose Anthropic Messages compatibility.
 - Gemini reasoning consists of all `thought: true` text parts; final content consists of all other text parts. Do not assume `parts[0]` is the answer.
 - Preserve provider response bodies in user-facing errors where practical.
 - Successful AI logs store extracted content, reasoning, raw provider JSON, input/output character counts, duration, review state, and thinking mode.

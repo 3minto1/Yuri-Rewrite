@@ -1,6 +1,7 @@
 import { ChevronDown, FilePlus2, HelpCircle, KeyRound, Loader2, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import {
+  getProviderBaseUrl,
   getThinkingModeSupport,
   normalizeThinkingMode
 } from "../../config/modelRecommendations";
@@ -54,16 +55,26 @@ export function ModelConfig(props: ModelConfigProps) {
             Provider
             <select
               value={draft.provider}
-              onChange={(event) => updateProviderFields({
-                provider: event.target.value,
-                base_url: event.target.value === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : draft.base_url
-              })}
+              onChange={(event) => {
+                const provider = event.target.value;
+                updateProviderFields({
+                  provider,
+                  base_url: getProviderBaseUrl(draft, provider)
+                });
+              }}
             >
               <option value="openai-compatible">OpenAI 兼容</option>
+              <option value="anthropic">Anthropic Messages</option>
               <option value="gemini">Google Gemini</option>
             </select>
           </label>
-          <label>Base URL<input value={draft.base_url} onChange={(event) => updateProviderFields({ base_url: event.target.value })} /></label>
+          <label>
+            Base URL
+            <input value={draft.base_url} onChange={(event) => updateProviderFields({ base_url: event.target.value })} />
+            {draft.provider === "anthropic" && (
+              <small>填写服务商的 Anthropic Base URL，程序会自动调用 Messages 接口。</small>
+            )}
+          </label>
           <label>
             模型名
             <div className="model-name-control">

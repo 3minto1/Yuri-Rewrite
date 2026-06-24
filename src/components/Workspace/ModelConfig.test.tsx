@@ -82,4 +82,39 @@ describe("ModelConfig", () => {
     expect(off).not.toBeChecked();
     expect(on).toBeChecked();
   });
+
+  it("switches a recognized service to its Anthropic Messages endpoint", () => {
+    function Harness() {
+      const [draft, setDraft] = useState({
+        ...emptyProfile,
+        base_url: "https://api.deepseek.com",
+        model: "deepseek-v4-pro"
+      });
+      return (
+        <ModelConfig
+          draft={draft}
+          setDraft={setDraft}
+          selectedProfile={undefined}
+          selectedProfileId=""
+          suggestions={[]}
+          suggestionsOpen={false}
+          busy=""
+          processing={false}
+          savedApiKeyMask="********"
+          onSuggestionsOpenChange={() => undefined}
+          onCreate={() => undefined}
+          onDiagnose={() => undefined}
+          onSave={() => undefined}
+        />
+      );
+    }
+
+    render(<Harness />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+      target: { value: "anthropic" }
+    });
+
+    expect(screen.getByDisplayValue("https://api.deepseek.com/anthropic")).toBeInTheDocument();
+    expect(screen.getByText(/自动调用 Messages 接口/)).toBeInTheDocument();
+  });
 });

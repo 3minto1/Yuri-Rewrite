@@ -7331,11 +7331,11 @@ mod tests {
     }
 
     #[test]
-    fn app_review_setting_defaults_off_and_can_be_enabled() {
+    fn app_review_setting_defaults_on_and_can_be_disabled() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         init_db(&conn).expect("init db");
 
-        assert!(!load_review_enabled(&conn).expect("load default review setting"));
+        assert!(load_review_enabled(&conn).expect("load default review setting"));
         assert_eq!(
             load_rewrite_parallelism(&conn).expect("load default parallelism"),
             10
@@ -7345,11 +7345,11 @@ mod tests {
             30
         );
 
-        save_review_enabled(&conn, true).expect("enable review");
-        assert!(load_review_enabled(&conn).expect("load enabled review setting"));
-
         save_review_enabled(&conn, false).expect("disable review");
         assert!(!load_review_enabled(&conn).expect("load disabled review setting"));
+
+        save_review_enabled(&conn, true).expect("enable review");
+        assert!(load_review_enabled(&conn).expect("load enabled review setting"));
 
         save_rewrite_parallelism(&conn, 10).expect("save parallelism");
         assert_eq!(

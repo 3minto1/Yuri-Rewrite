@@ -1,3 +1,4 @@
+mod anthropic;
 mod common;
 mod gemini;
 mod openai;

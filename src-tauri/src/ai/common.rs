@@ -94,9 +94,8 @@ pub(crate) fn is_claude_profile(profile: &ModelProfile, base_url: &str, model: &
     let provider = profile.provider.to_ascii_lowercase();
     let base = base_url.to_ascii_lowercase();
     let model = model.to_ascii_lowercase();
-    provider.contains("anthropic")
-        || provider.contains("claude")
-        || base.contains("anthropic")
+    provider.contains("claude")
+        || base.contains("api.anthropic.com")
         || model.starts_with("claude-")
 }
 
@@ -373,9 +372,21 @@ async fn generate_text_once(
     let started = Instant::now();
     let (system, user) = prepare_prompt_for_profile(profile, system, user);
     let input_chars = system.chars().count() + user.chars().count();
-    let mut output = if profile.provider.to_lowercase().contains("gemini") {
+    let provider = profile.provider.trim().to_ascii_lowercase();
+    let mut output = if provider.contains("gemini") {
         super::gemini::generate_gemini(client, profile, api_key, &system, &user, prefer_json_output)
             .await
+    } else if provider == "anthropic" {
+        super::anthropic::generate_anthropic(
+            client,
+            profile,
+            api_key,
+            &system,
+            &user,
+            prefer_json_output,
+            output_limit_override,
+        )
+        .await
     } else {
         super::openai::generate_openai_compatible(
             client,
@@ -618,7 +629,8 @@ pub(crate) fn apply_reasoning_parameter(
     }
 
     if is_doubao_profile(profile, base_url, model)
-        && normalized_model.contains("doubao-seed-2-0")
+        && (normalized_model.contains("doubao-seed-2-0")
+            || normalized_model.contains("doubao-seed-2-1"))
     {
         payload["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
         return true;
@@ -898,20 +910,22 @@ mod tests {
 
     #[test]
     fn doubao_thinking_mode_uses_official_thinking_parameter() {
-        let mut profile = profile(
-            "OpenAI 兼容",
-            "https://ark.cn-beijing.volces.com/api/coding/v3",
-            "doubao-seed-2.0-pro",
-        );
-        profile.thinking_mode = "off".to_string();
-        let mut payload = json!({});
-        assert!(apply_openai_compatible_thinking_control(
-            &mut payload,
-            &profile,
-            &profile.base_url,
-            &profile.model
-        ));
-        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        for model in ["doubao-seed-2.0-pro", "doubao-seed-2-1-pro-260628"] {
+            let mut profile = profile(
+                "OpenAI 兼容",
+                "https://ark.cn-beijing.volces.com/api/coding/v3",
+                model,
+            );
+            profile.thinking_mode = "off".to_string();
+            let mut payload = json!({});
+            assert!(apply_openai_compatible_thinking_control(
+                &mut payload,
+                &profile,
+                &profile.base_url,
+                &profile.model
+            ));
+            assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        }
     }
 
     #[test]
