@@ -2403,6 +2403,7 @@ export default function App() {
             chapters={detail?.chapters ?? []}
             selectedChapter={selectedChapter}
             selectedChapterId={selectedChapterId}
+            novelSettings={detail?.settings ?? null}
             busy={busy}
             originalRef={originalCompareRef}
             rewriteRef={rewriteCompareRef}

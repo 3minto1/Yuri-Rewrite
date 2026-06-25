@@ -1,17 +1,19 @@
-import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RefreshCw, RotateCcw, Save, Search, Square, X } from "lucide-react";
+import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Square, X } from "lucide-react";
 import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import type { Chapter } from "../../types";
+import type { Chapter, NovelSettings } from "../../types";
 import { Modal } from "../common/Modal";
 import { StatusBadge } from "../common/StatusBadge";
 import { calculateDiff, type DiffRange, type DiffResult, type DiffSide } from "./compareDiff";
 import { getCachedDiff, setCachedDiff } from "./compareDiffCache";
 import { HighlightedText } from "./HighlightedText";
+import { scanRewriteQuality, type QualityIssue, type QualityIssueSeverity } from "./compareQuality";
 import { buildSearchMatches, initialSearchIndex, moveSearchIndex, type SearchMatch, type SearchScope } from "./compareSearch";
 
 type CompareViewProps = {
   chapters: Chapter[];
   selectedChapter?: Chapter;
   selectedChapterId: string;
+  novelSettings?: NovelSettings | null;
   busy: string;
   originalRef: RefObject<HTMLDivElement>;
   rewriteRef: RefObject<HTMLDivElement>;
@@ -31,6 +33,8 @@ type CompareViewProps = {
   onRestoreInitialRewrite?: (chapterId: string) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
 };
+
+type QualityFilter = "all" | "error" | "warning";
 
 type DiffState = DiffResult & {
   loading: boolean;
@@ -289,9 +293,110 @@ const TextPane = memo(function TextPane(props: TextPaneProps) {
   );
 });
 
+function qualitySeverityLabel(severity: QualityIssueSeverity) {
+  if (severity === "error") return "严重";
+  if (severity === "warning") return "警告";
+  return "提示";
+}
+
+function qualityCategoryLabel(issue: QualityIssue) {
+  switch (issue.category) {
+    case "missing_rewrite":
+      return "缺失";
+    case "source_name":
+      return "旧名";
+    case "gender_residue":
+      return "性别";
+    case "group_pronoun":
+      return "群体";
+    case "ad_noise":
+      return "广告";
+    case "garbage":
+      return "乱码";
+    case "duplicate":
+      return "重复";
+    case "unchanged":
+      return "未改";
+    default:
+      return "检查";
+  }
+}
+
+type QualityPanelProps = {
+  open: boolean;
+  filter: QualityFilter;
+  issues: QualityIssue[];
+  currentIssueCount: number;
+  totalIssueCount: number;
+  onClose: () => void;
+  onFilterChange: (filter: QualityFilter) => void;
+  onIssueClick: (issue: QualityIssue) => void;
+};
+
+const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
+  const {
+    open,
+    filter,
+    issues,
+    currentIssueCount,
+    totalIssueCount,
+    onClose,
+    onFilterChange,
+    onIssueClick
+  } = props;
+  if (!open) return null;
+  return (
+    <aside className="compare-quality-panel" aria-label="本地质量检查">
+      <header className="compare-quality-header">
+        <div>
+          <h2>本地检查</h2>
+          <p>当前章 {currentIssueCount} · 全书 {totalIssueCount}</p>
+        </div>
+        <button type="button" className="icon-button" aria-label="关闭检查" onClick={onClose}><X size={18} /></button>
+      </header>
+      <div className="compare-quality-filters" role="group" aria-label="检查筛选">
+        <button type="button" className={filter === "all" ? "active" : ""} onClick={() => onFilterChange("all")}>全部</button>
+        <button type="button" className={filter === "error" ? "active" : ""} onClick={() => onFilterChange("error")}>严重</button>
+        <button type="button" className={filter === "warning" ? "active" : ""} onClick={() => onFilterChange("warning")}>警告</button>
+      </div>
+      {issues.length ? (
+        <div className="compare-quality-list">
+          {issues.map((issue) => (
+            <div
+              role="button"
+              tabIndex={0}
+              key={issue.id}
+              className={`compare-quality-issue ${issue.severity}`}
+              onClick={() => onIssueClick(issue)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onIssueClick(issue);
+                }
+              }}
+            >
+              <span className="compare-quality-meta">
+                <span>第 {issue.chapterIndex} 章</span>
+                <span>{qualityCategoryLabel(issue)}</span>
+                <span>{qualitySeverityLabel(issue.severity)}</span>
+              </span>
+              <strong>{issue.message}</strong>
+              {issue.evidence && <span className="compare-quality-evidence">{issue.evidence}</span>}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="compare-quality-empty">
+          {totalIssueCount === 0 ? "当前章未发现本地规则问题。" : "当前筛选下没有问题。"}
+        </p>
+      )}
+    </aside>
+  );
+});
+
 export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const {
-    chapters, selectedChapter, selectedChapterId, busy, originalRef, rewriteRef,
+    chapters, selectedChapter, selectedChapterId, novelSettings, busy, originalRef, rewriteRef,
     onSelectChapter, onBack, onExport, editingAllowed = false, editDisabledReason,
     onSaveRewrite = async () => undefined, onRestoreRewrite = async () => undefined,
     onRewriteChapter = async () => undefined,
@@ -316,7 +421,10 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [rewriteInstructions, setRewriteInstructions] = useState("");
   const [rewriteBusy, setRewriteBusy] = useState(false);
   const [terminateRewriteBusy, setTerminateRewriteBusy] = useState(false);
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const [qualityFilter, setQualityFilter] = useState<QualityFilter>("all");
   const pendingNavigationRef = useRef<(() => void) | null>(null);
+  const pendingQualityIssueRef = useRef<QualityIssue | null>(null);
   const deferredQuery = useDeferredValue(query);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const navigationTargetRef = useRef<string | null>(null);
@@ -341,6 +449,25 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const originalMatches = useMemo(() => chapterMatches.filter((match) => match.side === "original"), [chapterMatches]);
   const rewriteMatches = useMemo(() => chapterMatches.filter((match) => match.side === "rewrite"), [chapterMatches]);
   const editDirty = editing && editDraft !== rewriteText;
+  const qualityIssues = useMemo(() => scanRewriteQuality(
+    chapters,
+    novelSettings,
+    editing ? { chapterId: selectedChapterId, rewriteText: editDraft } : null
+  ), [chapters, editDraft, editing, novelSettings, selectedChapterId]);
+  const currentQualityIssues = useMemo(
+    () => qualityIssues.filter((issue) => issue.chapterId === selectedChapterId),
+    [qualityIssues, selectedChapterId]
+  );
+  const visibleQualityIssues = useMemo(() => {
+    const filtered = qualityFilter === "all"
+      ? qualityIssues
+      : qualityIssues.filter((issue) => issue.severity === qualityFilter);
+    return [...filtered].sort((left, right) => {
+      if (left.chapterId === selectedChapterId && right.chapterId !== selectedChapterId) return -1;
+      if (right.chapterId === selectedChapterId && left.chapterId !== selectedChapterId) return 1;
+      return left.chapterIndex - right.chapterIndex;
+    });
+  }, [qualityFilter, qualityIssues, selectedChapterId]);
 
   useEffect(() => {
     onDirtyChange?.(editDirty);
@@ -381,6 +508,30 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     setQuery("");
     setActiveMatchIndex(null);
     setWrapped(false);
+  }
+
+  function activateIssueSearch(issue: QualityIssue) {
+    if (!issue.query.trim()) return;
+    setSearchOpen(true);
+    setSearchScope("rewrite");
+    setCaseSensitive(false);
+    setQuery(issue.query);
+    setWrapped(false);
+    const nextMatches = buildSearchMatches(chapters, issue.query, false, "rewrite");
+    const nextIndex = nextMatches.findIndex((match) => match.chapter_id === issue.chapterId);
+    setActiveMatchIndex(nextIndex >= 0 ? nextIndex : null);
+  }
+
+  function focusQualityIssue(issue: QualityIssue) {
+    if (issue.chapterId === selectedChapterId) {
+      activateIssueSearch(issue);
+      return;
+    }
+    runOrConfirmNavigation(() => {
+      pendingQualityIssueRef.current = issue;
+      navigationTargetRef.current = issue.chapterId;
+      onSelectChapter(issue.chapterId);
+    });
   }
 
   async function confirmRewriteChapter() {
@@ -503,6 +654,13 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     setPendingNavigation(false);
   }, [selectedChapterId]);
 
+  useEffect(() => {
+    const issue = pendingQualityIssueRef.current;
+    if (!issue || issue.chapterId !== selectedChapterId) return;
+    pendingQualityIssueRef.current = null;
+    activateIssueSearch(issue);
+  }, [selectedChapterId]);
+
   return (
     <div className="compare-page">
       <div className="compare-page-toolbar">
@@ -580,6 +738,10 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
           </button>
           <button className={searchOpen ? "active" : ""} aria-pressed={searchOpen} onClick={() => searchOpen ? closeSearch() : setSearchOpen(true)}><Search size={17} />查找</button>
           <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
+          <button className={qualityOpen ? "active compare-quality-toggle" : "compare-quality-toggle"} aria-pressed={qualityOpen} onClick={() => setQualityOpen((open) => !open)}>
+            <ShieldCheck size={17} />检查
+            {qualityIssues.length > 0 && <span className="compare-quality-badge">{qualityIssues.length}</span>}
+          </button>
           </div>
           <div className="compare-word-count" aria-label="字数对比">
             字数：原文 {originalCharacterCount} · 改写稿 {rewriteCharacterCount} · {characterDelta}
@@ -636,6 +798,16 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
                 : "长文本或高差异内容已使用行级差异高亮。"}
         </div>
       )}
+      <QualityPanel
+        open={qualityOpen}
+        filter={qualityFilter}
+        issues={visibleQualityIssues}
+        currentIssueCount={currentQualityIssues.length}
+        totalIssueCount={qualityIssues.length}
+        onClose={() => setQualityOpen(false)}
+        onFilterChange={setQualityFilter}
+        onIssueClick={focusQualityIssue}
+      />
       {selectedChapter ? (
         <div className="large-compare-grid">
           <TextPane
