@@ -1,5 +1,5 @@
 use crate::domain::{CanonAsset, Chapter, NovelSettings, ParsedChapterRewrite};
-use crate::truncate_text;
+use crate::{additional_feminize_name_sources, relationship_targets_summary, truncate_text};
 use std::collections::HashSet;
 
 #[allow(dead_code)]
@@ -23,12 +23,14 @@ pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
             settings.advanced_settings.trim()
         )
     };
+    let relationship_targets = relationship_targets_summary(&settings.relationship_targets);
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
 - 主角原文别名：{}
 - 主角改写后姓名：{}
-- 其他需要女性化的人物姓名：{}
+- 其他指定女性化人物/姓名映射：{}
+- 重点百合互动对象：{}
 - 身材：{}
 - 体型：{}
 
@@ -36,12 +38,14 @@ pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
 1. 如果“主角改写后姓名”不是留空，必须把主角统一改为该姓名，标题和正文都必须遵守，不得自行生成其他主角新名。
 2. 如果“主角改写后姓名”留空，主角姓名必须女性化，不能保留明显男性化姓名；优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
 3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
-4. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
-5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。"#,
+4. 其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
+5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。
+6. 重点百合互动对象只用于增强关系连续性和百合互动，不得因此改变未指定角色性别、原文主线逻辑或章节边界。"#,
         settings.protagonist_name,
         aliases_or_none(settings),
         rewritten_name,
         additional,
+        relationship_targets,
         settings.bust,
         settings.body_type
     )
@@ -245,11 +249,8 @@ fn relevant_canon_keywords(chapters: &[Chapter], settings: &NovelSettings) -> Ha
     for value in settings.protagonist_aliases.lines() {
         insert_keyword(&mut keywords, value);
     }
-    for value in settings
-        .additional_feminize_names
-        .split(['\n', ',', '，', ';', '；'])
-    {
-        insert_keyword(&mut keywords, value);
+    for value in additional_feminize_name_sources(&settings.additional_feminize_names) {
+        insert_keyword(&mut keywords, &value);
     }
     for chapter in chapters {
         collect_text_keywords(&chapter.title, &mut keywords);
@@ -421,13 +422,15 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
     } else {
         settings.advanced_settings.trim().to_string()
     };
+    let relationship_targets = relationship_targets_summary(&settings.relationship_targets);
 
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
 - 主角原文别名：{}
 - 主角改写后姓名：{}
-- 其他需要女性化的人物姓名：{}
+- 其他指定女性化人物/姓名映射：{}
+- 重点百合互动对象：{}
 - 身材：{}
 - 体型：{}
 - 改写模式：{}
@@ -442,7 +445,7 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
 2. 正文必须检查主角姓名。章节标题原则上保留原标题和原编号；只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才需要改成女性化表达。普通意象、事件概括、其他角色描述和无法确认指向主角的男性词语都不需要为了女性化而修改。
 3. 如果用户未指定主角改写后姓名，优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字；如果用户已指定，则以用户指定姓名为最高优先级。
 4. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
-5. 其他需要女性化的人物姓名只在文本中实际出现时处理，未出现则忽略。
+5. 其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
 6. 主角原文别名与主角是同一人物；每个别名都必须按一致性资产中的固定映射同步女性化，不能把别名误判为另一名角色，也不能只修改主姓名而遗漏别名。
 7. 一致性资产中的“姓名映射表”优先级最高；凡是映射表中已有 `source -> target`，标题和正文都必须统一替换为 target，不得自行生成同一人物的其他女性化姓名。
 8. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致；并发分片和后续批次也必须继续使用同一份映射表。
@@ -453,7 +456,7 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
 让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。
 
 人物性别与代词一致性规则：
-1. 只允许主角、用户填写的“其他需要女性化的人物姓名”、以及一致性资产“姓名映射表”中明确存在映射的人物进行性别转换。
+1. 只允许主角、用户填写的“其他指定女性化人物/姓名映射”、以及一致性资产“姓名映射表”中明确存在映射的人物进行性别转换。
 2. 其他未指定人物必须保持原文性别、身份、称谓和人称代词：原文男性配角继续使用男性身份与“他/父亲/兄弟/少爷/公子”等符合原文的表达；原文女性配角继续使用女性身份与“她/母亲/姐妹/小姐”等符合原文的表达。
 3. 不得因为百合改写目标而把所有重要配角、敌人、长辈、师父、兄弟、父亲或旁观者都改成女性；也不得在不同章节中让同一配角一会儿是男性、一会儿是女性。
 4. 对性别不明或原文暂未明确的人物，应保持中性称呼或沿用原文称谓，等一致性资产或原文后续明确后再固定；不要凭空改成女性或男性。
@@ -466,11 +469,13 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
 2. 如果原文没有明确外貌，不要每章随机发明互相矛盾的新特征；需要补充女性化描写时，应使用与已建立设定兼容的细节，并保持后续复用。
 3. 人物关系和百合向情绪推进必须连续。暧昧、信任、依赖、吃醋、保护欲、亲密距离等变化要承接前文，不能上一章刚建立的关系下一章突然重置。
 4. 称谓、代词、身份和旁人态度必须统一。主角已经女性化后，旁人对她的称呼、视线、互动距离、社会评价也要自然匹配女性身份，不能在不同章节反复摇摆。
-5. 新增女性化细节必须服务当前剧情和人物状态，不得为了强调性别而制造与原文战力、性格、伏笔、剧情逻辑冲突的描写。"#,
+5. 重点百合互动对象用于提示应优先维护的互动对象、关系定位和情绪推进；可自然增强暧昧、信任、依赖、保护欲或亲密距离，但不得因此改变未指定角色性别、原文主线逻辑、战力逻辑或章节边界。
+6. 新增女性化细节必须服务当前剧情和人物状态，不得为了强调性别而制造与原文战力、性格、伏笔、剧情逻辑冲突的描写。"#,
         settings.protagonist_name,
         aliases_or_none(settings),
         rewritten_name,
         additional_names,
+        relationship_targets,
         settings.bust,
         settings.body_type,
         rewrite_mode_label(&settings.rewrite_mode),
@@ -701,11 +706,11 @@ pub(crate) fn build_compact_revision_settings_prompt(settings: &NovelSettings) -
 - 主角原姓名：{}
 - 主角原文别名：{}
 - 主角改写后姓名：{}
-- 其他需要女性化的人物姓名：{}
+- 其他指定女性化人物/姓名映射：{}
 - 身材/体型：{} / {}
 - 改写模式：{}
 - 高级设定：{}
-- 姓名映射表和用户指定改名最高优先级；标题默认保留原标题和原编号，只有明确指向主角原名、男性身份、男性称谓或男性身体状态时才女性化。
+- 姓名映射表和用户指定改名最高优先级；其他姓名若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名；标题默认保留原标题和原编号，只有明确指向主角原名、男性身份、男性称谓或男性身体状态时才女性化。
 - 未指定角色、性别不明者和非人生物必须按原文及一致性资产保持性别、称谓和代词；群体代词按成员构成判断，含未指定男性成员时用“他们”或准确群体称呼。
 - 人物外貌、关系、称谓、百合向情绪推进必须承接前文，不能为了修复问题制造新矛盾。"#,
         settings.protagonist_name.trim(),
@@ -742,7 +747,7 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
 3. 正文必须完成改写。章节标题原则上保留原标题和原编号；只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才同步女性化。不要仅因创意模式、普通男性词语、标题意象或标题编号与 marker index 不同而修改标题。
 4. {}
 5. 清除所有原男性主角痕迹，包括姓名、代词、身体描述、外貌气质、社会称呼、动作习惯、旁人称谓和亲密互动中的性别暗示；所有相关内容都要自然转换为女性主角表达。
-6. 主角姓名、主角别名、指定女性化人物和姓名逻辑必须严格遵守“小说基本设定”和一致性资产中的“姓名映射表”；未映射时才按同音或近音原则女性化。
+6. 主角姓名、主角别名、指定女性化人物和姓名逻辑必须严格遵守“小说基本设定”和一致性资产中的“姓名映射表”；其他姓名若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，未映射时才按同音或近音原则女性化。
 7. 未指定角色、群体代词、性别不明人物和非人生物必须按“规则优先级”和“人物性别与代词一致性规则”处理，不得因为百合化或创意模式误改。
 8. 按基本设定中的身材和体型调整外貌、动作和互动细节；人物外貌、称谓、身份和百合向关系推进必须承接一致性资产及相邻上下文，不能突然重置或跳跃。
 9. 女性化细节应覆盖正文中与主角有关的视线、评价、互动距离和社会称呼；新增内容必须服务当前剧情，不得破坏原文战力、伏笔、人物性格和逻辑。

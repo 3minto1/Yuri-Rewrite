@@ -1,6 +1,9 @@
 use crate::domain::{AppSettings, AppState, ChapterBatch, NovelSettings};
 use crate::task_control::{auto_runs_are_only_paused, auto_runs_have_non_paused};
-use crate::{load_chapters, load_novel_settings, normalize_name_list, to_string};
+use crate::{
+    load_chapters, load_novel_settings, normalize_additional_feminize_names, normalize_name_list,
+    normalize_relationship_targets, to_string,
+};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -583,6 +586,7 @@ pub(crate) fn save_novel_settings(
     body_type: String,
     rewrite_mode: String,
     advanced_settings: String,
+    relationship_targets: String,
     state: State<AppState>,
 ) -> Result<NovelSettings, String> {
     if state.active_tasks.novel_is_active(&novel_id)?
@@ -600,10 +604,11 @@ pub(crate) fn save_novel_settings(
         protagonist_name,
     );
     let rewritten_protagonist_name = rewritten_protagonist_name.trim();
-    let additional_feminize_names = normalize_name_list(&additional_feminize_names);
+    let additional_feminize_names = normalize_additional_feminize_names(&additional_feminize_names);
     let bust = bust.trim();
     let body_type = body_type.trim();
     let rewrite_mode = rewrite_mode.trim();
+    let relationship_targets = normalize_relationship_targets(&relationship_targets);
     if protagonist_name.is_empty() {
         return Err("主角姓名为必填项。".to_string());
     }
@@ -628,13 +633,14 @@ pub(crate) fn save_novel_settings(
         body_type: body_type.to_string(),
         rewrite_mode: rewrite_mode.to_string(),
         advanced_settings: advanced_settings.trim().to_string(),
+        relationship_targets,
         updated_at: Utc::now().to_rfc3339(),
     };
     let conn = state.conn.lock().map_err(to_string)?;
     conn.execute(
         r#"
-        INSERT INTO novel_settings (novel_id, protagonist_name, protagonist_aliases, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        INSERT INTO novel_settings (novel_id, protagonist_name, protagonist_aliases, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, relationship_targets, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(novel_id) DO UPDATE SET
             protagonist_name = excluded.protagonist_name,
             protagonist_aliases = excluded.protagonist_aliases,
@@ -644,6 +650,7 @@ pub(crate) fn save_novel_settings(
             body_type = excluded.body_type,
             rewrite_mode = excluded.rewrite_mode,
             advanced_settings = excluded.advanced_settings,
+            relationship_targets = excluded.relationship_targets,
             updated_at = excluded.updated_at
         "#,
         params![
@@ -656,6 +663,7 @@ pub(crate) fn save_novel_settings(
             settings.body_type,
             settings.rewrite_mode,
             settings.advanced_settings,
+            settings.relationship_targets,
             settings.updated_at
         ],
     )

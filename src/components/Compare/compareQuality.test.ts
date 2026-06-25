@@ -12,6 +12,7 @@ const settings: NovelSettings = {
   body_type: "少女",
   rewrite_mode: "strict",
   advanced_settings: "",
+  relationship_targets: "[]",
   updated_at: "now"
 };
 

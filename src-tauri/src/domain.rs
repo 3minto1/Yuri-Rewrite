@@ -88,6 +88,7 @@ pub(crate) struct NovelSettings {
     pub(crate) body_type: String,
     pub(crate) rewrite_mode: String,
     pub(crate) advanced_settings: String,
+    pub(crate) relationship_targets: String,
     pub(crate) updated_at: String,
 }
 

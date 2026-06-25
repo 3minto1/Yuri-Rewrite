@@ -1,7 +1,7 @@
 import { ArrowLeft, Loader2, Play, Save, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { invokeCommand } from "../../tauriApi";
-import type { ChapterRule, ChapterRulePreview, Novel } from "../../types";
+import type { CanonAsset, Chapter, ChapterRule, ChapterRulePreview, Novel } from "../../types";
 
 const defaultRule: ChapterRule = {
   mode: "simple",
@@ -23,6 +23,8 @@ const prefixOptions = [
 
 type ChapterRulesPageProps = {
   novel: Novel | null;
+  chapters: Chapter[];
+  canonAssets: CanonAsset[];
   busy: string;
   processing: boolean;
   onBack: () => void;
@@ -35,8 +37,73 @@ function normalizeQuery(value: string) {
   return value.trim().toLowerCase();
 }
 
+function chapterHasProcessingTrace(chapter: Chapter) {
+  return chapter.analysis_status !== "pending"
+    || chapter.rewrite_status !== "pending"
+    || Boolean(chapter.analysis_json?.trim())
+    || Boolean(chapter.rewrite_text?.trim())
+    || Boolean(chapter.rewrite_edited);
+}
+
+function chapterRuleApplyState(
+  novel: Novel | null,
+  chapters: Chapter[],
+  canonAssets: CanonAsset[],
+  processing: boolean
+) {
+  if (!novel) {
+    return {
+      canApply: false,
+      message: "请先导入或选择一本小说。"
+    };
+  }
+  if (processing) {
+    return {
+      canApply: false,
+      message: "当前任务运行或暂停中，不能重新生成章节列表。"
+    };
+  }
+  if (novel.status === "pending_split") {
+    return {
+      canApply: true,
+      message: `为《${novel.title}》生成章节列表。`
+    };
+  }
+  if (novel.status !== "imported") {
+    return {
+      canApply: false,
+      message: "当前小说状态不支持重新拆分。"
+    };
+  }
+  if (chapters.some(chapterHasProcessingTrace)) {
+    return {
+      canApply: false,
+      message: "已开始分析或改写，不能重新拆分；如需修改章节规则，请重新导入小说。"
+    };
+  }
+  if (canonAssets.some((asset) => asset.content.trim() !== "")) {
+    return {
+      canApply: false,
+      message: "已有手动一致性资产内容，不能重新拆分；如需修改章节规则，请重新导入小说。"
+    };
+  }
+  return {
+    canApply: true,
+    message: "尚未开始分析或改写，可重新生成章节列表；这会替换当前章节划分。"
+  };
+}
+
+function confirmApplyChapterRule(pendingSplit: boolean) {
+  if (pendingSplit) return true;
+  return window.confirm(
+    "重新生成章节列表会替换当前章节划分和批次范围，并清空尚未使用的一致性资产。\n\n不会删除原始 TXT、小说设定、模型配置或应用设置。\n\n确定继续吗？"
+  );
+}
+
 export function ChapterRulesPage({
   novel,
+  chapters,
+  canonAssets,
   busy,
   processing,
   onBack,
@@ -52,6 +119,10 @@ export function ChapterRulesPage({
   const [saving, setSaving] = useState(false);
 
   const pendingSplit = novel?.status === "pending_split";
+  const applyState = useMemo(
+    () => chapterRuleApplyState(novel, chapters, canonAssets, processing),
+    [canonAssets, chapters, novel, processing]
+  );
   const disabled = processing || !novel || loadingRule || previewing || saving;
   const normalizedQuery = normalizeQuery(query);
   const visiblePreviewChapters = useMemo(() => {
@@ -108,7 +179,8 @@ export function ChapterRulesPage({
   }
 
   async function saveAndApply() {
-    if (!novel || !preview?.can_apply || !pendingSplit) return;
+    if (!novel || !preview?.can_apply || !applyState.canApply) return;
+    if (!confirmApplyChapterRule(Boolean(pendingSplit))) return;
     setSaving(true);
     try {
       await invokeCommand("save_chapter_rule_and_split", {
@@ -124,7 +196,8 @@ export function ChapterRulesPage({
   }
 
   async function useBuiltinRule() {
-    if (!novel || !pendingSplit) return;
+    if (!novel || !applyState.canApply) return;
+    if (!confirmApplyChapterRule(Boolean(pendingSplit))) return;
     setSaving(true);
     try {
       await onUseBuiltin(novel.id);
@@ -138,28 +211,26 @@ export function ChapterRulesPage({
       <div className="page-heading">
         <div>
           <h2>章节规则</h2>
-          <p>
-            {novel
-              ? pendingSplit
-                ? `为《${novel.title}》生成章节列表。`
-                : `查看《${novel.title}》的章节规则；已生成章节的小说本轮不重新拆分。`
-              : "请先导入或选择一本小说。"}
-          </p>
+          <p>{applyState.message}</p>
         </div>
         <div className="panel-actions">
           <button onClick={onBack}><ArrowLeft size={16} />返回</button>
-          {pendingSplit && (
-            <button onClick={useBuiltinRule} disabled={disabled || busy === "chapter-split"}>
+          {novel && (
+            <button
+              onClick={useBuiltinRule}
+              disabled={disabled || !applyState.canApply || busy === "chapter-split"}
+              title={!applyState.canApply ? applyState.message : undefined}
+            >
               {busy === "chapter-split" || saving ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
               使用内置规则
             </button>
           )}
-          {pendingSplit && (
+          {novel && (
             <button
               className="action-primary"
               onClick={saveAndApply}
-              disabled={disabled || !preview?.can_apply || busy === "chapter-rule"}
-              title={!preview?.can_apply ? "请先生成有效预览" : undefined}
+              disabled={disabled || !applyState.canApply || !preview?.can_apply || busy === "chapter-rule"}
+              title={!applyState.canApply ? applyState.message : !preview?.can_apply ? "请先生成有效预览" : undefined}
             >
               {busy === "chapter-rule" || saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
               保存
@@ -167,6 +238,12 @@ export function ChapterRulesPage({
           )}
         </div>
       </div>
+
+      {novel && (
+        <div className={applyState.canApply ? "chapter-rule-status can-apply" : "chapter-rule-status blocked"}>
+          {applyState.message}
+        </div>
+      )}
 
       <section className="settings-section chapter-rule-editor">
         <div className="segmented-control chapter-rule-mode" role="radiogroup" aria-label="章节规则模式">

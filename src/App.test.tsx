@@ -86,6 +86,7 @@ const detail: NovelDetail = {
     body_type: "少女",
     rewrite_mode: "strict",
     advanced_settings: "",
+    relationship_targets: "[]",
     updated_at: "now"
   }
 };
@@ -314,7 +315,8 @@ describe("App feature behavior", () => {
       if (command === "save_novel_settings") {
         return {
           ...detail.settings,
-          protagonist_aliases: (args as { protagonistAliases: string }).protagonistAliases
+          protagonist_aliases: (args as { protagonistAliases: string }).protagonistAliases,
+          relationship_targets: (args as { relationshipTargets?: string }).relationshipTargets ?? "[]"
         };
       }
       if (command === "check_for_updates") {
@@ -329,10 +331,80 @@ describe("App feature behavior", () => {
     fireEvent.change(screen.getByLabelText("主角别名（选填）"), {
       target: { value: "小明，林公子" }
     });
-    fireEvent.click(screen.getByRole("button", { name: "确定" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_novel_settings", expect.objectContaining({
       protagonistAliases: "小明，林公子"
     })));
+  });
+
+  it.each([
+    ["返回", () => fireEvent.click(screen.getByRole("button", { name: "返回" })), "章节"],
+    ["设置", () => fireEvent.click(screen.getByRole("button", { name: "设置" })), "设置"],
+    ["品牌返回", () => fireEvent.click(screen.getByRole("button", { name: /Yuri Rewrite/ })), "章节"],
+    ["Esc", () => fireEvent.keyDown(window, { key: "Escape" }), "章节"]
+  ])("guards unsaved novel settings before navigation: %s", async (_label, triggerNavigation, expectedHeading) => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "设定" }));
+    fireEvent.change(screen.getByLabelText("主角姓名（必填）"), {
+      target: { value: "未保存主角" }
+    });
+
+    triggerNavigation();
+    const dialog = screen.getByRole("dialog", { name: "基本设定尚未保存" });
+    expect(within(dialog).getByText(/当前基本设定有未保存的修改/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByLabelText("主角姓名（必填）")).toHaveValue("未保存主角");
+
+    triggerNavigation();
+    fireEvent.click(within(screen.getByRole("dialog", { name: "基本设定尚未保存" })).getByRole("button", { name: "不保存退出" }));
+    expect(screen.getByRole("heading", { name: expectedHeading })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "设定" }));
+    expect(screen.getByLabelText("主角姓名（必填）")).toHaveValue("林明");
+  });
+
+  it("saves dirty novel settings before leaving when requested", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_logs") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "save_novel_settings") {
+        const payload = args as {
+          protagonistName: string;
+          relationshipTargets: string;
+        };
+        return {
+          ...detail.settings,
+          protagonist_name: payload.protagonistName,
+          relationship_targets: payload.relationshipTargets,
+          updated_at: "saved"
+        };
+      }
+      if (command === "check_for_updates") {
+        return { current_version: "0.3.3", latest_version: "0.3.3", latest_tag: "v0.3.3", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "设定" }));
+    fireEvent.change(screen.getByLabelText("主角姓名（必填）"), {
+      target: { value: "保存主角" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "基本设定尚未保存" })).getByRole("button", { name: "保存并退出" }));
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_novel_settings", expect.objectContaining({
+      protagonistName: "保存主角",
+      relationshipTargets: "[]"
+    })));
+    expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
   });
 
   it("restores an interrupted auto run as paused on startup", async () => {
@@ -1083,8 +1155,9 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
     fireEvent.click(screen.getByRole("button", { name: "设定" }));
-    expect(screen.getByRole("dialog", { name: "基本设定" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "关闭基本设定" }));
+    expect(screen.getByRole("heading", { name: "基本设定" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "基本设定" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
     fireEvent.click(screen.getByRole("button", { name: "对比" }));
     expect(screen.getByText("原文内容")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "TXT" }));

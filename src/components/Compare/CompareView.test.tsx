@@ -20,6 +20,7 @@ const novelSettings: NovelSettings = {
   body_type: "少女",
   rewrite_mode: "strict",
   advanced_settings: "",
+  relationship_targets: "[]",
   updated_at: "now"
 };
 
@@ -84,6 +85,7 @@ function selectChapter(title: string) {
 describe("CompareView", () => {
   beforeEach(() => {
     clearDiffCache();
+    window.localStorage.clear();
     vi.stubGlobal("Worker", undefined);
   });
 
@@ -196,7 +198,56 @@ describe("CompareView", () => {
     const panel = screen.getByLabelText("本地质量检查");
     expect(panel).toHaveTextContent("当前章 0 · 全书 1");
     expect(within(panel).getByRole("button", { name: "全部" })).toHaveClass("active");
+    const ignoreButton = within(panel).getByRole("button", { name: "忽略当前问题" });
+    const closeButton = within(panel).getByRole("button", { name: "关闭检查" });
+    expect(ignoreButton.compareDocumentPosition(closeButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(panel).getByText("仍残留主角原名或别名：萧炎")).toBeInTheDocument();
+  });
+
+  it("ignores current quality issues across filters and updates counts", () => {
+    render(<Harness initialChapters={[
+      { ...chapters[0], rewrite_text: "萧妍 ******" },
+      { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
+    ]} />);
+
+    expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("2");
+    fireEvent.click(screen.getByRole("button", { name: /检查/ }));
+    const panel = screen.getByLabelText("本地质量检查");
+    expect(panel).toHaveTextContent("当前章 1 · 全书 2");
+    fireEvent.click(within(panel).getByRole("button", { name: "警告" }));
+    expect(within(panel).queryByText("仍残留主角原名或别名：萧炎")).not.toBeInTheDocument();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "忽略当前问题" }));
+
+    expect(screen.getByRole("button", { name: "检查" })).not.toHaveTextContent(/\d/);
+    expect(panel).toHaveTextContent("当前章 0 · 全书 0");
+    expect(panel).toHaveTextContent("当前章未发现本地规则问题。");
+    expect(JSON.parse(window.localStorage.getItem("yuri-rewrite.qualityIgnored.v1.n1") ?? "[]")).toHaveLength(2);
+  });
+
+  it("keeps ignored quality issues in localStorage but shows new evidence", () => {
+    const first = render(<Harness initialChapters={[
+      { ...chapters[0], rewrite_text: "萧妍走进大厅。" },
+      { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
+    ]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /检查/ }));
+    fireEvent.click(within(screen.getByLabelText("本地质量检查")).getByRole("button", { name: "忽略当前问题" }));
+    expect(screen.getByRole("button", { name: "检查" })).not.toHaveTextContent(/\d/);
+
+    first.unmount();
+    render(<Harness initialChapters={[
+      { ...chapters[0], rewrite_text: "萧妍走进大厅。" },
+      { ...chapters[1], rewrite_text: "萧炎仍在第二章。" },
+      { ...chapters[1], id: "c3", index: 3, title: "第三章", rewrite_text: "炎儿又在第三章。" }
+    ]} />);
+
+    expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("1");
+    fireEvent.click(screen.getByRole("button", { name: /检查/ }));
+    const panel = screen.getByLabelText("本地质量检查");
+    expect(panel).not.toHaveTextContent("仍残留主角原名或别名：萧炎");
+    expect(panel).toHaveTextContent("仍残留主角原名或别名：炎儿");
+    expect(panel).toHaveTextContent("当前章 0 · 全书 1");
   });
 
   it("does not count pending empty rewrites as quality issues", () => {

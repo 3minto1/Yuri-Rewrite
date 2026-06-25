@@ -108,6 +108,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             body_type TEXT NOT NULL,
             rewrite_mode TEXT NOT NULL DEFAULT 'strict',
             advanced_settings TEXT NOT NULL DEFAULT '',
+            relationship_targets TEXT NOT NULL DEFAULT '[]',
             updated_at TEXT NOT NULL,
             FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
         );
@@ -241,6 +242,12 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "novel_settings",
         "advanced_settings",
         "TEXT NOT NULL DEFAULT ''",
+    )?;
+    migrations::ensure_column(
+        conn,
+        "novel_settings",
+        "relationship_targets",
+        "TEXT NOT NULL DEFAULT '[]'",
     )?;
     migrations::ensure_column(
         conn,
@@ -424,6 +431,14 @@ mod tests {
             )
             .expect("load aliases");
         assert!(aliases.is_empty());
+        let relationship_targets: String = conn
+            .query_row(
+                "SELECT relationship_targets FROM novel_settings WHERE novel_id = 'novel-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load relationship targets");
+        assert_eq!(relationship_targets, "[]");
     }
 
     #[test]

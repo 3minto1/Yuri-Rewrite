@@ -43,7 +43,7 @@ pub(crate) fn save_chapter_rule_and_split(
     ensure_can_split_novel(&state, &novel_id)?;
     let normalized = normalize_chapter_rule(rule);
     let mut conn = state.conn.lock().map_err(to_string)?;
-    ensure_pending_split(&conn, &novel_id)?;
+    ensure_chapter_split_allowed(&conn, &novel_id)?;
     let text = load_source_text(&conn, &novel_id)?;
     let split = split_chapters_with_custom_rule(&novel_id, &text, &normalized)?;
     if split.chapters.is_empty() {
@@ -66,7 +66,7 @@ pub(crate) fn split_novel_with_builtin_rule(
 ) -> Result<(), String> {
     ensure_can_split_novel(&state, &novel_id)?;
     let mut conn = state.conn.lock().map_err(to_string)?;
-    ensure_pending_split(&conn, &novel_id)?;
+    ensure_chapter_split_allowed(&conn, &novel_id)?;
     let text = load_source_text(&conn, &novel_id)?;
     let split = split_chapters(&novel_id, &text);
     if split.chapters.is_empty() {
@@ -195,7 +195,7 @@ fn ensure_can_split_novel(state: &State<'_, AppState>, novel_id: &str) -> Result
     Ok(())
 }
 
-fn ensure_pending_split(conn: &Connection, novel_id: &str) -> Result<(), String> {
+fn ensure_chapter_split_allowed(conn: &Connection, novel_id: &str) -> Result<(), String> {
     let status = conn
         .query_row(
             "SELECT status FROM novels WHERE id = ?1",
@@ -203,10 +203,72 @@ fn ensure_pending_split(conn: &Connection, novel_id: &str) -> Result<(), String>
             |row| row.get::<_, String>(0),
         )
         .map_err(to_string)?;
-    if status != "pending_split" {
-        return Err("当前小说已经生成章节，本轮不支持重新拆分。".to_string());
+    if status == "pending_split" {
+        return Ok(());
+    }
+    if status != "imported" {
+        return Err("当前小说状态不支持重新拆分。".to_string());
+    }
+    if chapter_processing_trace_exists(conn, novel_id)? || task_history_exists(conn, novel_id)? {
+        return Err(
+            "当前小说已开始分析或改写，不能重新拆分；如需修改章节规则，请重新导入小说。"
+                .to_string(),
+        );
+    }
+    if non_empty_canon_asset_exists(conn, novel_id)? {
+        return Err(
+            "当前小说已有手动一致性资产内容，不能重新拆分；如需修改章节规则，请重新导入小说。"
+                .to_string(),
+        );
     }
     Ok(())
+}
+
+fn chapter_processing_trace_exists(conn: &Connection, novel_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM chapters
+            WHERE novel_id = ?1
+              AND (
+                analysis_status != 'pending'
+                OR rewrite_status != 'pending'
+                OR COALESCE(trim(analysis_json), '') != ''
+                OR COALESCE(trim(rewrite_text), '') != ''
+                OR COALESCE(trim(ai_rewrite_text), '') != ''
+                OR rewrite_edited_at IS NOT NULL
+              )
+        )",
+        params![novel_id],
+        |row| row.get(0),
+    )
+    .map_err(to_string)
+}
+
+fn task_history_exists(conn: &Connection, novel_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM jobs
+            WHERE novel_id = ?1
+              AND job_type IN ('analysis', 'rewrite', 'auto', 'auto_batch')
+        ) OR EXISTS(
+            SELECT 1 FROM auto_run_checkpoints WHERE novel_id = ?1
+        )",
+        params![novel_id],
+        |row| row.get(0),
+    )
+    .map_err(to_string)
+}
+
+fn non_empty_canon_asset_exists(conn: &Connection, novel_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM canon_assets
+            WHERE novel_id = ?1 AND trim(content) != ''
+        )",
+        params![novel_id],
+        |row| row.get(0),
+    )
+    .map_err(to_string)
 }
 
 fn rebuild_pending_novel_chapters(
@@ -331,7 +393,92 @@ mod tests {
     }
 
     #[test]
-    fn saving_rule_and_splitting_rejects_imported_novel() {
+    fn imported_unprocessed_novel_can_be_resplit_and_rebuilds_empty_assets() {
+        let conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        let dir = std::env::temp_dir().join(format!("yuri-rule-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("novel.txt");
+        fs::write(&path, "第一章 开始\n正文\n第二章 继续\n正文").expect("write source");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', ?1, 'UTF-8', 'imported', 1, 'now')",
+            params![path.to_string_lossy().to_string()],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_status, rewrite_status)
+             VALUES ('old-chapter', 'novel-1', 1, '旧章节', '旧正文', 'pending', 'pending')",
+            [],
+        )
+        .expect("insert old chapter");
+        seed_canon_assets(&conn, "novel-1").expect("seed assets");
+
+        ensure_chapter_split_allowed(&conn, "novel-1")
+            .expect("unprocessed imported novel can split");
+        let text = load_source_text(&conn, "novel-1").expect("source text");
+        let split = split_chapters_with_custom_rule("novel-1", &text, &test_rule())
+            .expect("split with custom rule");
+        let mut mutable_conn = conn;
+        rebuild_pending_novel_chapters(
+            &mut mutable_conn,
+            &dir,
+            "novel-1",
+            &split.chapters,
+            split.detected_chapters,
+        )
+        .expect("rebuild chapters");
+
+        let old_count: i64 = mutable_conn
+            .query_row(
+                "SELECT COUNT(*) FROM chapters WHERE id = 'old-chapter'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count old chapter");
+        assert_eq!(old_count, 0);
+        let chapter_count: i64 = mutable_conn
+            .query_row(
+                "SELECT COUNT(*) FROM chapters WHERE novel_id = 'novel-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count chapters");
+        assert_eq!(chapter_count, 2);
+        let batch_count: i64 = mutable_conn
+            .query_row(
+                "SELECT COUNT(*) FROM chapter_batches WHERE novel_id = 'novel-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count batches");
+        assert_eq!(batch_count, 1);
+        let non_empty_asset_count: i64 = mutable_conn
+            .query_row(
+                "SELECT COUNT(*) FROM canon_assets WHERE novel_id = 'novel-1' AND trim(content) != ''",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count non-empty assets");
+        assert_eq!(non_empty_asset_count, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_split_novel_can_still_apply_chapter_rule() {
+        let conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', '', 'UTF-8', 'pending_split', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        ensure_chapter_split_allowed(&conn, "novel-1").expect("pending split can apply");
+    }
+
+    #[test]
+    fn imported_novel_with_processing_trace_cannot_be_resplit() {
         let conn = Connection::open_in_memory().expect("open db");
         init_db(&conn).expect("init db");
         conn.execute(
@@ -340,7 +487,98 @@ mod tests {
             [],
         )
         .expect("insert novel");
-        let error = ensure_pending_split(&conn, "novel-1").expect_err("should reject imported");
-        assert!(error.contains("已经生成章节"));
+        conn.execute(
+            "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_json, rewrite_text, analysis_status, rewrite_status)
+             VALUES ('chapter-1', 'novel-1', 1, '第一章', '正文', '{\"summary\":\"已分析\"}', '', 'completed', 'pending')",
+            [],
+        )
+        .expect("insert chapter");
+        let error = ensure_chapter_split_allowed(&conn, "novel-1")
+            .expect_err("processed chapter should reject");
+        assert!(error.contains("已开始分析或改写"));
+    }
+
+    #[test]
+    fn imported_novel_with_rewrite_text_cannot_be_resplit_even_when_status_pending() {
+        let conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', '', 'UTF-8', 'imported', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, rewrite_text, analysis_status, rewrite_status)
+             VALUES ('chapter-1', 'novel-1', 1, '第一章', '正文', '改写稿', 'pending', 'pending')",
+            [],
+        )
+        .expect("insert chapter");
+        let error =
+            ensure_chapter_split_allowed(&conn, "novel-1").expect_err("rewrite text should reject");
+        assert!(error.contains("已开始分析或改写"));
+    }
+
+    #[test]
+    fn imported_novel_with_task_history_cannot_be_resplit() {
+        let conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', '', 'UTF-8', 'imported', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO jobs (id, novel_id, job_type, status, current_chapter, total_chapters, message, created_at, updated_at)
+             VALUES ('job-1', 'novel-1', 'analysis', 'completed', 1, 1, '完成', 'now', 'now')",
+            [],
+        )
+        .expect("insert job");
+        let error =
+            ensure_chapter_split_allowed(&conn, "novel-1").expect_err("job history should reject");
+        assert!(error.contains("已开始分析或改写"));
+    }
+
+    #[test]
+    fn imported_novel_with_auto_checkpoint_cannot_be_resplit() {
+        let conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', '', 'UTF-8', 'imported', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, status, profile_ids, created_at, updated_at)
+             VALUES ('novel-1', 0, 0, 'paused', '[]', 'now', 'now')",
+            [],
+        )
+        .expect("insert checkpoint");
+        let error =
+            ensure_chapter_split_allowed(&conn, "novel-1").expect_err("checkpoint should reject");
+        assert!(error.contains("已开始分析或改写"));
+    }
+
+    #[test]
+    fn imported_novel_with_non_empty_canon_asset_cannot_be_resplit() {
+        let conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', '', 'UTF-8', 'imported', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO canon_assets (novel_id, kind, content, updated_at)
+             VALUES ('novel-1', '人物卡', '手动设定', 'now')",
+            [],
+        )
+        .expect("insert asset");
+        let error = ensure_chapter_split_allowed(&conn, "novel-1")
+            .expect_err("manual canon asset should reject");
+        assert!(error.contains("手动一致性资产"));
     }
 }

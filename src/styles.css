@@ -991,6 +991,26 @@ pre {
   max-width: none;
 }
 
+.chapter-rule-status {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  color: var(--color-text-muted);
+  font-size: 0.94rem;
+  padding: 12px 14px;
+}
+
+.chapter-rule-status.can-apply {
+  background: var(--color-brand-soft);
+  border-color: var(--color-brand);
+  color: var(--color-brand-active);
+}
+
+.chapter-rule-status.blocked {
+  background: var(--color-danger-soft);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
 .chapter-rule-editor {
   display: flex;
   flex-direction: column;
@@ -1288,6 +1308,134 @@ textarea:focus-visible {
 
 .novel-settings-section {
   max-width: 980px;
+}
+
+.novel-settings-page {
+  gap: var(--space-4);
+}
+
+.novel-settings-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-tabs {
+  align-items: center;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  max-width: 520px;
+  padding: 4px;
+}
+
+.settings-tabs button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  box-shadow: none;
+  justify-content: center;
+  min-height: 36px;
+}
+
+.settings-tabs button.active,
+.settings-tabs button[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.novel-settings-form {
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.novel-settings-form .settings-section {
+  max-width: 980px;
+}
+
+.additional-name-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.additional-name-row {
+  align-items: end;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 40px;
+}
+
+.relationship-target-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.relationship-target-row {
+  align-items: end;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1.4fr) 40px;
+}
+
+.additional-name-remove {
+  min-height: 40px;
+  width: 40px;
+}
+
+.additional-name-add {
+  margin-top: var(--space-3);
+}
+
+.advanced-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-mode-field {
+  grid-column: 1 / -1;
+}
+
+.settings-preview-section {
+  max-width: 980px;
+}
+
+.settings-preview-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.settings-preview-list > div {
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: 150px minmax(0, 1fr);
+  padding: 12px 14px;
+}
+
+.settings-preview-list dt {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.settings-preview-list dd {
+  color: var(--text-primary);
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .core-settings-section {
@@ -1839,6 +1987,24 @@ textarea:focus-visible {
     grid-row: auto;
   }
 
+  .additional-name-row,
+  .relationship-target-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .additional-name-remove {
+    justify-self: start;
+  }
+
+  .settings-tabs {
+    max-width: none;
+    width: 100%;
+  }
+
+  .settings-preview-list > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .canon-panel {
     grid-row: auto;
   }
@@ -2345,6 +2511,20 @@ label {
   font-size: 12px;
   font-weight: 650;
   margin: 4px 0 0;
+}
+
+.compare-quality-header-actions {
+  align-items: center;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.compare-quality-ignore-button {
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .compare-quality-filters {

@@ -106,6 +106,7 @@ let novelSettings: NovelSettings = {
   body_type: "少女",
   rewrite_mode: "strict",
   advanced_settings: "",
+  relationship_targets: "[]",
   updated_at: now
 };
 
@@ -348,6 +349,7 @@ export async function invokeBrowserMock(
         body_type: String(args?.bodyType ?? "少女"),
         rewrite_mode: args?.rewriteMode === "creative" ? "creative" : "strict",
         advanced_settings: String(args?.advancedSettings ?? ""),
+        relationship_targets: String(args?.relationshipTargets ?? "[]"),
         updated_at: now
       };
       return { ...novelSettings };

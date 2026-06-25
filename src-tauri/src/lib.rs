@@ -996,6 +996,9 @@ async fn ensure_name_mapping_asset(
             settings.rewritten_protagonist_name.trim(),
         );
     }
+    for entry in additional_feminize_name_mappings(&settings.additional_feminize_names) {
+        upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
+    }
 
     let missing_sources = required_names
         .iter()
@@ -1208,8 +1211,8 @@ fn required_feminized_name_sources(settings: &NovelSettings) -> Vec<String> {
     for name in settings.protagonist_aliases.lines() {
         push_unique_name(&mut names, name.trim());
     }
-    for name in settings.additional_feminize_names.lines() {
-        push_unique_name(&mut names, name.trim());
+    for name in additional_feminize_name_sources(&settings.additional_feminize_names) {
+        push_unique_name(&mut names, &name);
     }
     names
 }
@@ -1279,6 +1282,9 @@ fn build_name_mapping_asset_content(
             settings.protagonist_name.trim(),
             settings.rewritten_protagonist_name.trim(),
         );
+    }
+    for entry in additional_feminize_name_mappings(&settings.additional_feminize_names) {
+        upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
     }
     let protagonist = mappings
         .iter()
@@ -2580,12 +2586,14 @@ fn build_compact_review_constraints(
     } else {
         truncate_text(core_prompt.trim(), 2_000)
     };
+    let relationship_targets = relationship_targets_summary(&settings.relationship_targets);
     let canon_summary = compact_review_canon(canon_text);
     format!(
-        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化姓名：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、主角改名后的同名/旧名/以旧名某字为名等姓名逻辑矛盾、未指定角色误改性别、混合性别群体或含男性成员的群体被误称为“她们”、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。标题默认保留；marker index 不是标题编号。仅与主角原名共享单字的未指定 NPC 不得当作主角残留。性别不明的动物、灵兽等非人生物保留原文代词可通过。明显的作者更新提示、求票互动、简短勘误、分隔线和孤立乱码可删除；完本感言、卷末后记、正式后记、番外和剧情正文不可删除。只有确认全员女性时才使用“她们”；群体含男性成员时使用“他们”或准确群体称呼。",
+        "复检约束摘要：\n- 主角原名：{}\n- 主角改写名：{}\n- 其他指定女性化人物/姓名映射：{}\n- 重点百合互动对象：{}\n- 身材/体型：{} / {}\n- 模式：{}\n- 高级设定：{}\n- 核心设定：{}\n\n相关一致性资料：\n{}\n\n只判断 blocking：主角/指定角色明确男性残留、用户指定的 `原姓名 -> 改写后姓名` 未被逐字使用、主角改名后的同名/旧名/以旧名某字为名等姓名逻辑矛盾、未指定角色误改性别、混合性别群体或含男性成员的群体被误称为“她们”、逻辑/边界/缺句/重复/串章、外貌关系或核心设定实质矛盾。重点百合互动对象用于维护关系连续性，不能作为误改未指定角色性别或改变主线逻辑的理由。标题默认保留；marker index 不是标题编号。仅与主角原名共享单字的未指定 NPC 不得当作主角残留。性别不明的动物、灵兽等非人生物保留原文代词可通过。明显的作者更新提示、求票互动、简短勘误、分隔线和孤立乱码可删除；完本感言、卷末后记、正式后记、番外和剧情正文不可删除。只有确认全员女性时才使用“她们”；群体含男性成员时使用“他们”或准确群体称呼。",
         settings.protagonist_name.trim(),
         rewritten_name,
         additional_names,
+        relationship_targets,
         settings.bust,
         settings.body_type,
         rewrite_mode_label(&settings.rewrite_mode),
@@ -2731,6 +2739,7 @@ fn build_targeted_revision_prompt(
     } else {
         truncate_text(settings.advanced_settings.trim(), 1_200)
     };
+    let relationship_targets = relationship_targets_summary(&settings.relationship_targets);
     let shard_context = if shard_context.trim().is_empty() {
         "无".to_string()
     } else {
@@ -2744,7 +2753,8 @@ fn build_targeted_revision_prompt(
 {}
 
 必须遵守：
-- 主角原名：{}；主角改写名：{}；其他指定女性化姓名：{}。
+- 主角原名：{}；主角改写名：{}；其他指定女性化人物/姓名映射：{}。
+- 重点百合互动对象：{}。这些对象只用于维护百合互动和关系连续性，不得因此改变未指定角色性别或原文主线逻辑。
 - 身材/体型：{} / {}；改写模式：{}。
 - 核心设定：{}
 - 高级设定：{}
@@ -2782,6 +2792,7 @@ fn build_targeted_revision_prompt(
         } else {
             settings.additional_feminize_names.trim()
         },
+        relationship_targets,
         settings.bust,
         settings.body_type,
         rewrite_mode_label(&settings.rewrite_mode),
@@ -5155,7 +5166,7 @@ fn load_chapter_batches(conn: &Connection, novel_id: &str) -> Result<Vec<Chapter
 
 fn load_novel_settings(conn: &Connection, novel_id: &str) -> Result<Option<NovelSettings>, String> {
     let result = conn.query_row(
-        "SELECT novel_id, protagonist_name, protagonist_aliases, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, updated_at FROM novel_settings WHERE novel_id = ?1",
+        "SELECT novel_id, protagonist_name, protagonist_aliases, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, relationship_targets, updated_at FROM novel_settings WHERE novel_id = ?1",
         params![novel_id],
         row_to_novel_settings,
     );
@@ -6558,7 +6569,8 @@ fn row_to_novel_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<NovelSetti
         body_type: row.get(6)?,
         rewrite_mode: row.get(7)?,
         advanced_settings: row.get(8)?,
-        updated_at: row.get(9)?,
+        relationship_targets: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -6793,6 +6805,127 @@ fn normalize_name_list(input: &str) -> String {
     names.join("\n")
 }
 
+pub(crate) fn normalize_additional_feminize_names(input: &str) -> String {
+    let mut entries: Vec<(String, Option<String>)> = Vec::new();
+    for value in input.split(['\n', '\r', ',', '，', '、', ';', '；']) {
+        let Some((source, target)) = parse_additional_feminize_name_entry(value) else {
+            continue;
+        };
+        if let Some(existing) = entries.iter_mut().find(|entry| entry.0 == source) {
+            if existing.1.as_deref().unwrap_or("").is_empty() && target.is_some() {
+                existing.1 = target;
+            }
+        } else {
+            entries.push((source, target));
+        }
+    }
+    entries
+        .into_iter()
+        .map(|(source, target)| {
+            if let Some(target) = target {
+                format!("{source} -> {target}")
+            } else {
+                source
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn additional_feminize_name_sources(input: &str) -> Vec<String> {
+    normalize_additional_feminize_names(input)
+        .lines()
+        .filter_map(|line| parse_additional_feminize_name_entry(line).map(|(source, _)| source))
+        .collect()
+}
+
+pub(crate) fn additional_feminize_name_mappings(input: &str) -> Vec<NameMappingEntry> {
+    normalize_additional_feminize_names(input)
+        .lines()
+        .filter_map(|line| {
+            let (source, target) = parse_additional_feminize_name_entry(line)?;
+            let target = target?;
+            Some(NameMappingEntry { source, target })
+        })
+        .collect()
+}
+
+fn parse_additional_feminize_name_entry(input: &str) -> Option<(String, Option<String>)> {
+    let value = input.trim();
+    if value.is_empty() {
+        return None;
+    }
+    for delimiter in ["->", "=>", "→"] {
+        if let Some((source, target)) = value.split_once(delimiter) {
+            let source = source.trim();
+            let target = target.trim();
+            if source.is_empty() {
+                return None;
+            }
+            let target = if target.is_empty() || target == source {
+                None
+            } else {
+                Some(target.to_string())
+            };
+            return Some((source.to_string(), target));
+        }
+    }
+    Some((value.to_string(), None))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RelationshipTargetEntry {
+    name: String,
+    relationship: String,
+    notes: String,
+}
+
+pub(crate) fn normalize_relationship_targets(input: &str) -> String {
+    let Ok(rows) = serde_json::from_str::<Vec<RelationshipTargetEntry>>(input) else {
+        return "[]".to_string();
+    };
+    let entries = rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = row.name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(RelationshipTargetEntry {
+                name: name.to_string(),
+                relationship: row.relationship.trim().to_string(),
+                notes: row.notes.trim().to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub(crate) fn relationship_targets_summary(input: &str) -> String {
+    let normalized = normalize_relationship_targets(input);
+    let Ok(rows) = serde_json::from_str::<Vec<RelationshipTargetEntry>>(&normalized) else {
+        return "无".to_string();
+    };
+    if rows.is_empty() {
+        return "无".to_string();
+    }
+    rows.into_iter()
+        .map(|row| {
+            let relationship = if row.relationship.is_empty() {
+                "关系未指定".to_string()
+            } else {
+                row.relationship
+            };
+            if row.notes.is_empty() {
+                format!("{}（{}）", row.name, relationship)
+            } else {
+                format!("{}（{}）：{}", row.name, relationship, row.notes)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn sanitize_file_name(input: &str) -> String {
     let cleaned = input
         .chars()
@@ -6864,8 +6997,62 @@ mod tests {
             body_type: "少女".to_string(),
             rewrite_mode: "strict".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         }
+    }
+
+    #[test]
+    fn additional_feminize_name_helpers_preserve_optional_targets() {
+        let normalized =
+            normalize_additional_feminize_names(" 林动 -> 林筝 \n唐三，林动 -> 林冬\n空名 ->  ");
+
+        assert_eq!(normalized, "林动 -> 林筝\n唐三\n空名");
+        assert_eq!(
+            additional_feminize_name_sources(&normalized),
+            vec!["林动".to_string(), "唐三".to_string(), "空名".to_string()]
+        );
+        let mappings = additional_feminize_name_mappings(&normalized);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].source, "林动");
+        assert_eq!(mappings[0].target, "林筝");
+    }
+
+    #[test]
+    fn required_feminized_sources_ignore_additional_mapping_targets() {
+        let mut settings = sample_novel_settings();
+        settings.protagonist_aliases = "炎儿".to_string();
+        settings.additional_feminize_names = "林动 -> 林筝\n唐三".to_string();
+
+        assert_eq!(
+            required_feminized_name_sources(&settings),
+            vec![
+                "萧炎".to_string(),
+                "炎儿".to_string(),
+                "林动".to_string(),
+                "唐三".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn relationship_targets_are_normalized_and_summarized() {
+        let input = r#"
+        [
+          {"name":" 余靖秋 ","relationship":" 女主候选 ","notes":" 克制暧昧 "},
+          {"name":"","relationship":"忽略","notes":"无姓名"},
+          {"name":"池丘白","relationship":"","notes":""}
+        ]
+        "#;
+
+        let normalized = normalize_relationship_targets(input);
+        assert_eq!(
+            normalized,
+            r#"[{"name":"余靖秋","relationship":"女主候选","notes":"克制暧昧"},{"name":"池丘白","relationship":"","notes":""}]"#
+        );
+        let summary = relationship_targets_summary(&normalized);
+        assert!(summary.contains("余靖秋（女主候选）：克制暧昧"));
+        assert!(summary.contains("池丘白（关系未指定）"));
     }
 
     fn sample_review_issue(
@@ -7828,6 +8015,7 @@ mod tests {
             body_type: "少女".to_string(),
             rewrite_mode: "strict".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         };
         let chapter = sample_chapter(1, "第一章", "萧炎与小医仙进入青山镇。");
@@ -7975,6 +8163,7 @@ mod tests {
             body_type: "少女".to_string(),
             rewrite_mode: "strict".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         };
         let mut creative_settings = strict_settings.clone();
@@ -7993,7 +8182,7 @@ mod tests {
         assert!(strict_prompt.contains("人物外貌特征必须前后一致"));
         assert!(strict_prompt.contains("上一章是金发，下一章不能无理由变成红发"));
         assert!(strict_prompt.contains("人物关系和百合向情绪推进必须连续"));
-        assert!(strict_prompt.contains("只允许主角、用户填写的“其他需要女性化的人物姓名”"));
+        assert!(strict_prompt.contains("只允许主角、用户填写的“其他指定女性化人物/姓名映射”"));
         assert!(strict_prompt.contains("其他未指定人物必须保持原文性别、身份、称谓和人称代词"));
         assert!(strict_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
         assert!(strict_prompt.contains("保留原文中的人称代词和称谓"));
@@ -8022,6 +8211,7 @@ mod tests {
             body_type: "少女".to_string(),
             rewrite_mode: "strict".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         };
         let chapters = vec![sample_chapter(1, "第一章", "萧炎走进大厅。")];
@@ -8068,6 +8258,7 @@ mod tests {
             body_type: "少女".to_string(),
             rewrite_mode: "strict".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         };
 
@@ -8080,31 +8271,41 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_settings_prompt_includes_relationship_targets() {
+        let mut settings = sample_novel_settings();
+        settings.relationship_targets = normalize_relationship_targets(
+            r#"[{"name":"余靖秋","relationship":"女主候选","notes":"克制暧昧"}]"#,
+        );
+
+        let prompt = build_rewrite_settings_prompt(&settings);
+
+        assert!(prompt.contains("重点百合互动对象"));
+        assert!(prompt.contains("余靖秋（女主候选）：克制暧昧"));
+        assert!(prompt.contains("不得因此改变未指定角色性别"));
+        assert!(prompt.contains("原文主线逻辑"));
+    }
+
+    #[test]
     fn name_mapping_asset_persists_forced_and_generated_names() {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
             protagonist_aliases: "".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
-            additional_feminize_names: "林动\n唐三".to_string(),
+            additional_feminize_names: "林动 -> 林筝\n唐三".to_string(),
             bust: "平胸".to_string(),
             body_type: "少女".to_string(),
             rewrite_mode: "strict".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         };
         let content = build_name_mapping_asset_content(
             &settings,
-            vec![
-                NameMappingEntry {
-                    source: "林动".to_string(),
-                    target: "林彤".to_string(),
-                },
-                NameMappingEntry {
-                    source: "唐三".to_string(),
-                    target: fallback_feminized_name("唐三"),
-                },
-            ],
+            vec![NameMappingEntry {
+                source: "唐三".to_string(),
+                target: fallback_feminized_name("唐三"),
+            }],
         )
         .expect("valid mapping content");
         let entries = parse_name_mapping_entries(&content);
@@ -8116,11 +8317,13 @@ mod tests {
             .any(|entry| entry.source == "萧炎" && entry.target == "萧妍"));
         assert!(entries
             .iter()
-            .any(|entry| entry.source == "林动" && entry.target == "林彤"));
+            .any(|entry| entry.source == "林动" && entry.target == "林筝"));
         assert!(entries
             .iter()
             .any(|entry| entry.source == "唐三" && entry.target == "唐姗"));
         assert!(prompt.contains("姓名映射表"));
+        assert!(prompt.contains("其他指定女性化人物/姓名映射：林动 -> 林筝"));
+        assert!(prompt.contains("必须逐字使用指定改写名"));
         assert!(prompt.contains("并发分片和后续批次也必须继续使用同一份映射表"));
     }
 
@@ -8137,6 +8340,7 @@ mod tests {
             body_type: "少女".to_string(),
             rewrite_mode: "strict".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         };
 
@@ -8173,6 +8377,7 @@ mod tests {
             body_type: "少女".to_string(),
             rewrite_mode: "creative".to_string(),
             advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
             updated_at: "now".to_string(),
         };
         let rewrite = ParsedChapterRewrite {

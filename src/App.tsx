@@ -30,7 +30,8 @@ import { Modal } from "./components/common/Modal";
 import { getStatusTone, StatusBadge } from "./components/common/StatusBadge";
 import { UpdateInstallDialog } from "./components/common/UpdateInstallDialog";
 import { ModelProfiles } from "./components/Settings/ModelProfiles";
-import { NovelSettingsFields, NovelSettingsView } from "./components/Settings/NovelSettings";
+import { NovelSettingsView } from "./components/Settings/NovelSettings";
+import { novelSettingsDraftsEqual } from "./components/Settings/novelSettingsDraftState";
 import { CoreSettingsPage } from "./components/pages/CoreSettingsPage";
 import { ChapterRulesPage } from "./components/pages/ChapterRulesPage";
 import { LogsPage } from "./components/pages/LogsPage";
@@ -117,7 +118,8 @@ const emptyNovelSettings: NovelSettingsDraft = {
   bust: "平胸",
   body_type: "少女",
   rewrite_mode: "strict",
-  advanced_settings: ""
+  advanced_settings: "",
+  relationship_targets: "[]"
 };
 
 const savedApiKeyMask = "********";
@@ -349,12 +351,13 @@ export default function App() {
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
   const [estimateCollapsed, setEstimateCollapsed] = useState(false);
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
-  const [settingsDialog, setSettingsDialog] = useState<"basic" | "advanced" | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => readInitialTheme());
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("workspace");
   const [compareDirty, setCompareDirty] = useState(false);
   const [pendingActiveView, setPendingActiveView] = useState<ActiveView | null>(null);
+  const [pendingNovelSettingsActiveView, setPendingNovelSettingsActiveView] = useState<ActiveView | null>(null);
+  const [savedNovelSettingsDraft, setSavedNovelSettingsDraft] = useState<NovelSettingsDraft>(emptyNovelSettings);
   const [workspaceSection, setWorkspaceSection] = useState<"main" | "canon">("main");
   const [tokenStats, setTokenStats] = useState<TokenUsageReport | null>(null);
   const initialTokenStatsRangeRef = useRef(defaultTokenStatsDateRange());
@@ -390,6 +393,7 @@ export default function App() {
   const tokenStatsDirtyRef = useRef(false);
   const tokenStatsLoadingRef = useRef(false);
   const pendingActiveViewActionRef = useRef<(() => void) | null>(null);
+  const pendingNovelSettingsActiveViewActionRef = useRef<(() => void) | null>(null);
 
   const commitActiveView = useCallback((nextView: ActiveView) => {
     if (nextView !== "compare") {
@@ -409,9 +413,17 @@ export default function App() {
       setPendingActiveView(nextView);
       return;
     }
+    if (
+      activeView === "novel-settings"
+      && !novelSettingsDraftsEqual(novelSettingsDraft, savedNovelSettingsDraft)
+    ) {
+      pendingNovelSettingsActiveViewActionRef.current = afterNavigate ?? null;
+      setPendingNovelSettingsActiveView(nextView);
+      return;
+    }
     commitActiveView(nextView);
     afterNavigate?.();
-  }, [activeView, commitActiveView]);
+  }, [activeView, commitActiveView, novelSettingsDraft, savedNovelSettingsDraft]);
 
   const cancelPendingActiveView = useCallback(() => {
     pendingActiveViewActionRef.current = null;
@@ -427,6 +439,34 @@ export default function App() {
     commitActiveView(nextView);
     action?.();
   }, [commitActiveView, pendingActiveView]);
+
+  const cancelPendingNovelSettingsActiveView = useCallback(() => {
+    pendingNovelSettingsActiveViewActionRef.current = null;
+    setPendingNovelSettingsActiveView(null);
+  }, []);
+
+  const leavePendingNovelSettingsActiveView = useCallback(() => {
+    const nextView = pendingNovelSettingsActiveView;
+    const action = pendingNovelSettingsActiveViewActionRef.current;
+    pendingNovelSettingsActiveViewActionRef.current = null;
+    setPendingNovelSettingsActiveView(null);
+    setNovelSettingsDraft(savedNovelSettingsDraft);
+    if (!nextView) return;
+    commitActiveView(nextView);
+    action?.();
+  }, [commitActiveView, pendingNovelSettingsActiveView, savedNovelSettingsDraft, setNovelSettingsDraft]);
+
+  const saveAndLeavePendingNovelSettingsActiveView = useCallback(async () => {
+    const nextView = pendingNovelSettingsActiveView;
+    const action = pendingNovelSettingsActiveViewActionRef.current;
+    const saved = await saveNovelSettings({ navigateAfterSave: false });
+    if (!saved) return;
+    pendingNovelSettingsActiveViewActionRef.current = null;
+    setPendingNovelSettingsActiveView(null);
+    if (!nextView) return;
+    commitActiveView(nextView);
+    action?.();
+  }, [commitActiveView, pendingNovelSettingsActiveView]);
 
   const autoProgressPercent = useMemo(() => {
     if (!job || !["auto", "auto_batch"].includes(job.job_type) || job.total_chapters <= 0) return 0;
@@ -691,14 +731,14 @@ export default function App() {
         setNovelPendingDeletion(null);
         return;
       }
-      if (activeView !== "workspace" && !settingsDialog && !novelPendingDeletion && !pendingActiveView) {
+      if (activeView !== "workspace" && !novelPendingDeletion && !pendingActiveView && !pendingNovelSettingsActiveView) {
         requestActiveView("workspace");
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, busy, novelPendingDeletion, pendingActiveView, requestActiveView, settingsDialog]);
+  }, [activeView, busy, novelPendingDeletion, pendingActiveView, pendingNovelSettingsActiveView, requestActiveView]);
 
   useEffect(() => {
     const profile = selectedProfile;
@@ -793,20 +833,21 @@ export default function App() {
         : batchIdContainingChapter(next, nextChapterId);
     setSelectedChapterId(nextChapterId);
     setSelectedBatchId(nextBatchId);
-    setNovelSettingsDraft(
-      next.settings
-        ? {
-            protagonist_name: next.settings.protagonist_name,
-            protagonist_aliases: next.settings.protagonist_aliases ?? "",
-            rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
-            additional_feminize_names: next.settings.additional_feminize_names,
-            bust: next.settings.bust,
-            body_type: next.settings.body_type,
-            rewrite_mode: next.settings.rewrite_mode === "creative" ? "creative" : "strict",
-            advanced_settings: next.settings.advanced_settings
-          }
-        : emptyNovelSettings
-    );
+    const nextSettingsDraft: NovelSettingsDraft = next.settings
+      ? {
+          protagonist_name: next.settings.protagonist_name,
+          protagonist_aliases: next.settings.protagonist_aliases ?? "",
+          rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
+          additional_feminize_names: next.settings.additional_feminize_names,
+          bust: next.settings.bust,
+          body_type: next.settings.body_type,
+          rewrite_mode: next.settings.rewrite_mode === "creative" ? "creative" : "strict",
+          advanced_settings: next.settings.advanced_settings,
+          relationship_targets: next.settings.relationship_targets ?? "[]"
+        }
+      : emptyNovelSettings;
+    setNovelSettingsDraft(nextSettingsDraft);
+    setSavedNovelSettingsDraft(nextSettingsDraft);
     setOpenNovelMenuId("");
     setWorkspaceSection("main");
     setActiveView("workspace");
@@ -831,7 +872,7 @@ export default function App() {
         setSelectedBatchId(batchIdContainingChapter(next, preservedChapterId));
       }
       if (next.settings) {
-        setNovelSettingsDraft({
+        const nextSettingsDraft: NovelSettingsDraft = {
           protagonist_name: next.settings.protagonist_name,
           protagonist_aliases: next.settings.protagonist_aliases ?? "",
           rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
@@ -839,8 +880,11 @@ export default function App() {
           bust: next.settings.bust,
           body_type: next.settings.body_type,
           rewrite_mode: next.settings.rewrite_mode === "creative" ? "creative" : "strict",
-          advanced_settings: next.settings.advanced_settings
-        });
+          advanced_settings: next.settings.advanced_settings,
+          relationship_targets: next.settings.relationship_targets ?? "[]"
+        };
+        setNovelSettingsDraft(nextSettingsDraft);
+        setSavedNovelSettingsDraft(nextSettingsDraft);
       }
       await refreshLogs(novelId);
     } catch {
@@ -943,14 +987,15 @@ export default function App() {
       showNotice("请先上传小说文件");
       return;
     }
-    setSettingsDialog("basic");
+    requestActiveView("novel-settings");
   }
 
-  async function saveNovelSettings() {
-    if (!detail) return;
+  async function saveNovelSettings(options: { navigateAfterSave?: boolean } = {}) {
+    const navigateAfterSave = options.navigateAfterSave ?? true;
+    if (!detail) return false;
     if (!novelSettingsDraft.protagonist_name.trim()) {
       showNotice("请填写主角姓名。");
-      return;
+      return false;
     }
     setBusy("novel-settings");
     setNotice("");
@@ -964,10 +1009,11 @@ export default function App() {
         bust: novelSettingsDraft.bust,
         bodyType: novelSettingsDraft.body_type,
         rewriteMode: novelSettingsDraft.rewrite_mode,
-        advancedSettings: novelSettingsDraft.advanced_settings
+        advancedSettings: novelSettingsDraft.advanced_settings,
+        relationshipTargets: novelSettingsDraft.relationship_targets
       });
       setDetail({ ...detail, settings: saved });
-      setNovelSettingsDraft({
+      const nextDraft: NovelSettingsDraft = {
         protagonist_name: saved.protagonist_name,
         protagonist_aliases: saved.protagonist_aliases ?? "",
         rewritten_protagonist_name: saved.rewritten_protagonist_name ?? "",
@@ -975,13 +1021,19 @@ export default function App() {
         bust: saved.bust,
         body_type: saved.body_type,
         rewrite_mode: saved.rewrite_mode === "creative" ? "creative" : "strict",
-        advanced_settings: saved.advanced_settings
-      });
-      setSettingsDialog(null);
-      setActiveView("workspace");
+        advanced_settings: saved.advanced_settings,
+        relationship_targets: saved.relationship_targets ?? "[]"
+      };
+      setNovelSettingsDraft(nextDraft);
+      setSavedNovelSettingsDraft(nextDraft);
+      if (navigateAfterSave) {
+        commitActiveView("workspace");
+      }
       showNotice("基本设定已保存。");
+      return true;
     } catch (error) {
       showNotice(String(error));
+      return false;
     } finally {
       setBusy("");
     }
@@ -1096,7 +1148,6 @@ export default function App() {
           setSelectedChapterId("");
           setSelectedBatchId("");
           setNovelSettingsDraft(emptyNovelSettings);
-          setSettingsDialog(null);
           setLogs([]);
         }
       }
@@ -1232,7 +1283,7 @@ export default function App() {
     }
     if (!hasCompleteNovelSettings) {
       showNotice("请先填写设定");
-      setSettingsDialog("basic");
+      requestActiveView("novel-settings");
       return;
     }
     if (!selectedBatch) {
@@ -1276,7 +1327,7 @@ export default function App() {
     }
     if (!hasCompleteNovelSettings) {
       showNotice("请先填写设定");
-      setSettingsDialog("basic");
+      requestActiveView("novel-settings");
       return;
     }
     if (!selectedBatch) {
@@ -1323,7 +1374,7 @@ export default function App() {
     }
     if (!hasCompleteNovelSettings) {
       showNotice("请先填写设定");
-      setSettingsDialog("basic");
+      requestActiveView("novel-settings");
       return;
     }
     const recovery = autoRunRecoveries.find((item) => item.novel_id === detail.novel.id);
@@ -2044,7 +2095,7 @@ export default function App() {
       </aside>
 
       <section className="workspace">
-        {!["compare", "settings", "token-stats", "logs", "chapter-rules"].includes(activeView) && (
+        {!["compare", "settings", "token-stats", "logs", "chapter-rules", "novel-settings"].includes(activeView) && (
         <header className="topbar">
           <div>
             <h1>
@@ -2371,6 +2422,8 @@ export default function App() {
         {activeView === "chapter-rules" && (
           <ChapterRulesPage
             novel={detail?.novel ?? null}
+            chapters={detail?.chapters ?? []}
+            canonAssets={detail?.canon_assets ?? []}
             busy={busy}
             processing={processingTaskActive}
             onBack={() => requestActiveView("workspace")}
@@ -2566,74 +2619,6 @@ export default function App() {
           </footer>
         </Modal>
       )}
-      {settingsDialog && (
-        <Modal labelledBy="settings-dialog-title">
-            {settingsDialog === "basic" ? (
-              <>
-                <header className="dialog-titlebar">
-                  <h2 id="settings-dialog-title">基本设定</h2>
-                  <button
-                    className="dialog-close"
-                    type="button"
-                    aria-label="关闭基本设定"
-                    title="关闭"
-                    onClick={() => setSettingsDialog(null)}
-                  >
-                    <X size={16} />
-                  </button>
-                </header>
-                <div className="dialog-body">
-                  <NovelSettingsFields
-                    draft={novelSettingsDraft}
-                    setDraft={setNovelSettingsDraft}
-                    disabled={processingTaskActive}
-                  />
-                </div>
-                <footer className="dialog-actions">
-                  <button onClick={() => setSettingsDialog("advanced")} disabled={busy === "novel-settings" || processingTaskActive}>
-                    高级设定
-                  </button>
-                  <button className="dialog-primary" onClick={saveNovelSettings} disabled={!detail || busy === "novel-settings" || processingTaskActive}>
-                    确定
-                  </button>
-                </footer>
-              </>
-            ) : (
-              <>
-                <header className="dialog-titlebar">
-                  <h2 id="settings-dialog-title">高级设定</h2>
-                  <button
-                    className="dialog-close"
-                    type="button"
-                    aria-label="关闭高级设定"
-                    title="关闭"
-                    onClick={() => setSettingsDialog(null)}
-                  >
-                    <X size={16} />
-                  </button>
-                </header>
-                <div className="dialog-body">
-                  <label>
-                    自定义设定
-                    <textarea
-                      className="advanced-settings-input"
-                      value={novelSettingsDraft.advanced_settings}
-                      onChange={(event) =>
-                        setNovelSettingsDraft({ ...novelSettingsDraft, advanced_settings: event.target.value })
-                      }
-                      placeholder="你可以自由输入你需要加入的设定"
-                    />
-                  </label>
-                </div>
-                <footer className="dialog-actions">
-                  <button className="dialog-primary" onClick={() => setSettingsDialog("basic")}>
-                    确定
-                  </button>
-                </footer>
-              </>
-            )}
-        </Modal>
-      )}
       {novelPendingDeletion && (
         <DeleteNovelDialog
           busy={busy === "delete-novel"}
@@ -2678,6 +2663,42 @@ export default function App() {
               onClick={confirmPendingActiveView}
             >
               放弃并离开
+            </button>
+          </footer>
+        </Modal>
+      )}
+      {pendingNovelSettingsActiveView && (
+        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="novel-settings-unsaved-title">
+          <header className="dialog-titlebar">
+            <h2 id="novel-settings-unsaved-title">基本设定尚未保存</h2>
+            <button
+              className="dialog-close"
+              type="button"
+              aria-label="关闭基本设定未保存提示"
+              title="继续编辑"
+              onClick={cancelPendingNovelSettingsActiveView}
+            >
+              <X size={16} />
+            </button>
+          </header>
+          <div className="dialog-body">
+            <p>当前基本设定有未保存的修改。保存后退出，还是放弃这些修改？</p>
+          </div>
+          <footer className="dialog-actions">
+            <button type="button" onClick={cancelPendingNovelSettingsActiveView}>
+              继续编辑
+            </button>
+            <button type="button" onClick={leavePendingNovelSettingsActiveView}>
+              不保存退出
+            </button>
+            <button
+              type="button"
+              className="dialog-primary"
+              onClick={() => { void saveAndLeavePendingNovelSettingsActiveView(); }}
+              disabled={busy === "novel-settings"}
+            >
+              {busy === "novel-settings" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+              保存并退出
             </button>
           </footer>
         </Modal>

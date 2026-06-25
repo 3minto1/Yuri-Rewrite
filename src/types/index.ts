@@ -49,6 +49,7 @@ export type NovelSettings = {
   body_type: string;
   rewrite_mode: "strict" | "creative";
   advanced_settings: string;
+  relationship_targets: string;
   updated_at: string;
 };
 
@@ -286,6 +287,7 @@ export type NovelSettingsDraft = {
   body_type: string;
   rewrite_mode: "strict" | "creative";
   advanced_settings: string;
+  relationship_targets: string;
 };
 
 export type ExportResult = { path: string };

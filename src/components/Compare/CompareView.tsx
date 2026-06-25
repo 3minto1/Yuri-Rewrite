@@ -36,6 +36,8 @@ type CompareViewProps = {
 
 type QualityFilter = "all" | "error" | "warning";
 
+const qualityIgnoreKeyPrefix = "yuri-rewrite.qualityIgnored.v1.";
+
 type DiffState = DiffResult & {
   loading: boolean;
   chapterId: string;
@@ -322,13 +324,46 @@ function qualityCategoryLabel(issue: QualityIssue) {
   }
 }
 
+function qualityIssueFingerprint(issue: QualityIssue) {
+  return [
+    issue.chapterId,
+    issue.category,
+    issue.severity,
+    issue.message,
+    issue.query,
+    issue.evidence
+  ].join("\u001f");
+}
+
+function loadIgnoredQualityFingerprints(novelId: string) {
+  if (!novelId) return new Set<string>();
+  try {
+    const raw = window.localStorage.getItem(`${qualityIgnoreKeyPrefix}${novelId}`);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function storeIgnoredQualityFingerprints(novelId: string, fingerprints: Set<string>) {
+  if (!novelId) return;
+  try {
+    window.localStorage.setItem(`${qualityIgnoreKeyPrefix}${novelId}`, JSON.stringify([...fingerprints]));
+  } catch {
+    // Ignore localStorage failures; the in-memory ignore state still works for this session.
+  }
+}
+
 type QualityPanelProps = {
   open: boolean;
   filter: QualityFilter;
   issues: QualityIssue[];
   currentIssueCount: number;
   totalIssueCount: number;
+  canIgnoreCurrent: boolean;
   onClose: () => void;
+  onIgnoreCurrent: () => void;
   onFilterChange: (filter: QualityFilter) => void;
   onIssueClick: (issue: QualityIssue) => void;
 };
@@ -340,7 +375,9 @@ const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
     issues,
     currentIssueCount,
     totalIssueCount,
+    canIgnoreCurrent,
     onClose,
+    onIgnoreCurrent,
     onFilterChange,
     onIssueClick
   } = props;
@@ -352,7 +389,12 @@ const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
           <h2>本地检查</h2>
           <p>当前章 {currentIssueCount} · 全书 {totalIssueCount}</p>
         </div>
-        <button type="button" className="icon-button" aria-label="关闭检查" onClick={onClose}><X size={18} /></button>
+        <div className="compare-quality-header-actions">
+          <button type="button" className="compare-quality-ignore-button" onClick={onIgnoreCurrent} disabled={!canIgnoreCurrent}>
+            忽略当前问题
+          </button>
+          <button type="button" className="icon-button" aria-label="关闭检查" onClick={onClose}><X size={18} /></button>
+        </div>
       </header>
       <div className="compare-quality-filters" role="group" aria-label="检查筛选">
         <button type="button" className={filter === "all" ? "active" : ""} onClick={() => onFilterChange("all")}>全部</button>
@@ -423,6 +465,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [terminateRewriteBusy, setTerminateRewriteBusy] = useState(false);
   const [qualityOpen, setQualityOpen] = useState(false);
   const [qualityFilter, setQualityFilter] = useState<QualityFilter>("all");
+  const [ignoredQualityFingerprints, setIgnoredQualityFingerprints] = useState<Set<string>>(() => new Set());
   const pendingNavigationRef = useRef<(() => void) | null>(null);
   const pendingQualityIssueRef = useRef<QualityIssue | null>(null);
   const deferredQuery = useDeferredValue(query);
@@ -449,25 +492,34 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const originalMatches = useMemo(() => chapterMatches.filter((match) => match.side === "original"), [chapterMatches]);
   const rewriteMatches = useMemo(() => chapterMatches.filter((match) => match.side === "rewrite"), [chapterMatches]);
   const editDirty = editing && editDraft !== rewriteText;
+  const novelId = selectedChapter?.novel_id ?? chapters[0]?.novel_id ?? "";
   const qualityIssues = useMemo(() => scanRewriteQuality(
     chapters,
     novelSettings,
     editing ? { chapterId: selectedChapterId, rewriteText: editDraft } : null
   ), [chapters, editDraft, editing, novelSettings, selectedChapterId]);
+  const activeQualityIssues = useMemo(
+    () => qualityIssues.filter((issue) => !ignoredQualityFingerprints.has(qualityIssueFingerprint(issue))),
+    [ignoredQualityFingerprints, qualityIssues]
+  );
   const currentQualityIssues = useMemo(
-    () => qualityIssues.filter((issue) => issue.chapterId === selectedChapterId),
-    [qualityIssues, selectedChapterId]
+    () => activeQualityIssues.filter((issue) => issue.chapterId === selectedChapterId),
+    [activeQualityIssues, selectedChapterId]
   );
   const visibleQualityIssues = useMemo(() => {
     const filtered = qualityFilter === "all"
-      ? qualityIssues
-      : qualityIssues.filter((issue) => issue.severity === qualityFilter);
+      ? activeQualityIssues
+      : activeQualityIssues.filter((issue) => issue.severity === qualityFilter);
     return [...filtered].sort((left, right) => {
       if (left.chapterId === selectedChapterId && right.chapterId !== selectedChapterId) return -1;
       if (right.chapterId === selectedChapterId && left.chapterId !== selectedChapterId) return 1;
       return left.chapterIndex - right.chapterIndex;
     });
-  }, [qualityFilter, qualityIssues, selectedChapterId]);
+  }, [activeQualityIssues, qualityFilter, selectedChapterId]);
+
+  useEffect(() => {
+    setIgnoredQualityFingerprints(loadIgnoredQualityFingerprints(novelId));
+  }, [novelId]);
 
   useEffect(() => {
     onDirtyChange?.(editDirty);
@@ -532,6 +584,18 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
       navigationTargetRef.current = issue.chapterId;
       onSelectChapter(issue.chapterId);
     });
+  }
+
+  function ignoreCurrentQualityIssues() {
+    if (!novelId || activeQualityIssues.length === 0) return;
+    const next = new Set(ignoredQualityFingerprints);
+    for (const issue of activeQualityIssues) {
+      if (issue.severity === "error" || issue.severity === "warning") {
+        next.add(qualityIssueFingerprint(issue));
+      }
+    }
+    setIgnoredQualityFingerprints(next);
+    storeIgnoredQualityFingerprints(novelId, next);
   }
 
   async function confirmRewriteChapter() {
@@ -740,7 +804,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
           <button className={diffEnabled ? "active" : ""} aria-pressed={diffEnabled} onClick={() => setDiffEnabled((value) => !value)}><GitCompareArrows size={17} />差异</button>
           <button className={qualityOpen ? "active compare-quality-toggle" : "compare-quality-toggle"} aria-pressed={qualityOpen} onClick={() => setQualityOpen((open) => !open)}>
             <ShieldCheck size={17} />检查
-            {qualityIssues.length > 0 && <span className="compare-quality-badge">{qualityIssues.length}</span>}
+            {activeQualityIssues.length > 0 && <span className="compare-quality-badge">{activeQualityIssues.length}</span>}
           </button>
           </div>
           <div className="compare-word-count" aria-label="字数对比">
@@ -803,8 +867,10 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
         filter={qualityFilter}
         issues={visibleQualityIssues}
         currentIssueCount={currentQualityIssues.length}
-        totalIssueCount={qualityIssues.length}
+        totalIssueCount={activeQualityIssues.length}
+        canIgnoreCurrent={activeQualityIssues.some((issue) => issue.severity === "error" || issue.severity === "warning")}
         onClose={() => setQualityOpen(false)}
+        onIgnoreCurrent={ignoreCurrentQualityIssues}
         onFilterChange={setQualityFilter}
         onIssueClick={focusQualityIssue}
       />

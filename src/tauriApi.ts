@@ -59,6 +59,7 @@ type CommandMap = {
       bodyType: string;
       rewriteMode: "strict" | "creative";
       advancedSettings: string;
+      relationshipTargets: string;
     };
     result: NovelSettings;
   };

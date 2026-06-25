@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChapterRulesPage } from "./ChapterRulesPage";
-import type { ChapterRulePreview, Novel } from "../../types";
+import type { CanonAsset, Chapter, ChapterRulePreview, Novel } from "../../types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn()
@@ -18,6 +18,25 @@ const novel: Novel = {
   created_at: "now"
 };
 
+const importedNovel: Novel = {
+  ...novel,
+  status: "imported"
+};
+
+const pendingChapter: Chapter = {
+  id: "chapter-1",
+  novel_id: "novel-1",
+  index: 1,
+  title: "第一章",
+  original_text: "正文",
+  analysis_status: "pending",
+  rewrite_status: "pending"
+};
+
+const emptyCanonAssets: CanonAsset[] = [
+  { novel_id: "novel-1", kind: "人物卡", content: "", updated_at: "now" }
+];
+
 const preview: ChapterRulePreview = {
   total_chapters: 3,
   can_apply: true,
@@ -32,6 +51,7 @@ const preview: ChapterRulePreview = {
 describe("ChapterRulesPage", () => {
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     mocks.invoke.mockReset();
   });
 
@@ -60,6 +80,8 @@ describe("ChapterRulesPage", () => {
     render(
       <ChapterRulesPage
         novel={novel}
+        chapters={[]}
+        canonAssets={[]}
         busy=""
         processing={false}
         onBack={vi.fn()}
@@ -88,5 +110,100 @@ describe("ChapterRulesPage", () => {
       novelId: "novel-1"
     })));
     await waitFor(() => expect(onApplied).toHaveBeenCalledWith("novel-1"));
+  });
+
+  it("allows an imported novel without processing traces to resplit after confirmation", async () => {
+    const onApplied = vi.fn(async () => undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_chapter_rule") return null;
+      if (command === "preview_chapter_rule") return preview;
+      if (command === "save_chapter_rule_and_split") return { novel_id: novel.id, rule: {}, updated_at: "now" };
+      return undefined;
+    });
+
+    render(
+      <ChapterRulesPage
+        novel={importedNovel}
+        chapters={[pendingChapter]}
+        canonAssets={emptyCanonAssets}
+        busy=""
+        processing={false}
+        onBack={vi.fn()}
+        onApplied={onApplied}
+        onUseBuiltin={vi.fn()}
+        showNotice={vi.fn()}
+      />
+    );
+
+    await waitFor(() => expect(screen.getAllByText("尚未开始分析或改写，可重新生成章节列表；这会替换当前章节划分。")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "生成预览" }));
+    expect(await screen.findByText("第一章 开始")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(confirm).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_chapter_rule_and_split", expect.objectContaining({
+      novelId: "novel-1"
+    })));
+    await waitFor(() => expect(onApplied).toHaveBeenCalledWith("novel-1"));
+  });
+
+  it("disables applying chapter rules after analysis or rewrite starts", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_chapter_rule") return null;
+      if (command === "preview_chapter_rule") return preview;
+      return undefined;
+    });
+
+    render(
+      <ChapterRulesPage
+        novel={importedNovel}
+        chapters={[{ ...pendingChapter, analysis_status: "completed", analysis_json: "{}" }]}
+        canonAssets={emptyCanonAssets}
+        busy=""
+        processing={false}
+        onBack={vi.fn()}
+        onApplied={vi.fn()}
+        onUseBuiltin={vi.fn()}
+        showNotice={vi.fn()}
+      />
+    );
+
+    await waitFor(() => expect(screen.getAllByText("已开始分析或改写，不能重新拆分；如需修改章节规则，请重新导入小说。")).toHaveLength(2));
+    expect(screen.getByRole("button", { name: "使用内置规则" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "生成预览" }));
+    expect(await screen.findByText("第一章 开始")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  });
+
+  it("does not apply an imported resplit when confirmation is cancelled", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_chapter_rule") return null;
+      if (command === "preview_chapter_rule") return preview;
+      return undefined;
+    });
+
+    render(
+      <ChapterRulesPage
+        novel={importedNovel}
+        chapters={[pendingChapter]}
+        canonAssets={emptyCanonAssets}
+        busy=""
+        processing={false}
+        onBack={vi.fn()}
+        onApplied={vi.fn()}
+        onUseBuiltin={vi.fn()}
+        showNotice={vi.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "生成预览" }));
+    expect(await screen.findByText("第一章 开始")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(confirm).toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("save_chapter_rule_and_split", expect.anything());
   });
 });
