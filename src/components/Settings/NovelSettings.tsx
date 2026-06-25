@@ -247,7 +247,6 @@ export function NovelSettingsFields({ draft, setDraft, disabled }: NovelSettings
           <section className="settings-section novel-settings-section">
             <div className="settings-section-heading">
               <h3>高级设定</h3>
-              <span>自定义设定</span>
             </div>
             <label className="advanced-settings-field">
               <textarea
@@ -293,7 +292,7 @@ export function NovelSettingsView({ draft, setDraft, disabled, hasNovel, busy, o
     <div className="page-panel novel-settings-page">
       <div className="page-heading">
         <div>
-          <h2>基本设定</h2>
+          <h2>设定</h2>
           <p>{hasNovel ? "配置主角改写、额外姓名映射、外观模式和高级设定。" : "请先导入小说。"}</p>
         </div>
         <div className="panel-actions">

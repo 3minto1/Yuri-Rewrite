@@ -7644,6 +7644,7 @@ mod tests {
         assert!(prompt.contains("当前改写稿是本次修改的主要底稿"));
         assert!(prompt.contains("不能抛弃现稿、退回原文重新生成"));
         assert!(prompt.contains("【规则优先级】"));
+        assert!(prompt.contains("【改写规则包】"));
         assert!(prompt.contains("保守清理正文"));
         assert!(prompt.contains("当前改写稿正文"));
         assert!(prompt.contains("原文仅用于核对事实"));
@@ -8098,8 +8099,9 @@ mod tests {
         assert!(prompt.contains("功法术语"));
         assert!(prompt.contains("姓名映射表"));
         assert!(prompt.contains("未指定角色必须保持原文性别"));
-        assert!(prompt.contains("复数群体代词必须按群体实际构成判断"));
-        assert!(prompt.contains("标题原则上保留原标题和原编号"));
+        assert!(prompt.contains("【改写规则包】"));
+        assert!(prompt.contains("群体代词按成员构成判断"));
+        assert!(prompt.contains("标题默认保留原标题和原编号"));
         assert!(prompt.contains("一致性资产：\n## 姓名映射表\n萧炎 -> 萧妍"));
         assert!(prompt.contains("处理范围约束：\n本次目标只包含第1章"));
         assert!(!prompt.contains("并发分片上下文"));
@@ -8115,6 +8117,10 @@ mod tests {
         );
         assert!(
             prompt.find("最高优先级核心设定").expect("core prompt")
+                < prompt.find("【改写规则包】").expect("compact rule pack")
+        );
+        assert!(
+            prompt.find("【改写规则包】").expect("compact rule pack")
                 < prompt.find("改写要求").expect("rewrite rules")
         );
         assert!(
@@ -8200,6 +8206,72 @@ mod tests {
     }
 
     #[test]
+    fn compact_rewrite_rule_pack_omits_empty_optional_sections() {
+        let settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: "".to_string(),
+            rewritten_protagonist_name: "".to_string(),
+            additional_feminize_names: "".to_string(),
+            bust: "平胸".to_string(),
+            body_type: "少女".to_string(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: "".to_string(),
+            relationship_targets: "[]".to_string(),
+            updated_at: "now".to_string(),
+        };
+
+        let prompt = build_compact_rewrite_rule_pack(&settings);
+
+        assert!(prompt.contains("【改写规则包】"));
+        assert!(prompt.contains("主角原姓名：萧炎"));
+        assert!(prompt.contains("主角改写后姓名：未指定"));
+        assert!(prompt.contains("标题默认保留原标题和原编号"));
+        assert!(prompt.contains("未指定角色保持原文性别"));
+        assert!(prompt.contains("群体代词按成员构成判断"));
+        assert!(prompt.contains("非人生物保留原文代词和称谓"));
+        assert!(prompt.contains("读者看不出主角原本是男性"));
+        assert!(prompt.contains("严谨模式，忠于原文"));
+        assert!(!prompt.contains("主角原文别名："));
+        assert!(!prompt.contains("其他指定女性化人物/姓名映射："));
+        assert!(!prompt.contains("重点百合互动对象："));
+        assert!(!prompt.contains("高级设定："));
+        assert!(!prompt.contains("：无"));
+    }
+
+    #[test]
+    fn compact_rewrite_rule_pack_keeps_quality_guards_and_is_shorter() {
+        let mut settings = sample_novel_settings();
+        settings.protagonist_aliases = "炎儿\n岩枭".to_string();
+        settings.additional_feminize_names = "林动 -> 林筝\n唐三".to_string();
+        settings.relationship_targets = normalize_relationship_targets(
+            r#"[{"name":"余靖秋","relationship":"女主候选","notes":"克制暧昧"}]"#,
+        );
+        settings.advanced_settings = "保持文风克制，动作描写细腻。".to_string();
+        settings.rewrite_mode = "creative".to_string();
+
+        let legacy = build_rewrite_settings_prompt(&settings);
+        let compact = build_compact_rewrite_rule_pack(&settings);
+
+        assert!(compact.contains("主角原文别名：炎儿、岩枭"));
+        assert!(compact.contains("林动 -> 林筝"));
+        assert!(compact.contains("`原姓名 -> 改写后姓名` 必须逐字使用 target"));
+        assert!(compact.contains("余靖秋（女主候选）：克制暧昧"));
+        assert!(compact.contains("不得改变未指定角色性别、原文主线逻辑或章节边界"));
+        assert!(compact.contains("姓名映射表和用户指定改名最高优先级"));
+        assert!(compact.contains("已有 `source -> target` 必须全篇统一替换"));
+        assert!(compact.contains("标题默认保留原标题和原编号"));
+        assert!(compact.contains("仅与主角原名共享单字的未指定 NPC 不得误改"));
+        assert!(compact.contains("旧名、同名、名字来源"));
+        assert!(compact.contains("每章在关键场景自然增加或强化 2-4 处女性化感知点"));
+        assert!(compact.contains("高级设定：保持文风克制"));
+        assert!(
+            compact.chars().count() * 100 < legacy.chars().count() * 75,
+            "compact rule pack should be at least 25% shorter than legacy settings prompt"
+        );
+    }
+
+    #[test]
     fn batch_rewrite_prompt_puts_core_prompt_before_rewrite_rules() {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
@@ -8227,11 +8299,13 @@ mod tests {
             .find("最高优先级核心设定")
             .expect("core prompt section");
         let rewrite_pos = prompt.find("改写要求").expect("rewrite rules");
+        let rule_pack_pos = prompt.find("【改写规则包】").expect("compact rule pack");
         let priority_pos = prompt.find("【规则优先级】").expect("priority block");
         let format_pos = prompt.find("【输出格式硬性要求】").expect("format guard");
         assert!(format_pos < priority_pos);
         assert!(priority_pos < core_pos);
-        assert!(core_pos < rewrite_pos);
+        assert!(core_pos < rule_pack_pos);
+        assert!(rule_pack_pos < rewrite_pos);
         assert!(prompt.contains("文风克制，动作描写细腻"));
         assert!(prompt.contains("优先级高于本次改写中的其他风格"));
         assert!(prompt.contains("【输出格式硬性要求】"));
@@ -8351,16 +8425,13 @@ mod tests {
         );
 
         assert!(prompt.contains("双女主百合叙事"));
-        assert!(prompt.contains("清除所有原男性主角痕迹"));
-        assert!(prompt.contains("人物外貌特征必须前后一致"));
-        assert!(prompt.contains("上一章是金发，下一章不能无理由变成红发"));
-        assert!(prompt.contains("百合向关系推进必须承接一致性资产及相邻上下文"));
-        assert!(prompt.contains("不能突然重置或跳跃"));
-        assert!(prompt.contains("不得因为百合改写目标而把所有重要配角"));
-        assert!(prompt.contains("原文男性配角继续使用男性身份"));
-        assert!(prompt.contains("主角与一个或多个男性角色共同被指代"));
-        assert!(prompt.contains("不能因为主角已女性化就改成“她们”"));
-        assert!(prompt.contains("只有能够确认群体成员全部为女性时才使用“她们”"));
+        assert!(prompt.contains("【改写规则包】"));
+        assert!(prompt.contains("男主残留"));
+        assert!(prompt.contains("读者看不出主角原本是男性"));
+        assert!(prompt.contains("外貌、称谓、关系和百合向情绪推进必须承接一致性资产及相邻上下文"));
+        assert!(prompt.contains("未指定角色保持原文性别"));
+        assert!(prompt.contains("含任何未指定男性成员用“他们”"));
+        assert!(prompt.contains("只有确认全员女性才用“她们”"));
         assert!(prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
     }
 

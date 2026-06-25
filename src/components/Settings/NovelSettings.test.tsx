@@ -46,7 +46,7 @@ describe("NovelSettingsView", () => {
     const onSave = vi.fn();
     render(<Harness onSave={onSave} />);
 
-    expect(screen.getByRole("heading", { name: "基本设定" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "设定" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("东伯玉")).toBeInTheDocument();
     expect(screen.getByDisplayValue("东伯玥")).toBeInTheDocument();
     expect(screen.getByDisplayValue("池丘白")).toBeInTheDocument();

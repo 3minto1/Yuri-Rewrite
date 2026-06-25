@@ -1155,7 +1155,7 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
     fireEvent.click(screen.getByRole("button", { name: "设定" }));
-    expect(screen.getByRole("heading", { name: "基本设定" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "设定" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "基本设定" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
     fireEvent.click(screen.getByRole("button", { name: "对比" }));
