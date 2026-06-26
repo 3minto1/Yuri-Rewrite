@@ -27,7 +27,7 @@ pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
-- 主角原文别名：{}
+- 主角原文别名/指定别名映射：{}
 - 主角改写后姓名：{}
 - 其他指定女性化人物/姓名映射：{}
 - 重点百合互动对象：{}
@@ -38,7 +38,7 @@ pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
 1. 如果“主角改写后姓名”不是留空，必须把主角统一改为该姓名，标题和正文都必须遵守，不得自行生成其他主角新名。
 2. 如果“主角改写后姓名”留空，主角姓名必须女性化，不能保留明显男性化姓名；优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
 3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
-4. 其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
+4. 主角别名或其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
 5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。
 6. 重点百合互动对象只用于增强关系连续性和百合互动，不得因此改变未指定角色性别、原文主线逻辑或章节边界。"#,
         settings.protagonist_name,
@@ -52,13 +52,14 @@ pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
 }
 
 pub(crate) fn build_analysis_identity_context(settings: &NovelSettings) -> String {
-    if settings.protagonist_aliases.trim().is_empty() {
+    let alias_sources = additional_feminize_name_sources(&settings.protagonist_aliases);
+    if alias_sources.is_empty() {
         return String::new();
     }
     format!(
         "已知原文人物身份提示（仅用于识别同一人物，不代表改写要求）：主角“{}”在原文中还可能以这些姓名或别名出现：{}。分析时应把这些称呼归属于同一人物，并记录原文实际使用方式；不得据此改变姓名、性别、关系或剧情。",
         settings.protagonist_name.trim(),
-        settings.protagonist_aliases.lines().collect::<Vec<_>>().join("、")
+        alias_sources.join("、")
     )
 }
 
@@ -246,8 +247,8 @@ fn relevant_canon_keywords(chapters: &[Chapter], settings: &NovelSettings) -> Ha
     ] {
         insert_keyword(&mut keywords, value);
     }
-    for value in settings.protagonist_aliases.lines() {
-        insert_keyword(&mut keywords, value);
+    for value in additional_feminize_name_sources(&settings.protagonist_aliases) {
+        insert_keyword(&mut keywords, &value);
     }
     for value in additional_feminize_name_sources(&settings.additional_feminize_names) {
         insert_keyword(&mut keywords, &value);
@@ -427,7 +428,7 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
     format!(
         r#"小说基本设定：
 - 主角原姓名：{}
-- 主角原文别名：{}
+- 主角原文别名/指定别名映射：{}
 - 主角改写后姓名：{}
 - 其他指定女性化人物/姓名映射：{}
 - 重点百合互动对象：{}
@@ -445,7 +446,7 @@ pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String 
 2. 正文必须检查主角姓名。章节标题原则上保留原标题和原编号；只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才需要改成女性化表达。普通意象、事件概括、其他角色描述和无法确认指向主角的男性词语都不需要为了女性化而修改。
 3. 如果用户未指定主角改写后姓名，优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字；如果用户已指定，则以用户指定姓名为最高优先级。
 4. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
-5. 其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
+5. 主角别名和其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
 6. 主角原文别名与主角是同一人物；每个别名都必须按一致性资产中的固定映射同步女性化，不能把别名误判为另一名角色，也不能只修改主姓名而遗漏别名。
 7. 一致性资产中的“姓名映射表”优先级最高；凡是映射表中已有 `source -> target`，标题和正文都必须统一替换为 target，不得自行生成同一人物的其他女性化姓名。
 8. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致；并发分片和后续批次也必须继续使用同一份映射表。
@@ -506,7 +507,7 @@ pub(crate) fn build_compact_rewrite_rule_pack(settings: &NovelSettings) -> Strin
 
     if !settings.protagonist_aliases.trim().is_empty() {
         setting_lines.push(format!(
-            "- 主角原文别名：{}；这些别名与主角是同一人物，按姓名映射同步女性化。",
+            "- 主角原文别名/指定别名映射：{}；这些别名与主角是同一人物，按姓名映射同步女性化；`原别名 -> 改写后别名` 必须逐字使用 target。",
             aliases_or_none(settings)
         ));
     }
@@ -769,13 +770,13 @@ pub(crate) fn build_compact_revision_settings_prompt(settings: &NovelSettings) -
     format!(
         r#"【压缩小说设定】
 - 主角原姓名：{}
-- 主角原文别名：{}
+- 主角原文别名/指定别名映射：{}
 - 主角改写后姓名：{}
 - 其他指定女性化人物/姓名映射：{}
 - 身材/体型：{} / {}
 - 改写模式：{}
 - 高级设定：{}
-- 姓名映射表和用户指定改名最高优先级；其他姓名若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名；标题默认保留原标题和原编号，只有明确指向主角原名、男性身份、男性称谓或男性身体状态时才女性化。
+- 姓名映射表和用户指定改名最高优先级；主角别名或其他姓名若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名；标题默认保留原标题和原编号，只有明确指向主角原名、男性身份、男性称谓或男性身体状态时才女性化。
 - 未指定角色、性别不明者和非人生物必须按原文及一致性资产保持性别、称谓和代词；群体代词按成员构成判断，含未指定男性成员时用“他们”或准确群体称呼。
 - 人物外貌、关系、称谓、百合向情绪推进必须承接前文，不能为了修复问题制造新矛盾。"#,
         settings.protagonist_name.trim(),

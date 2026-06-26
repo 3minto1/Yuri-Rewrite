@@ -5,7 +5,7 @@ import { parseRelationshipTargets, serializeRelationshipTargets } from "./relati
 export function normalizeNovelSettingsDraft(draft: NovelSettingsDraft) {
   return {
     protagonist_name: draft.protagonist_name.trim(),
-    protagonist_aliases: draft.protagonist_aliases.trim(),
+    protagonist_aliases: serializeAdditionalNameMappings(parseAdditionalNameMappings(draft.protagonist_aliases)),
     rewritten_protagonist_name: draft.rewritten_protagonist_name.trim(),
     additional_feminize_names: serializeAdditionalNameMappings(parseAdditionalNameMappings(draft.additional_feminize_names)),
     bust: draft.bust.trim(),

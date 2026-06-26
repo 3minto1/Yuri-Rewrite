@@ -82,8 +82,15 @@ function normalizeText(text: string) {
 
 function splitConfiguredNames(input: string) {
   return input
-    .split(/[\s,，、;；]+/u)
-    .map((name) => name.trim())
+    .split(/[\n\r,，、;；]+/u)
+    .map((name) => {
+      const trimmed = name.trim();
+      for (const delimiter of ["->", "=>", "→"]) {
+        const index = trimmed.indexOf(delimiter);
+        if (index >= 0) return trimmed.slice(0, index).trim();
+      }
+      return trimmed;
+    })
     .filter(Boolean);
 }
 

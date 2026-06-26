@@ -22,8 +22,34 @@ function nextAdditionalRowId() {
   return `additional-name-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function nextAliasRowId() {
+  return `protagonist-alias-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function nextRelationshipRowId() {
   return `relationship-target-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function useProtagonistAliasRows(draft: NovelSettingsDraft, setDraft: Dispatch<SetStateAction<NovelSettingsDraft>>) {
+  const [rows, setRows] = useState<AdditionalNameMappingRow[]>(() =>
+    parseAdditionalNameMappings(draft.protagonist_aliases)
+  );
+  const [syncedValue, setSyncedValue] = useState(draft.protagonist_aliases);
+
+  useEffect(() => {
+    if (draft.protagonist_aliases === syncedValue) return;
+    setRows(parseAdditionalNameMappings(draft.protagonist_aliases));
+    setSyncedValue(draft.protagonist_aliases);
+  }, [draft.protagonist_aliases, syncedValue]);
+
+  function commit(nextRows: AdditionalNameMappingRow[]) {
+    setRows(nextRows);
+    const protagonist_aliases = serializeAdditionalNameMappings(nextRows);
+    setSyncedValue(protagonist_aliases);
+    setDraft((current) => ({ ...current, protagonist_aliases }));
+  }
+
+  return { rows, commit };
 }
 
 function useAdditionalNameRows(draft: NovelSettingsDraft, setDraft: Dispatch<SetStateAction<NovelSettingsDraft>>) {
@@ -83,9 +109,24 @@ function truncatePreview(value: string) {
 }
 
 export function NovelSettingsFields({ draft, setDraft, disabled }: NovelSettingsFieldsProps) {
+  const { rows: protagonistAliasRows, commit: commitProtagonistAliasRows } = useProtagonistAliasRows(draft, setDraft);
   const { rows: additionalNameRows, commit: commitAdditionalNameRows } = useAdditionalNameRows(draft, setDraft);
   const { rows: relationshipRows, commit: commitRelationshipRows } = useRelationshipTargetRows(draft, setDraft);
   const [activeTab, setActiveTab] = useState<"basic" | "advanced" | "preview">("basic");
+  const protagonistAliasPreviewLines = previewLines(serializeAdditionalNameMappings(parseAdditionalNameMappings(draft.protagonist_aliases)));
+
+  function updateProtagonistAliasRow(index: number, patch: Partial<AdditionalNameMappingRow>) {
+    commitProtagonistAliasRows(protagonistAliasRows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
+  }
+
+  function addProtagonistAliasRow() {
+    commitProtagonistAliasRows([...protagonistAliasRows, { id: nextAliasRowId(), source: "", target: "" }]);
+  }
+
+  function removeProtagonistAliasRow(index: number) {
+    const nextRows = protagonistAliasRows.filter((_, rowIndex) => rowIndex !== index);
+    commitProtagonistAliasRows(nextRows.length ? nextRows : [{ id: nextAliasRowId(), source: "", target: "" }]);
+  }
 
   function updateAdditionalNameRow(index: number, patch: Partial<AdditionalNameMappingRow>) {
     commitAdditionalNameRows(additionalNameRows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
@@ -132,9 +173,46 @@ export function NovelSettingsFields({ draft, setDraft, disabled }: NovelSettings
             </div>
             <div className="form-grid">
               <label>主角姓名（必填）<input value={draft.protagonist_name} onChange={(event) => setDraft({ ...draft, protagonist_name: event.target.value })} /></label>
-              <label>主角别名（选填）<input value={draft.protagonist_aliases} onChange={(event) => setDraft({ ...draft, protagonist_aliases: event.target.value })} placeholder="支持逗号或换行分隔" /></label>
               <label className="settings-rewritten-name-field">改写后姓名（选填）<input value={draft.rewritten_protagonist_name} onChange={(event) => setDraft({ ...draft, rewritten_protagonist_name: event.target.value })} placeholder="留空则让 AI 生成改写后姓名" /></label>
             </div>
+            <div className="settings-subsection-heading">
+              <h4>主角别名</h4>
+              <span>同一主角在原文中的其他称呼，可指定改写后别名。</span>
+            </div>
+            <div className="additional-name-list protagonist-alias-list">
+              {protagonistAliasRows.map((row, index) => (
+                <div className="additional-name-row" key={row.id}>
+                  <label>
+                    原别名
+                    <input
+                      value={row.source}
+                      onChange={(event) => updateProtagonistAliasRow(index, { source: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    改写后别名（可选）
+                    <input
+                      value={row.target}
+                      onChange={(event) => updateProtagonistAliasRow(index, { target: event.target.value })}
+                      placeholder="留空则让 AI 生成"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="icon-button additional-name-remove"
+                    aria-label={`删除主角别名 ${index + 1}`}
+                    title="删除"
+                    onClick={() => removeProtagonistAliasRow(index)}
+                  >
+                    <Trash2 size={17} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="additional-name-add" onClick={addProtagonistAliasRow}>
+              <Plus size={17} />添加
+            </button>
+            <p className="settings-note">只填原别名时会由 AI 生成女性化别名；填写改写后别名时会强制使用该称呼。</p>
           </section>
 
           <section className="settings-section novel-settings-section">
@@ -269,7 +347,7 @@ export function NovelSettingsFields({ draft, setDraft, disabled }: NovelSettings
           </div>
           <dl className="settings-preview-list">
             <div><dt>主角</dt><dd>{draft.protagonist_name.trim() || "未填写"} -&gt; {draft.rewritten_protagonist_name.trim() || "由 AI 自动生成"}</dd></div>
-            <div><dt>主角别名</dt><dd>{previewLines(draft.protagonist_aliases).join("、") || "无"}</dd></div>
+            <div><dt>主角别名</dt><dd>{protagonistAliasPreviewLines.length ? protagonistAliasPreviewLines.map((line) => <span key={line}>{line.includes(" -> ") ? line : `${line} -> 由 AI 自动生成`}</span>) : "无"}</dd></div>
             <div><dt>其他女性化姓名</dt><dd>{previewLines(draft.additional_feminize_names).length ? previewLines(draft.additional_feminize_names).map((line) => <span key={line}>{line}</span>) : "无"}</dd></div>
             <div><dt>女主候选</dt><dd>{storedRelationshipRows.length ? storedRelationshipRows.map((row) => <span key={`${row.name}-${row.relationship}-${row.notes}`}>{row.name}{row.relationship ? `（${row.relationship}）` : ""}{row.notes ? `：${row.notes}` : ""}</span>) : "无"}</dd></div>
             <div><dt>外观与模式</dt><dd>{draft.bust} / {draft.body_type} / {modeLabel(draft.rewrite_mode)}</dd></div>

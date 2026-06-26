@@ -1209,6 +1209,23 @@ textarea:focus-visible {
   gap: 6px;
 }
 
+.settings-subsection-heading {
+  margin-top: var(--space-4);
+}
+
+.settings-subsection-heading h4 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.settings-subsection-heading span {
+  color: var(--color-text-muted);
+  display: block;
+  font-size: 12px;
+  font-weight: 650;
+  margin-top: 4px;
+}
+
 .setting-help {
   align-items: center;
   color: #776f65;
@@ -2550,10 +2567,16 @@ label {
 }
 
 .compare-quality-list {
-  display: grid;
-  gap: var(--space-2);
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 2px;
+  position: relative;
+}
+
+.compare-quality-virtual-spacer {
+  min-height: 100%;
+  position: relative;
 }
 
 .compare-quality-issue {
@@ -2566,10 +2589,16 @@ label {
   cursor: pointer;
   display: grid;
   gap: 6px;
+  height: 118px;
   justify-items: stretch;
-  min-height: auto;
+  left: 0;
+  overflow: hidden;
   padding: 9px 10px;
+  padding-right: 38px;
+  position: absolute;
+  right: 0;
   text-align: left;
+  top: 0;
   white-space: normal;
 }
 
@@ -2604,18 +2633,51 @@ label {
 }
 
 .compare-quality-issue strong {
+  display: -webkit-box;
   font-size: 13px;
   line-height: 1.45;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .compare-quality-evidence {
   color: var(--color-text-muted);
+  display: -webkit-box;
   font-size: 12px;
   line-height: 1.5;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-.compare-quality-empty {
+.compare-quality-dismiss {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  display: inline-flex;
+  height: 26px;
+  justify-content: center;
+  min-height: 0;
+  padding: 0;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 26px;
+}
+
+.compare-quality-dismiss:hover,
+.compare-quality-dismiss:focus-visible {
+  background: var(--color-surface-muted);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.compare-quality-empty,
+.compare-quality-more {
   background: var(--color-surface-muted);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
@@ -2623,6 +2685,10 @@ label {
   font-size: 13px;
   margin: 0;
   padding: 14px;
+}
+
+.compare-quality-more {
+  line-height: 1.5;
 }
 
 .compare-chapter-selector {
@@ -3895,11 +3961,13 @@ mark.search-match.active-search-match {
 :root[data-theme="dark"] .setting-row > span,
 :root[data-theme="dark"] .setting-toggle-row > span,
 :root[data-theme="dark"] .mode-field > span,
-:root[data-theme="dark"] .batch-strip span {
+:root[data-theme="dark"] .batch-strip span,
+:root[data-theme="dark"] .token-model-totals span {
   color: #b7afa0;
 }
 
-:root[data-theme="dark"] .estimate-grid strong {
+:root[data-theme="dark"] .estimate-grid strong,
+:root[data-theme="dark"] .token-model-totals b {
   color: #efe8dc;
 }
 
@@ -3913,6 +3981,7 @@ mark.search-match.active-search-match {
 :root[data-theme="dark"] .compare-quality-panel,
 :root[data-theme="dark"] .compare-quality-filters,
 :root[data-theme="dark"] .compare-quality-empty,
+:root[data-theme="dark"] .compare-quality-more,
 :root[data-theme="dark"] .mode-toggle,
 :root[data-theme="dark"] .split-button,
 :root[data-theme="dark"] .chapter-item,
@@ -3931,7 +4000,8 @@ mark.search-match.active-search-match {
 
 :root[data-theme="dark"] .compare-quality-header p,
 :root[data-theme="dark"] .compare-quality-evidence,
-:root[data-theme="dark"] .compare-quality-empty {
+:root[data-theme="dark"] .compare-quality-empty,
+:root[data-theme="dark"] .compare-quality-more {
   color: #b7afa0;
 }
 
@@ -3944,6 +4014,13 @@ mark.search-match.active-search-match {
 :root[data-theme="dark"] .compare-quality-issue:hover,
 :root[data-theme="dark"] .compare-quality-issue:focus-visible {
   background: #2d332b;
+}
+
+:root[data-theme="dark"] .compare-quality-dismiss:hover,
+:root[data-theme="dark"] .compare-quality-dismiss:focus-visible {
+  background: #363c34;
+  border-color: var(--color-border);
+  color: #efe8dc;
 }
 
 :root[data-theme="dark"] .compare-quality-meta span {

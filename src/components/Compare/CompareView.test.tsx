@@ -210,7 +210,7 @@ describe("CompareView", () => {
       { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
     ]} />);
 
-    expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("2");
+    expect(screen.getByText("检查").closest("button")).toHaveTextContent("2");
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
     const panel = screen.getByLabelText("本地质量检查");
     expect(panel).toHaveTextContent("当前章 1 · 全书 2");
@@ -242,7 +242,7 @@ describe("CompareView", () => {
       { ...chapters[1], id: "c3", index: 3, title: "第三章", rewrite_text: "炎儿又在第三章。" }
     ]} />);
 
-    expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("1");
+    expect(screen.getByText("检查").closest("button")).toHaveTextContent("1");
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
     const panel = screen.getByLabelText("本地质量检查");
     expect(panel).not.toHaveTextContent("仍残留主角原名或别名：萧炎");
@@ -278,6 +278,57 @@ describe("CompareView", () => {
     expect(panel).toHaveTextContent("当前章 1 · 全书 1");
     expect(panel).toHaveTextContent("字数");
     expect(panel).toHaveTextContent("原文 2000 字，改写稿 1000 字，相差 1000 字。");
+  });
+
+  it("virtualizes quality issues while keeping later issues reachable", () => {
+    const manyIssueChapters = Array.from({ length: 85 }, (_, index) => ({
+      ...chapters[0],
+      id: `c${index + 1}`,
+      index: index + 1,
+      title: `第${index + 1}章`,
+      rewrite_text: `萧炎仍在第${index + 1}章。`
+    }));
+    render(<Harness initialChapters={manyIssueChapters} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /检查/ }));
+
+    const panel = screen.getByLabelText("本地质量检查");
+    expect(panel).toHaveTextContent("当前章 1 · 全书 85");
+    expect(panel).not.toHaveTextContent("已显示前 80 条");
+    expect(within(panel).getAllByText("仍残留主角原名或别名：萧炎").length).toBeLessThan(85);
+
+    const list = screen.getByLabelText("本地检查问题列表");
+    fireEvent.scroll(list, { target: { scrollTop: 84 * 126 } });
+
+    expect(panel).toHaveTextContent("第 85 章");
+  });
+
+  it("ignores one quality issue without opening search or switching chapters", () => {
+    const { rerender } = render(<Harness initialChapters={[
+      { ...chapters[0], rewrite_text: "萧炎仍在第一章。" },
+      { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
+    ]} />);
+
+    const checkButton = screen.getByText("检查").closest("button");
+    expect(checkButton).toHaveTextContent("2");
+    fireEvent.click(checkButton!);
+
+    const panel = screen.getByLabelText("本地质量检查");
+    expect(panel).toHaveTextContent("当前章 1 · 全书 2");
+    fireEvent.click(within(panel).getAllByRole("button", { name: "忽略此问题" })[0]);
+
+    expect(screen.getByText("检查").closest("button")).toHaveTextContent("1");
+    expect(panel).toHaveTextContent("当前章 0 · 全书 1");
+    expect(screen.queryByRole("textbox", { name: "全局搜索" })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("1. 第一章");
+
+    rerender(<Harness key="with-new-issue" initialChapters={[
+      { ...chapters[0], rewrite_text: "萧炎仍在第一章。" },
+      { ...chapters[1], rewrite_text: "萧炎仍在第二章。" },
+      { ...chapters[0], id: "c3", index: 3, title: "第三章", rewrite_text: "萧炎仍在第三章。" }
+    ]} />);
+
+    expect(screen.getByText("检查").closest("button")).toHaveTextContent("2");
   });
 
   it("updates quality counts while editing the current rewrite", () => {

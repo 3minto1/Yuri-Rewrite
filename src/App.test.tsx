@@ -328,12 +328,19 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
     fireEvent.click(screen.getByRole("button", { name: "设定" }));
-    fireEvent.change(screen.getByLabelText("主角别名（选填）"), {
-      target: { value: "小明，林公子" }
+    fireEvent.change(screen.getAllByLabelText("原别名")[0], {
+      target: { value: "小明" }
+    });
+    fireEvent.change(screen.getAllByLabelText("改写后别名（可选）")[0], {
+      target: { value: "小茗" }
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "添加" })[0]);
+    fireEvent.change(screen.getAllByLabelText("原别名")[1], {
+      target: { value: "林公子" }
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_novel_settings", expect.objectContaining({
-      protagonistAliases: "小明，林公子"
+      protagonistAliases: "小明 -> 小茗\n林公子"
     })));
   });
 

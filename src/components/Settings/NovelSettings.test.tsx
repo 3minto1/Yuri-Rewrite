@@ -6,7 +6,7 @@ import { NovelSettingsView } from "./NovelSettings";
 
 const initialDraft: NovelSettingsDraft = {
   protagonist_name: "东伯雪鹰",
-  protagonist_aliases: "雪鹰",
+  protagonist_aliases: "雪鹰 -> 雪瑛\n少主",
   rewritten_protagonist_name: "东伯雪瑛",
   additional_feminize_names: "东伯玉 -> 东伯玥\n池丘白",
   bust: "巨乳",
@@ -47,10 +47,27 @@ describe("NovelSettingsView", () => {
     render(<Harness onSave={onSave} />);
 
     expect(screen.getByRole("heading", { name: "设定" })).toBeInTheDocument();
+    const protagonistSection = screen.getByRole("heading", { name: "主角设定" }).closest("section");
+    expect(protagonistSection).not.toBeNull();
+    expect(within(protagonistSection!).getByLabelText("主角姓名（必填）")).toHaveValue("东伯雪鹰");
+    expect(within(protagonistSection!).getByLabelText("改写后姓名（选填）")).toHaveValue("东伯雪瑛");
+    expect(within(protagonistSection!).getByDisplayValue("雪鹰")).toBeInTheDocument();
+    expect(within(protagonistSection!).getByDisplayValue("雪瑛")).toBeInTheDocument();
+    expect(within(protagonistSection!).getByDisplayValue("少主")).toBeInTheDocument();
     expect(screen.getByDisplayValue("东伯玉")).toBeInTheDocument();
     expect(screen.getByDisplayValue("东伯玥")).toBeInTheDocument();
     expect(screen.getByDisplayValue("池丘白")).toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/例如/)).not.toBeInTheDocument();
+
+    fireEvent.click(within(protagonistSection!).getByRole("button", { name: "添加" }));
+    let aliasInputs = screen.getAllByLabelText("原别名");
+    aliasInputs[aliasInputs.length - 1].focus();
+    fireEvent.change(aliasInputs[aliasInputs.length - 1], { target: { value: "小雪" } });
+    aliasInputs = screen.getAllByLabelText("原别名");
+    expect(aliasInputs[aliasInputs.length - 1]).toHaveFocus();
+    const aliasTargetInputs = screen.getAllByLabelText("改写后别名（可选）");
+    fireEvent.change(aliasTargetInputs[aliasTargetInputs.length - 1], { target: { value: "小瑛" } });
+    fireEvent.click(screen.getByRole("button", { name: "删除主角别名 2" }));
 
     const additionalSection = screen.getByRole("heading", { name: "其他女性化姓名" }).closest("section");
     expect(additionalSection).not.toBeNull();
@@ -89,6 +106,8 @@ describe("NovelSettingsView", () => {
     });
     fireEvent.click(screen.getByRole("tab", { name: "设定预览" }));
     expect(screen.getByText(/东伯雪鹰/)).toBeInTheDocument();
+    expect(screen.getByText(/雪鹰 -> 雪瑛/)).toBeInTheDocument();
+    expect(screen.getByText(/小雪 -> 小瑛/)).toBeInTheDocument();
     expect(screen.getByText(/余靖秋（女主候选）：克制暧昧/)).toBeInTheDocument();
     expect(screen.getByText(/池丘白（师姐）：慢热信任/)).toBeInTheDocument();
     expect(screen.getByText(/强化对白克制感/)).toBeInTheDocument();
@@ -96,6 +115,7 @@ describe("NovelSettingsView", () => {
 
     expect(onSave).toHaveBeenCalledTimes(1);
     expect(onSave.mock.calls[0][0]).toMatchObject({
+      protagonist_aliases: "雪鹰 -> 雪瑛\n小雪 -> 小瑛",
       additional_feminize_names: "东伯玉 -> 东伯玥\n余靖秋 -> 余静秋",
       advanced_settings: "强化对白克制感",
       relationship_targets: JSON.stringify([
@@ -110,6 +130,9 @@ describe("NovelSettingsView", () => {
 
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
     expect(screen.getByLabelText("主角姓名（必填）")).toBeDisabled();
+    const protagonistSection = screen.getByRole("heading", { name: "主角设定" }).closest("section");
+    expect(protagonistSection).not.toBeNull();
+    expect(within(protagonistSection!).getByRole("button", { name: "添加" })).toBeDisabled();
     const additionalSection = screen.getByRole("heading", { name: "其他女性化姓名" }).closest("section");
     expect(additionalSection).not.toBeNull();
     expect(within(additionalSection!).getByRole("button", { name: "添加" })).toBeDisabled();

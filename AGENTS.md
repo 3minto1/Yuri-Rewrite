@@ -20,8 +20,8 @@ The user owns the AI account and API key. Novel content, SQLite data, internal b
 
 - `src/App.tsx`: top-level navigation, orchestration, and page composition.
 - `src/components/Workspace/`: workspace panels such as chapter, batch, model, and task views.
-- `src/components/Settings/`: application, novel, and model settings views.
-- `src/components/Compare/`: compare page, global search, diff worker, and highlighting.
+- `src/components/Settings/`: application, novel, and model settings views, including the standalone novel-settings page.
+- `src/components/Compare/`: compare page, global search, diff worker, local quality checks, and highlighting.
 - `src/components/common/`: shared modal, error boundary, and layout components.
 - `src/hooks/`: novel, model-profile, and task-state hooks.
 - `src/store/appStore.ts`: non-persistent Zustand runtime state.
@@ -99,6 +99,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Treat explicit author update notices such as isolated `第X更`, `第X更到`, `继续写`, `还有第X章`, and `未完待续` conservatively as non-chapter content. A pseudo heading may donate its body to the preceding formal chapter only when the surrounding formal headings use the same non-`更` unit and have consecutive ordinals.
 - Preserve genuine `第X更 标题` chapter series, protected extras such as `番外`, `外传`, `后记`, `卷末后记`, and `完本感言`, and uncertain nonstandard headings with substantive content.
 - Chapter parsing improvements apply to new imports. Never automatically re-split existing novels on startup because chapter IDs, batches, checkpoints, analyses, rewrites, and manual edits may already depend on the current structure.
+- Imported novels may be re-split only before any analysis, rewrite, task history, auto-run checkpoint, or non-empty canon asset exists. Re-splitting rebuilds chapters, chapter batches, and empty canon assets while preserving the raw TXT and novel settings. Once processing traces exist, instruct the user to re-import instead of mutating existing chapter IDs.
+- Chapter-rule preview and split commands support a per-operation long-chapter split option. When enabled, detected formal chapters whose body exceeds 5000 non-whitespace characters are split into title-suffixed parts such as `原标题（1）`, `原标题（2）`; undetected length chunks are not post-split by this option.
 - If no chapters can be detected, split by text length.
 - Chapter-based batches contain 10, 30, 50, or 100 chapters according to application settings. Non-chapter batches contain at most 100,000 characters.
 
@@ -108,13 +110,16 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Analysis produces compact original-canon assets: outline, characters, original genders, pronouns, aliases, relationships, titles, locations, foreshadowing, terms, and name-mapping candidates.
 - Rewrite processes only the selected batch and only chapters eligible after analysis.
 - Rewrite prompts include global core settings before normal rules, then novel settings, advanced settings, compact canon, and stable name mappings.
-- Forced protagonist naming has highest priority. Otherwise use one consistent feminine mapping across shards and batches.
+- Forced protagonist naming has highest priority. User-specified protagonist alias mappings and additional-name mappings use the same forced mapping priority. Otherwise use one consistent feminine mapping across shards and batches.
+- `protagonist_aliases` and `additional_feminize_names` are stored as strings for backward compatibility but may contain multiple lines in either `source` or `source -> target` format. Source-only entries are candidates for AI/local feminization; mapped entries must be preserved as fixed name mappings. Target names must not be treated as old-name residue.
+- `relationship_targets` is stored as normalized JSON text on novel settings. It guides yuri interaction continuity only; it must not override unchanged character gender, chapter boundaries, or source plot logic.
 - Preserve original chapter titles and their original numbering by default. Change a title only when it explicitly contains the protagonist's source name or clearly describes the protagonist's male identity, title, or body state. This rule is identical in strict and creative modes.
 - Stable marker `index` values are internal ordering identifiers, not title chapter numbers. Prologues, interludes, and extras may make them differ; never renumber titles to match marker indexes.
 - Do not alter non-target characters' gender, pronouns, titles, seniority, relationships, or social roles.
 - For animals, spirit beasts, artifact spirits, and other non-human beings whose source gender is unclear or unspecified, preserve the source pronoun and title choices. Review must not flag them solely because they were not feminized.
 - Remove masculine residue from the target protagonist while preserving plot continuity and established appearance details.
 - Strict mode preserves plot and avoids unnecessary embellishment. Creative mode may reinforce female identity, appearance, expression, and dual-female-lead interaction without breaking continuity.
+- Rewrite prompts must keep the rule-priority block and conservative cleanup constraint: fix obvious typos, OCR/encoding leftovers, ads, irrelevant punctuation, and noise, but never delete story text, extras, postscripts, formal author afterwords, dialogue, proper nouns, terms, place names, character names, or intentional style.
 - Single-chapter rewrite supports `original` and `rewrite` source modes. Original mode keeps the normal settings/canon/context pipeline. Rewrite mode treats the current rewrite as the primary draft and uses the original, settings, relevant canon, and adjacent chapters only as supporting context; it does not invoke the review model.
 - Preserve the first pre-single-rewrite snapshot until the user restores it. Later single rewrites update the latest AI baseline without replacing that first snapshot.
 
@@ -150,6 +155,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Reject duplicate active tasks for the same novel.
 - Reject deletion of a novel or model used by an active task.
 - Progress events remain `job-progress` and must be filtered by `novel_id` and the current task ID in the frontend.
+- `job-progress` is shared by analysis, rewrite, auto, and auto-batch jobs. The workspace progress strip is the single overall progress surface for these jobs; do not add per-chapter progress bars to chapter rows.
 - Disable novel/model switching, import, deletion, and relevant settings changes while the active task makes those operations unsafe.
 - Parallel shard failure must cancel and await sibling requests so quota is not consumed in the background.
 - Full one-click runs batches in order: analyze, rewrite, update the cumulative export TXT, then continue. It supports pause, continue, and terminate.
@@ -176,6 +182,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 - Novel settings are keyed by `novel_id`; the protagonist name is required before analysis or rewrite.
 - Do not automatically open novel settings after import. Open them when a required operation is attempted without valid settings.
+- The novel settings UI is a standalone page, not a modal. It has basic settings, advanced settings, and preview tabs. Dirty drafts must be protected when the user leaves via Back, top menu, sidebar/brand navigation, or Esc, offering continue editing, discard, or save-and-exit.
+- Protagonist name and rewritten protagonist name appear side by side. Protagonist aliases and additional feminized names are editable as stable row lists so typing does not remount inputs or lose focus.
 - Application settings include export directory, global core prompt, analysis/review model selection, review configuration, chapter batch size, and shared analysis/rewrite concurrency.
 - Allowed batch sizes are `10`, `30`, `50`, and `100`, with `30` as the default.
 - Allowed concurrency values are `1`, `3`, `6`, `10`, `25`, and `50`, with `10` as the default. Batch sizes 10 and 30 allow at most 10, batch size 50 allows at most 25, and batch size 100 allows at most 50. The backend must enforce these constraints.
@@ -215,6 +223,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - First launch shows quick-start once; Help reopens the same content.
 - Keep model configuration, chapters, canon assets, and other long content in independent, stable scroll regions.
 - Use the Compare page for full original/rewrite text. Do not place large text panes in workspace cards.
+- Compare page navigation away from unsaved rewrite edits must be guarded at the app navigation layer, including Back, top menu, sidebar/brand navigation, and Esc.
 - During full one-click runs, completed batch rewrites should refresh the in-memory compare data when progress advances, but must not automatically navigate to Compare until the full selected run range finishes.
 - Compare search is plain-text, cross-chapter, supports original-only, rewrite-only, or original-then-rewrite scope, supports next/previous navigation, and excludes empty rewrite placeholders.
 - Compare diff is current-chapter-only and defaults on. Search highlighting has higher visual priority than diff highlighting.
@@ -224,6 +233,9 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Prefer CSS Custom Highlight API so each text pane remains a single text node. Preserve the memoized linear-scan fallback for older WebView2 versions.
 - Mixed diff has a time budget and degrades to line mode for excessive cost/ranges, then to plain mode if necessary. Responsiveness is more important than forcing fine-grained highlights.
 - Do not add full-text virtualization or `content-visibility` to visible compare panes without proving text selection, search positioning, and scroll height remain correct.
+- The local Compare quality panel is a frontend-only heuristic scanner. It must not call models, mutate SQLite, or create Tauri commands. It checks rewritten text for old-name sources, protagonist-adjacent male residue, suspicious group pronouns, missing/unchanged rewrites, ad/noise, garbage markers, duplicate paragraphs, and large source/rewrite length deltas.
+- Quality checks must skip pending empty rewrites, skip length-delta warnings for the current editing draft, manually edited rewrites, and rewrite-based single-chapter rewrites, and use only protagonist alias/additional-name sources for old-name residue.
+- Quality issue rendering should stay responsive for large novels. Use virtualized issue cards or an equivalently bounded DOM strategy, and persist per-novel ignored issue fingerprints in localStorage only. Bulk ignore and single-issue ignore must not hide future issues with different chapter/evidence/category fingerprints.
 
 ## Documentation Rules
 

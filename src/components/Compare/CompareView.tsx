@@ -37,6 +37,9 @@ type CompareViewProps = {
 type QualityFilter = "all" | "error" | "warning";
 
 const qualityIgnoreKeyPrefix = "yuri-rewrite.qualityIgnored.v1.";
+const QUALITY_ISSUE_ROW_HEIGHT = 126;
+const QUALITY_ISSUE_OVERSCAN = 4;
+const QUALITY_LIST_FALLBACK_HEIGHT = 480;
 
 type DiffState = DiffResult & {
   loading: boolean;
@@ -366,6 +369,7 @@ type QualityPanelProps = {
   canIgnoreCurrent: boolean;
   onClose: () => void;
   onIgnoreCurrent: () => void;
+  onIgnoreIssue: (issue: QualityIssue) => void;
   onFilterChange: (filter: QualityFilter) => void;
   onIssueClick: (issue: QualityIssue) => void;
 };
@@ -380,10 +384,48 @@ const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
     canIgnoreCurrent,
     onClose,
     onIgnoreCurrent,
+    onIgnoreIssue,
     onFilterChange,
     onIssueClick
   } = props;
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [listHeight, setListHeight] = useState(QUALITY_LIST_FALLBACK_HEIGHT);
+
+  useEffect(() => {
+    if (!open) return;
+    const list = listRef.current;
+    if (!list) return;
+    list.scrollTop = 0;
+    setScrollTop(0);
+    setListHeight(list.clientHeight || QUALITY_LIST_FALLBACK_HEIGHT);
+  }, [filter, issues, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const list = listRef.current;
+    if (!list) return;
+
+    function updateHeight() {
+      setListHeight(list?.clientHeight || QUALITY_LIST_FALLBACK_HEIGHT);
+    }
+
+    updateHeight();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateHeight);
+      return () => window.removeEventListener("resize", updateHeight);
+    }
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [open]);
+
   if (!open) return null;
+  const startIndex = Math.max(0, Math.floor(scrollTop / QUALITY_ISSUE_ROW_HEIGHT) - QUALITY_ISSUE_OVERSCAN);
+  const visibleCount = Math.ceil(listHeight / QUALITY_ISSUE_ROW_HEIGHT) + QUALITY_ISSUE_OVERSCAN * 2;
+  const endIndex = Math.min(issues.length, startIndex + visibleCount);
+  const visibleIssues = issues.slice(startIndex, endIndex);
+  const totalHeight = issues.length * QUALITY_ISSUE_ROW_HEIGHT;
   return (
     <aside className="compare-quality-panel" aria-label="本地质量检查">
       <header className="compare-quality-header">
@@ -404,13 +446,20 @@ const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
         <button type="button" className={filter === "warning" ? "active" : ""} onClick={() => onFilterChange("warning")}>警告</button>
       </div>
       {issues.length ? (
-        <div className="compare-quality-list">
-          {issues.map((issue) => (
+        <div
+          className="compare-quality-list"
+          ref={listRef}
+          aria-label="本地检查问题列表"
+          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        >
+          <div className="compare-quality-virtual-spacer" style={{ height: totalHeight }}>
+          {visibleIssues.map((issue, offset) => (
             <div
               role="button"
               tabIndex={0}
               key={issue.id}
               className={`compare-quality-issue ${issue.severity}`}
+              style={{ transform: `translateY(${(startIndex + offset) * QUALITY_ISSUE_ROW_HEIGHT}px)` }}
               onClick={() => onIssueClick(issue)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
@@ -418,7 +467,20 @@ const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
                   onIssueClick(issue);
                 }
               }}
+              title={[issue.message, issue.evidence].filter(Boolean).join("\n")}
             >
+              <button
+                type="button"
+                className="compare-quality-dismiss"
+                aria-label="忽略此问题"
+                title="忽略此问题"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onIgnoreIssue(issue);
+                }}
+              >
+                <X size={14} />
+              </button>
               <span className="compare-quality-meta">
                 <span>第 {issue.chapterIndex} 章</span>
                 <span>{qualityCategoryLabel(issue)}</span>
@@ -428,6 +490,7 @@ const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
               {issue.evidence && <span className="compare-quality-evidence">{issue.evidence}</span>}
             </div>
           ))}
+          </div>
         </div>
       ) : (
         <p className="compare-quality-empty">
@@ -495,11 +558,15 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const rewriteMatches = useMemo(() => chapterMatches.filter((match) => match.side === "rewrite"), [chapterMatches]);
   const editDirty = editing && editDraft !== rewriteText;
   const novelId = selectedChapter?.novel_id ?? chapters[0]?.novel_id ?? "";
+  const qualityOverride = useMemo(
+    () => editing ? { chapterId: selectedChapterId, rewriteText: editDraft } : null,
+    [editDraft, editing, selectedChapterId]
+  );
   const qualityIssues = useMemo(() => scanRewriteQuality(
     chapters,
     novelSettings,
-    editing ? { chapterId: selectedChapterId, rewriteText: editDraft } : null
-  ), [chapters, editDraft, editing, novelSettings, selectedChapterId]);
+    qualityOverride
+  ), [chapters, novelSettings, qualityOverride]);
   const activeQualityIssues = useMemo(
     () => qualityIssues.filter((issue) => !ignoredQualityFingerprints.has(qualityIssueFingerprint(issue))),
     [ignoredQualityFingerprints, qualityIssues]
@@ -596,6 +663,14 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
         next.add(qualityIssueFingerprint(issue));
       }
     }
+    setIgnoredQualityFingerprints(next);
+    storeIgnoredQualityFingerprints(novelId, next);
+  }
+
+  function ignoreQualityIssue(issue: QualityIssue) {
+    if (!novelId) return;
+    const next = new Set(ignoredQualityFingerprints);
+    next.add(qualityIssueFingerprint(issue));
     setIgnoredQualityFingerprints(next);
     storeIgnoredQualityFingerprints(novelId, next);
   }
@@ -873,6 +948,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
         canIgnoreCurrent={activeQualityIssues.some((issue) => issue.severity === "error" || issue.severity === "warning")}
         onClose={() => setQualityOpen(false)}
         onIgnoreCurrent={ignoreCurrentQualityIssues}
+        onIgnoreIssue={ignoreQualityIssue}
         onFilterChange={setQualityFilter}
         onIssueClick={focusQualityIssue}
       />

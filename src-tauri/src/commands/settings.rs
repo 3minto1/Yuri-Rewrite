@@ -1,7 +1,7 @@
 use crate::domain::{AppSettings, AppState, ChapterBatch, NovelSettings};
 use crate::task_control::{auto_runs_are_only_paused, auto_runs_have_non_paused};
 use crate::{
-    load_chapters, load_novel_settings, normalize_additional_feminize_names, normalize_name_list,
+    load_chapters, load_novel_settings, normalize_additional_feminize_names,
     normalize_relationship_targets, to_string,
 };
 use chrono::Utc;
@@ -672,11 +672,18 @@ pub(crate) fn save_novel_settings(
 }
 
 fn normalize_protagonist_aliases(input: &str, protagonist_name: &str) -> String {
-    normalize_name_list(input)
+    normalize_additional_feminize_names(input)
         .lines()
-        .filter(|alias| *alias != protagonist_name)
+        .filter(|alias| protagonist_alias_source(alias) != protagonist_name)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn protagonist_alias_source(input: &str) -> &str {
+    input
+        .split_once(" -> ")
+        .map(|(source, _)| source.trim())
+        .unwrap_or_else(|| input.trim())
 }
 
 #[cfg(test)]
@@ -700,8 +707,8 @@ mod tests {
     #[test]
     fn protagonist_aliases_are_normalized_deduplicated_and_exclude_primary_name() {
         assert_eq!(
-            normalize_protagonist_aliases("炎儿，岩枭\n炎儿；萧炎", "萧炎"),
-            "炎儿\n岩枭"
+            normalize_protagonist_aliases("炎儿 -> 小妍儿，岩枭\n炎儿；萧炎 -> 萧妍", "萧炎"),
+            "炎儿 -> 小妍儿\n岩枭"
         );
     }
 

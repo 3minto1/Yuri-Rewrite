@@ -996,6 +996,9 @@ async fn ensure_name_mapping_asset(
             settings.rewritten_protagonist_name.trim(),
         );
     }
+    for entry in additional_feminize_name_mappings(&settings.protagonist_aliases) {
+        upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
+    }
     for entry in additional_feminize_name_mappings(&settings.additional_feminize_names) {
         upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
     }
@@ -1208,8 +1211,8 @@ fn parse_generated_name_mapping_entries(
 fn required_feminized_name_sources(settings: &NovelSettings) -> Vec<String> {
     let mut names = Vec::new();
     push_unique_name(&mut names, settings.protagonist_name.trim());
-    for name in settings.protagonist_aliases.lines() {
-        push_unique_name(&mut names, name.trim());
+    for name in additional_feminize_name_sources(&settings.protagonist_aliases) {
+        push_unique_name(&mut names, &name);
     }
     for name in additional_feminize_name_sources(&settings.additional_feminize_names) {
         push_unique_name(&mut names, &name);
@@ -1282,6 +1285,9 @@ fn build_name_mapping_asset_content(
             settings.protagonist_name.trim(),
             settings.rewritten_protagonist_name.trim(),
         );
+    }
+    for entry in additional_feminize_name_mappings(&settings.protagonist_aliases) {
+        upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
     }
     for entry in additional_feminize_name_mappings(&settings.additional_feminize_names) {
         upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
@@ -3436,17 +3442,16 @@ fn references_target_protagonist(text: &str, settings: &NovelSettings) -> bool {
     contains_any(text, &["主角", "女主", "男主"])
         || (!source_name.is_empty() && text.contains(source_name))
         || (!rewritten_name.is_empty() && text.contains(rewritten_name))
-        || settings
-            .protagonist_aliases
-            .lines()
+        || additional_feminize_name_sources(&settings.protagonist_aliases)
+            .iter()
             .any(|alias| !alias.trim().is_empty() && text.contains(alias.trim()))
 }
 
 fn protagonist_source_names(settings: &NovelSettings) -> Vec<String> {
     let mut names = Vec::new();
     push_unique_name(&mut names, settings.protagonist_name.trim());
-    for alias in settings.protagonist_aliases.lines() {
-        push_unique_name(&mut names, alias.trim());
+    for alias in additional_feminize_name_sources(&settings.protagonist_aliases) {
+        push_unique_name(&mut names, &alias);
     }
     names
 }
@@ -6797,14 +6802,6 @@ fn escape_unescaped_json_control_chars(input: &str) -> String {
     output
 }
 
-fn normalize_name_list(input: &str) -> String {
-    let mut names = Vec::new();
-    for value in input.split(['\n', '\r', ',', '，', '、', ';', '；']) {
-        push_unique_name(&mut names, value.trim());
-    }
-    names.join("\n")
-}
-
 pub(crate) fn normalize_additional_feminize_names(input: &str) -> String {
     let mut entries: Vec<(String, Option<String>)> = Vec::new();
     for value in input.split(['\n', '\r', ',', '，', '、', ';', '；']) {
@@ -6990,7 +6987,7 @@ mod tests {
         NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
-            protagonist_aliases: "".to_string(),
+            protagonist_aliases: "炎儿 -> 小妍儿".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
@@ -7599,13 +7596,14 @@ mod tests {
     #[test]
     fn analysis_identity_context_links_protagonist_aliases_without_rewrite_rules() {
         let mut settings = sample_novel_settings();
-        settings.protagonist_aliases = "炎儿\n岩枭".to_string();
+        settings.protagonist_aliases = "炎儿 -> 小妍儿\n岩枭".to_string();
         let identity = build_analysis_identity_context(&settings);
         let chapter = sample_chapter(1, "第一章", "炎儿以岩枭之名进入大厅。");
         let prompt = build_batch_analysis_prompt_with_identity(&[chapter], "", &identity);
 
         assert!(prompt.contains("炎儿"));
         assert!(prompt.contains("岩枭"));
+        assert!(!prompt.contains("小妍儿"));
         assert!(prompt.contains("归属于同一人物"));
         for forbidden in ["百合", "女性化", "双女主", "改写后姓名"] {
             assert!(
@@ -7618,13 +7616,21 @@ mod tests {
     #[test]
     fn protagonist_aliases_join_name_mapping_and_rewrite_context() {
         let mut settings = sample_novel_settings();
-        settings.protagonist_aliases = "炎儿\n岩枭".to_string();
+        settings.protagonist_aliases = "炎儿 -> 小妍儿\n岩枭".to_string();
         let required = required_feminized_name_sources(&settings);
         assert_eq!(required, vec!["萧炎", "炎儿", "岩枭"]);
 
         let prompt = build_rewrite_settings_prompt(&settings);
-        assert!(prompt.contains("主角原文别名：炎儿、岩枭"));
-        assert!(prompt.contains("每个别名都必须按一致性资产中的固定映射同步女性化"));
+        assert!(prompt.contains("主角原文别名/指定别名映射：炎儿 -> 小妍儿、岩枭"));
+        assert!(prompt.contains("主角别名和其他指定女性化人物"));
+        assert!(prompt.contains("必须逐字使用指定改写名"));
+
+        let content = build_name_mapping_asset_content(&settings, Vec::new())
+            .expect("valid mapping content");
+        let entries = parse_name_mapping_entries(&content);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source == "炎儿" && entry.target == "小妍儿"));
     }
 
     #[test]
@@ -8253,7 +8259,7 @@ mod tests {
         let legacy = build_rewrite_settings_prompt(&settings);
         let compact = build_compact_rewrite_rule_pack(&settings);
 
-        assert!(compact.contains("主角原文别名：炎儿、岩枭"));
+        assert!(compact.contains("主角原文别名/指定别名映射：炎儿、岩枭"));
         assert!(compact.contains("林动 -> 林筝"));
         assert!(compact.contains("`原姓名 -> 改写后姓名` 必须逐字使用 target"));
         assert!(compact.contains("余靖秋（女主候选）：克制暧昧"));
@@ -8276,7 +8282,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
-            protagonist_aliases: "".to_string(),
+            protagonist_aliases: "炎儿 -> 小妍儿".to_string(),
             rewritten_protagonist_name: "".to_string(),
             additional_feminize_names: "".to_string(),
             bust: "平胸".to_string(),
@@ -8364,7 +8370,7 @@ mod tests {
         let settings = NovelSettings {
             novel_id: "novel-1".to_string(),
             protagonist_name: "萧炎".to_string(),
-            protagonist_aliases: "".to_string(),
+            protagonist_aliases: "炎儿 -> 小妍儿".to_string(),
             rewritten_protagonist_name: "萧妍".to_string(),
             additional_feminize_names: "林动 -> 林筝\n唐三".to_string(),
             bust: "平胸".to_string(),
@@ -8389,6 +8395,9 @@ mod tests {
         assert!(entries
             .iter()
             .any(|entry| entry.source == "萧炎" && entry.target == "萧妍"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source == "炎儿" && entry.target == "小妍儿"));
         assert!(entries
             .iter()
             .any(|entry| entry.source == "林动" && entry.target == "林筝"));

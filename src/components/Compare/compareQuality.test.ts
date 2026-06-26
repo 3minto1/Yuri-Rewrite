@@ -52,6 +52,24 @@ describe("compare quality scan", () => {
     ]));
   });
 
+  it("checks only protagonist alias sources when aliases have rewritten targets", () => {
+    const mappedSettings = {
+      ...settings,
+      protagonist_aliases: "炎儿 -> 小妍儿\n岩枭 -> 岩筱"
+    };
+    const clean = scanRewriteQuality([
+      chapter({ rewrite_text: "萧妍也被旁人叫作小妍儿，曾用岩筱之名行走。" })
+    ], mappedSettings);
+    const dirty = scanRewriteQuality([
+      chapter({ rewrite_text: "萧妍也被旁人叫作炎儿。" })
+    ], mappedSettings);
+
+    expect(clean.some((issue) => issue.category === "source_name")).toBe(false);
+    expect(dirty).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "source_name", evidence: "炎儿" })
+    ]));
+  });
+
   it("limits masculine residue warnings to sentences related to the rewritten protagonist", () => {
     const safe = scanRewriteQuality([
       chapter({ rewrite_text: "远处的少年走过街角。萧妍只是安静看着窗外。" })
