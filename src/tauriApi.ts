@@ -31,9 +31,9 @@ type CommandMap = {
   list_auto_run_recoveries: { args?: undefined; result: AutoRunRecovery[] };
   import_txt: { args: { filePath: string }; result: Novel };
   get_chapter_rule: { args: { novelId: string }; result: StoredChapterRule | null };
-  preview_chapter_rule: { args: { novelId: string; rule: ChapterRule }; result: ChapterRulePreview };
-  save_chapter_rule_and_split: { args: { novelId: string; rule: ChapterRule }; result: StoredChapterRule };
-  split_novel_with_builtin_rule: { args: { novelId: string }; result: void };
+  preview_chapter_rule: { args: { novelId: string; rule: ChapterRule; splitLongChapters?: boolean }; result: ChapterRulePreview };
+  save_chapter_rule_and_split: { args: { novelId: string; rule: ChapterRule; splitLongChapters?: boolean }; result: StoredChapterRule };
+  split_novel_with_builtin_rule: { args: { novelId: string; splitLongChapters?: boolean }; result: void };
   delete_novel: { args: { novelId: string }; result: void };
   list_model_profiles: { args?: undefined; result: ModelProfile[] };
   save_model_profile: { args: { input: ModelProfileInput }; result: ModelProfile };

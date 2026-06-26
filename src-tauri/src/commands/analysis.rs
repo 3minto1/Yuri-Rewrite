@@ -1,5 +1,6 @@
 use crate::domain::{AppState, Job};
 use crate::services::analysis::analyze_and_save;
+use crate::services::progress::{begin_job_progress, clear_job_progress};
 use crate::{
     chapter_has_source_body, create_job, ensure_name_mapping_asset, format_batch_label,
     load_analysis_profile_for_run, load_analysis_profile_id, load_chapters_for_batch, load_job,
@@ -65,6 +66,7 @@ pub(crate) async fn start_analysis(
     for chapter in &chapters {
         set_chapter_status(&state, &chapter.id, "analysis_status", "running")?;
     }
+    begin_job_progress(&state, &novel_id, &job.id, "analysis", &batch_label)?;
 
     if let Err(error) = analyze_and_save(
         &state,
@@ -79,6 +81,7 @@ pub(crate) async fn start_analysis(
     {
         mark_chapters_analysis_failed(&state, &chapters)?;
         update_job(&state, &job.id, "failed", 0, &error)?;
+        clear_job_progress(&state, &novel_id, &job.id)?;
         job = load_job(&state, &job.id)?;
         return Ok(job);
     }
@@ -91,5 +94,6 @@ pub(crate) async fn start_analysis(
         total,
         "分析完成，姓名映射表已更新",
     )?;
+    clear_job_progress(&state, &novel_id, &job.id)?;
     load_job(&state, &job.id)
 }

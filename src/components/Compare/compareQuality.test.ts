@@ -42,6 +42,16 @@ describe("compare quality scan", () => {
     ]);
   });
 
+  it("continues to treat configured protagonist aliases as source-name residue", () => {
+    const issues = scanRewriteQuality([
+      chapter({ rewrite_text: "萧妍也被旁人叫作炎儿。" })
+    ], settings);
+
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "source_name", evidence: "炎儿" })
+    ]));
+  });
+
   it("limits masculine residue warnings to sentences related to the rewritten protagonist", () => {
     const safe = scanRewriteQuality([
       chapter({ rewrite_text: "远处的少年走过街角。萧妍只是安静看着窗外。" })
@@ -92,6 +102,45 @@ describe("compare quality scan", () => {
       "garbage",
       "duplicate"
     ]));
+  });
+
+  it("warns when original and rewrite character counts differ by at least one thousand", () => {
+    const issues = scanRewriteQuality([
+      chapter({ id: "delta", original_text: "原".repeat(2000), rewrite_text: "改".repeat(1000) }),
+      chapter({ id: "near", index: 2, original_text: "原".repeat(1999), rewrite_text: "改".repeat(1000) })
+    ], settings);
+
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        chapterId: "delta",
+        category: "length_delta",
+        severity: "warning",
+        message: "原文 2000 字，改写稿 1000 字，相差 1000 字。"
+      })
+    ]));
+    expect(issues.some((issue) => issue.chapterId === "near" && issue.category === "length_delta")).toBe(false);
+  });
+
+  it("skips length delta checks for pending, edit drafts, manually edited, or single-rewritten chapters", () => {
+    const pending = scanRewriteQuality([
+      chapter({ id: "pending", original_text: "原".repeat(2000), rewrite_text: "改".repeat(1000), rewrite_status: "pending" })
+    ], settings);
+    const override = scanRewriteQuality([
+      chapter({ id: "override", original_text: "原".repeat(2000), rewrite_text: "改".repeat(2000) })
+    ], settings, {
+      chapterId: "override",
+      rewriteText: "改".repeat(1000)
+    });
+    const edited = scanRewriteQuality([
+      chapter({ id: "edited", original_text: "原".repeat(2000), rewrite_text: "改".repeat(1000), rewrite_edited: true })
+    ], settings);
+    const singleRewrite = scanRewriteQuality([
+      chapter({ id: "single", original_text: "原".repeat(2000), rewrite_text: "改".repeat(1000), single_rewrite_original_available: true })
+    ], settings);
+
+    for (const issues of [pending, override, edited, singleRewrite]) {
+      expect(issues.some((issue) => issue.category === "length_delta")).toBe(false);
+    }
   });
 
   it("uses the current edit draft override for the selected chapter", () => {

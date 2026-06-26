@@ -10,7 +10,8 @@ export type QualityIssueCategory =
   | "ad_noise"
   | "garbage"
   | "duplicate"
-  | "unchanged";
+  | "unchanged"
+  | "length_delta";
 
 export type QualityIssue = {
   id: string;
@@ -72,6 +73,8 @@ const severityRank: Record<QualityIssueSeverity, number> = {
   warning: 1,
   info: 2
 };
+
+const LENGTH_DELTA_WARNING_THRESHOLD = 1000;
 
 function normalizeText(text: string) {
   return text.replace(/\s/g, "");
@@ -181,6 +184,25 @@ export function scanRewriteQuality(
 
     if (originalCount > 0 && normalizeText(chapter.original_text) === normalizeText(rewriteText)) {
       pushIssue(issues, chapter, "unchanged", "warning", "改写稿与原文去空白后一致，疑似未改写。", rewriteText, rewriteText.slice(0, 20));
+    }
+
+    const skipLengthDelta = hasOverride || chapter.rewrite_edited || chapter.single_rewrite_original_available;
+    const lengthDelta = Math.abs(originalCount - rewriteCount);
+    if (
+      !skipLengthDelta
+      && chapter.rewrite_status === "completed"
+      && originalCount > 0
+      && lengthDelta >= LENGTH_DELTA_WARNING_THRESHOLD
+    ) {
+      pushIssue(
+        issues,
+        chapter,
+        "length_delta",
+        "warning",
+        `原文 ${originalCount} 字，改写稿 ${rewriteCount} 字，相差 ${lengthDelta} 字。`,
+        rewriteText,
+        rewriteText.slice(0, 20)
+      );
     }
 
     for (const name of sourceNames) {

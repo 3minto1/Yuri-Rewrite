@@ -93,6 +93,7 @@ describe("ChapterRulesPage", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "生成预览" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("preview_chapter_rule", expect.objectContaining({
+      splitLongChapters: false,
       rule: expect.objectContaining({
         include_pattern: expect.stringContaining("序章"),
         extra_pattern: expect.stringContaining("未完待续")
@@ -107,9 +108,64 @@ describe("ChapterRulesPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_chapter_rule_and_split", expect.objectContaining({
-      novelId: "novel-1"
+      novelId: "novel-1",
+      splitLongChapters: false
     })));
     await waitFor(() => expect(onApplied).toHaveBeenCalledWith("novel-1"));
+  });
+
+  it("passes long chapter splitting to preview, save and builtin split", async () => {
+    const onApplied = vi.fn(async () => undefined);
+    const onUseBuiltin = vi.fn(async () => undefined);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_chapter_rule") return null;
+      if (command === "preview_chapter_rule") return {
+        ...preview,
+        total_chapters: 4,
+        chapters: [
+          { index: 1, title: "第一章 开始（1）" },
+          { index: 2, title: "第一章 开始（2）" },
+          { index: 3, title: "第二章 转折" },
+          { index: 4, title: "第三章 结束" }
+        ]
+      };
+      if (command === "save_chapter_rule_and_split") return { novel_id: novel.id, rule: {}, updated_at: "now" };
+      return undefined;
+    });
+
+    render(
+      <ChapterRulesPage
+        novel={novel}
+        chapters={[]}
+        canonAssets={[]}
+        busy=""
+        processing={false}
+        onBack={vi.fn()}
+        onApplied={onApplied}
+        onUseBuiltin={onUseBuiltin}
+        showNotice={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByText(/长章节自动拆分/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.getByRole("button", { name: "开启" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "生成预览" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("preview_chapter_rule", expect.objectContaining({
+      novelId: "novel-1",
+      splitLongChapters: true
+    })));
+    expect(await screen.findByText("第一章 开始（1）")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_chapter_rule_and_split", expect.objectContaining({
+      novelId: "novel-1",
+      splitLongChapters: true
+    })));
+
+    fireEvent.click(screen.getByRole("button", { name: "使用内置规则" }));
+    await waitFor(() => expect(onUseBuiltin).toHaveBeenCalledWith("novel-1", true));
   });
 
   it("allows an imported novel without processing traces to resplit after confirmation", async () => {
@@ -144,7 +200,8 @@ describe("ChapterRulesPage", () => {
 
     await waitFor(() => expect(confirm).toHaveBeenCalled());
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_chapter_rule_and_split", expect.objectContaining({
-      novelId: "novel-1"
+      novelId: "novel-1",
+      splitLongChapters: false
     })));
     await waitFor(() => expect(onApplied).toHaveBeenCalledWith("novel-1"));
   });
@@ -172,6 +229,7 @@ describe("ChapterRulesPage", () => {
 
     await waitFor(() => expect(screen.getAllByText("已开始分析或改写，不能重新拆分；如需修改章节规则，请重新导入小说。")).toHaveLength(2));
     expect(screen.getByRole("button", { name: "使用内置规则" })).toBeDisabled();
+    expect(screen.getByText(/长章节自动拆分/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "生成预览" }));
     expect(await screen.findByText("第一章 开始")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();

@@ -3,6 +3,8 @@ use regex::Regex;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
+const LONG_CHAPTER_SPLIT_LIMIT: usize = 5_000;
+
 pub(crate) fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
     let matches = chapter_heading_matches(text);
     if matches.is_empty() {
@@ -141,6 +143,113 @@ pub(crate) fn split_chapters_with_custom_rule(
         chapters,
         detected_chapters: true,
     })
+}
+
+pub(crate) fn split_long_detected_chapters(
+    novel_id: &str,
+    chapters: Vec<Chapter>,
+    enabled: bool,
+) -> Vec<Chapter> {
+    if !enabled {
+        return chapters;
+    }
+    let mut rewritten = Vec::new();
+    for chapter in chapters {
+        let parts = split_long_chapter_text(&chapter.original_text);
+        let split_count = parts.len();
+        for (part_idx, part) in parts.into_iter().enumerate() {
+            let title = if split_count > 1 {
+                format!("{}（{}）", chapter.title, part_idx + 1)
+            } else {
+                chapter.title.clone()
+            };
+            rewritten.push(Chapter {
+                id: Uuid::new_v4().to_string(),
+                novel_id: novel_id.to_string(),
+                index: rewritten.len() as i64 + 1,
+                title,
+                original_text: part,
+                analysis_json: None,
+                rewrite_text: None,
+                rewrite_edited: false,
+                single_rewrite_original_available: false,
+                analysis_status: "pending".to_string(),
+                rewrite_status: "pending".to_string(),
+            });
+        }
+    }
+    rewritten
+}
+
+fn split_long_chapter_text(text: &str) -> Vec<String> {
+    let non_whitespace_count = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    if non_whitespace_count <= LONG_CHAPTER_SPLIT_LIMIT {
+        return vec![text.to_string()];
+    }
+    let part_count = non_whitespace_count.div_ceil(LONG_CHAPTER_SPLIT_LIMIT);
+    let mut boundaries = Vec::new();
+    let mut last = 0usize;
+    for part_index in 1..part_count {
+        let target = non_whitespace_count * part_index / part_count;
+        let ideal = byte_index_for_non_whitespace_target(text, target);
+        let preferred = nearest_line_boundary(text, target, non_whitespace_count).unwrap_or(ideal);
+        let boundary = if preferred > last { preferred } else { ideal };
+        if boundary > last && boundary < text.len() {
+            boundaries.push(boundary);
+            last = boundary;
+        }
+    }
+
+    let mut start = 0usize;
+    let mut parts = Vec::new();
+    for end in boundaries.into_iter().chain(std::iter::once(text.len())) {
+        let part = text[start..end].trim().to_string();
+        if !part.is_empty() {
+            parts.push(part);
+        }
+        start = end;
+    }
+    if parts.is_empty() {
+        vec![text.trim().to_string()]
+    } else {
+        parts
+    }
+}
+
+fn byte_index_for_non_whitespace_target(text: &str, target: usize) -> usize {
+    let mut seen = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if !ch.is_whitespace() {
+            seen += 1;
+            if seen >= target {
+                return idx + ch.len_utf8();
+            }
+        }
+    }
+    text.len()
+}
+
+fn nearest_line_boundary(text: &str, target: usize, total: usize) -> Option<usize> {
+    let tolerance = LONG_CHAPTER_SPLIT_LIMIT / 5;
+    let min_target = target.saturating_sub(tolerance).max(1);
+    let max_target = (target + tolerance).min(total.saturating_sub(1));
+    let mut best: Option<(usize, usize)> = None;
+    let mut seen = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if !ch.is_whitespace() {
+            seen += 1;
+        }
+        if ch == '\n' && seen >= min_target && seen <= max_target {
+            let distance = seen.abs_diff(target);
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_distance)| distance < *best_distance)
+            {
+                best = Some((idx + ch.len_utf8(), distance));
+            }
+        }
+    }
+    best.map(|(idx, _)| idx)
 }
 
 struct CustomHeadingMatch {

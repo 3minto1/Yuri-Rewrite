@@ -171,8 +171,8 @@ function detail(): NovelDetail {
   };
 }
 
-function mockChapterRulePreview(): ChapterRulePreview {
-  const previewTitles = [
+function mockChapterRulePreview(splitLongChapters = false): ChapterRulePreview {
+  const baseTitles = [
     "第一章 雪鹰领",
     "第二章 超凡",
     "第三章 离离",
@@ -180,6 +180,9 @@ function mockChapterRulePreview(): ChapterRulePreview {
     "第五章 枪法",
     "第六章 修炼"
   ];
+  const previewTitles = splitLongChapters
+    ? baseTitles.flatMap((title, index) => index === 0 ? [`${title}（1）`, `${title}（2）`] : [title])
+    : baseTitles;
   return {
     total_chapters: previewTitles.length,
     chapters: previewTitles.map((title, index) => ({ index: index + 1, title })),
@@ -188,12 +191,15 @@ function mockChapterRulePreview(): ChapterRulePreview {
   };
 }
 
-function applyMockSplit(rule?: ChapterRule) {
+function applyMockSplit(rule?: ChapterRule, splitLongChapters = false) {
   if (rule) {
     chapterRule = { novel_id: novel.id, rule, updated_at: now };
   }
   novel.status = "imported";
-  chapters = chapterTitles.map((title, offset) => {
+  const titles = splitLongChapters
+    ? chapterTitles.flatMap((title, index) => index === 0 ? [`${title}（1）`, `${title}（2）`] : [title])
+    : chapterTitles;
+  chapters = titles.map((title, offset) => {
     const index = offset + 1;
     return {
       id: `browser-chapter-${index}`,
@@ -268,14 +274,14 @@ export async function invokeBrowserMock(
     case "get_chapter_rule":
       return chapterRule ? { ...chapterRule, rule: { ...chapterRule.rule } } : null;
     case "preview_chapter_rule":
-      return mockChapterRulePreview();
+      return mockChapterRulePreview(Boolean(args?.splitLongChapters));
     case "save_chapter_rule_and_split": {
       const rule = args?.rule as ChapterRule;
-      applyMockSplit(rule);
+      applyMockSplit(rule, Boolean(args?.splitLongChapters));
       return { ...chapterRule!, rule: { ...chapterRule!.rule } };
     }
     case "split_novel_with_builtin_rule":
-      applyMockSplit();
+      applyMockSplit(undefined, Boolean(args?.splitLongChapters));
       return undefined;
     case "list_auto_run_recoveries":
       return [];

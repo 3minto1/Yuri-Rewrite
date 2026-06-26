@@ -265,6 +265,21 @@ describe("CompareView", () => {
     expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("尚未改写。");
   });
 
+  it("shows length delta warnings in the quality panel", () => {
+    render(<Harness initialChapters={[
+      { ...chapters[0], original_text: "原".repeat(2000), rewrite_text: "改".repeat(1000) },
+      { ...chapters[1], rewrite_text: "萧妍走进第二章。" }
+    ]} />);
+
+    expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("1");
+    fireEvent.click(screen.getByRole("button", { name: /检查/ }));
+
+    const panel = screen.getByLabelText("本地质量检查");
+    expect(panel).toHaveTextContent("当前章 1 · 全书 1");
+    expect(panel).toHaveTextContent("字数");
+    expect(panel).toHaveTextContent("原文 2000 字，改写稿 1000 字，相差 1000 字。");
+  });
+
   it("updates quality counts while editing the current rewrite", () => {
     render(<Harness initialChapters={[
       { ...chapters[0], rewrite_text: "萧妍走进大厅。" }

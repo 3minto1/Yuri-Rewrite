@@ -574,7 +574,7 @@ describe("App feature behavior", () => {
       });
     });
 
-    expect(await screen.findByLabelText("一键分析改写进度 20%")).toBeInTheDocument();
+    expect(await screen.findByLabelText("任务进度 20%")).toBeInTheDocument();
     expect(screen.getByText(/章节 40\/100 · 分片 1\/6/)).toBeInTheDocument();
     expect(screen.getByText("2/6 第2章（分析）")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
@@ -595,6 +595,86 @@ describe("App feature behavior", () => {
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "终止" })).not.toBeInTheDocument()
     );
+  });
+
+  it("shows detailed progress for a standalone analysis task", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    act(() => {
+      mocks.progressCallback?.({
+        id: "analysis-1",
+        novel_id: "novel-1",
+        job_type: "analysis",
+        status: "running",
+        current_chapter: 2,
+        total_chapters: 4,
+        message: "第 1/1 批 · 分析 · 章节已完成 2/4 · 分片已完成 1/2",
+        phase: "analysis",
+        batch_index: 1,
+        batch_total: 1,
+        shard_completed: 1,
+        shard_total: 2,
+        chapter_completed: 2,
+        chapter_total: 4,
+        active_shards: [{
+          index: 2,
+          total: 2,
+          start_chapter: 3,
+          end_chapter: 4,
+          phase: "analysis"
+        }]
+      });
+    });
+
+    const progressRow = await screen.findByLabelText("任务进度 50%");
+    const jobStrip = progressRow.closest(".job-strip") as HTMLElement;
+    expect(progressRow).toBeInTheDocument();
+    expect(within(jobStrip).getByText("分析")).toBeInTheDocument();
+    expect(within(jobStrip).getByText(/章节 2\/4 · 分片 1\/2/)).toBeInTheDocument();
+    expect(within(jobStrip).getByText("2/2 第3-4章（分析）")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续" })).not.toBeInTheDocument();
+  });
+
+  it("shows detailed progress for a standalone rewrite task", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    act(() => {
+      mocks.progressCallback?.({
+        id: "rewrite-1",
+        novel_id: "novel-1",
+        job_type: "rewrite",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 3,
+        message: "第 1/1 批 · 改写 · 章节已完成 1/3 · 分片已完成 1/3",
+        phase: "rewrite",
+        batch_index: 1,
+        batch_total: 1,
+        shard_completed: 1,
+        shard_total: 3,
+        chapter_completed: 1,
+        chapter_total: 3,
+        active_shards: [{
+          index: 2,
+          total: 3,
+          start_chapter: 2,
+          end_chapter: 2,
+          phase: "review"
+        }]
+      });
+    });
+
+    const progressRow = await screen.findByLabelText("任务进度 33%");
+    const jobStrip = progressRow.closest(".job-strip") as HTMLElement;
+    expect(progressRow).toBeInTheDocument();
+    expect(within(jobStrip).getByText("改写")).toBeInTheDocument();
+    expect(within(jobStrip).getByText(/章节 1\/3 · 分片 1\/3/)).toBeInTheDocument();
+    expect(within(jobStrip).getByText("2/3 第2章（审查）")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续" })).not.toBeInTheDocument();
   });
 
   it("allows parallelism changes while an auto job is paused", async () => {

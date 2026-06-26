@@ -319,6 +319,8 @@ function qualityCategoryLabel(issue: QualityIssue) {
       return "重复";
     case "unchanged":
       return "未改";
+    case "length_delta":
+      return "字数";
     default:
       return "检查";
   }

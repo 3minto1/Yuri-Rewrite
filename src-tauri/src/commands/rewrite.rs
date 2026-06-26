@@ -1,4 +1,5 @@
 use crate::domain::{AppState, Chapter, Job};
+use crate::services::progress::{begin_job_progress, clear_job_progress};
 use crate::services::rewrite::{rewrite_and_save, RewriteRunContext};
 use crate::{
     append_ai_log, build_relevant_canon_text, build_single_chapter_rewrite_from_draft_prompt,
@@ -108,6 +109,7 @@ pub(crate) async fn start_rewrite(
         0,
         &format!("正在批次改写 {}", batch_label),
     )?;
+    begin_job_progress(&state, &novel_id, &job.id, "rewrite", &batch_label)?;
     if let Err(error) = rewrite_and_save(
         &state,
         RewriteRunContext {
@@ -129,6 +131,7 @@ pub(crate) async fn start_rewrite(
     {
         mark_chapters_rewrite_failed(&state, &chapters)?;
         update_job(&state, &job.id, "failed", 0, &error)?;
+        clear_job_progress(&state, &novel_id, &job.id)?;
         job = load_job(&state, &job.id)?;
         return Ok(job);
     }
@@ -144,6 +147,7 @@ pub(crate) async fn start_rewrite(
             "改写完成"
         },
     )?;
+    clear_job_progress(&state, &novel_id, &job.id)?;
     load_job(&state, &job.id)
 }
 

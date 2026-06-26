@@ -3,7 +3,7 @@ use crate::domain::{
 };
 use crate::{
     create_chapter_batches, decode_text, load_chapter_batch_size, seed_canon_assets,
-    split_chapters, split_chapters_with_custom_rule, to_string,
+    split_chapters, split_chapters_with_custom_rule, split_long_detected_chapters, to_string,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -23,13 +23,20 @@ pub(crate) fn get_chapter_rule(
 pub(crate) fn preview_chapter_rule(
     novel_id: String,
     rule: ChapterRule,
+    split_long_chapters: Option<bool>,
     state: State<AppState>,
 ) -> Result<ChapterRulePreview, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     let text = load_source_text(&conn, &novel_id)?;
     let split = split_chapters_with_custom_rule(&novel_id, &text, &normalize_chapter_rule(rule))?;
+    let chapters = maybe_split_long_detected_chapters(
+        &novel_id,
+        split.chapters,
+        split.detected_chapters,
+        split_long_chapters,
+    );
     Ok(preview_from_chapters(
-        &split.chapters,
+        &chapters,
         "预览已生成，确认无误后可保存应用。",
     ))
 }
@@ -38,6 +45,7 @@ pub(crate) fn preview_chapter_rule(
 pub(crate) fn save_chapter_rule_and_split(
     novel_id: String,
     rule: ChapterRule,
+    split_long_chapters: Option<bool>,
     state: State<AppState>,
 ) -> Result<StoredChapterRule, String> {
     ensure_can_split_novel(&state, &novel_id)?;
@@ -46,14 +54,20 @@ pub(crate) fn save_chapter_rule_and_split(
     ensure_chapter_split_allowed(&conn, &novel_id)?;
     let text = load_source_text(&conn, &novel_id)?;
     let split = split_chapters_with_custom_rule(&novel_id, &text, &normalized)?;
-    if split.chapters.is_empty() {
+    let chapters = maybe_split_long_detected_chapters(
+        &novel_id,
+        split.chapters,
+        split.detected_chapters,
+        split_long_chapters,
+    );
+    if chapters.is_empty() {
         return Err("自定义章节规则未生成任何章节。".to_string());
     }
     rebuild_pending_novel_chapters(
         &mut conn,
         &state.data_dir,
         &novel_id,
-        &split.chapters,
+        &chapters,
         split.detected_chapters,
     )?;
     save_chapter_rule_value(&conn, &novel_id, &normalized)
@@ -62,6 +76,7 @@ pub(crate) fn save_chapter_rule_and_split(
 #[tauri::command]
 pub(crate) fn split_novel_with_builtin_rule(
     novel_id: String,
+    split_long_chapters: Option<bool>,
     state: State<AppState>,
 ) -> Result<(), String> {
     ensure_can_split_novel(&state, &novel_id)?;
@@ -69,15 +84,34 @@ pub(crate) fn split_novel_with_builtin_rule(
     ensure_chapter_split_allowed(&conn, &novel_id)?;
     let text = load_source_text(&conn, &novel_id)?;
     let split = split_chapters(&novel_id, &text);
-    if split.chapters.is_empty() {
+    let chapters = maybe_split_long_detected_chapters(
+        &novel_id,
+        split.chapters,
+        split.detected_chapters,
+        split_long_chapters,
+    );
+    if chapters.is_empty() {
         return Err("内置章节识别未生成任何章节。".to_string());
     }
     rebuild_pending_novel_chapters(
         &mut conn,
         &state.data_dir,
         &novel_id,
-        &split.chapters,
+        &chapters,
         split.detected_chapters,
+    )
+}
+
+fn maybe_split_long_detected_chapters(
+    novel_id: &str,
+    chapters: Vec<Chapter>,
+    detected_chapters: bool,
+    split_long_chapters: Option<bool>,
+) -> Vec<Chapter> {
+    split_long_detected_chapters(
+        novel_id,
+        chapters,
+        detected_chapters && split_long_chapters.unwrap_or(false),
     )
 }
 
@@ -376,6 +410,133 @@ mod tests {
             .expect("count chapters");
         assert_eq!(count, 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn pending_test_chapter(title: &str, body: &str) -> Chapter {
+        Chapter {
+            id: uuid::Uuid::new_v4().to_string(),
+            novel_id: "novel-1".to_string(),
+            index: 1,
+            title: title.to_string(),
+            original_text: body.to_string(),
+            analysis_json: None,
+            rewrite_text: None,
+            rewrite_edited: false,
+            single_rewrite_original_available: false,
+            analysis_status: "pending".to_string(),
+            rewrite_status: "pending".to_string(),
+        }
+    }
+
+    fn compact_text(value: &str) -> String {
+        value.chars().filter(|ch| !ch.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn long_chapter_split_option_controls_detected_chapter_splitting() {
+        let body = "字".repeat(5_001);
+        let disabled = split_long_detected_chapters(
+            "novel-1",
+            vec![pending_test_chapter("第一章 长章", &body)],
+            false,
+        );
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].title, "第一章 长章");
+
+        let enabled = split_long_detected_chapters(
+            "novel-1",
+            vec![pending_test_chapter("第一章 长章", &body)],
+            true,
+        );
+        assert_eq!(enabled.len(), 2);
+        assert_eq!(enabled[0].index, 1);
+        assert_eq!(enabled[1].index, 2);
+        assert_eq!(enabled[0].title, "第一章 长章（1）");
+        assert_eq!(enabled[1].title, "第一章 长章（2）");
+        assert_eq!(
+            compact_text(
+                &enabled
+                    .iter()
+                    .map(|chapter| chapter.original_text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            ),
+            compact_text(&body)
+        );
+    }
+
+    #[test]
+    fn long_chapter_split_handles_ten_thousand_plus_chars_and_paragraph_boundaries() {
+        let body = "字".repeat(10_001);
+        let enabled = split_long_detected_chapters(
+            "novel-1",
+            vec![pending_test_chapter("第一章 万字章", &body)],
+            true,
+        );
+        assert_eq!(enabled.len(), 3);
+        assert_eq!(
+            enabled
+                .iter()
+                .map(|chapter| chapter.title.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "第一章 万字章（1）",
+                "第一章 万字章（2）",
+                "第一章 万字章（3）"
+            ]
+        );
+        assert_eq!(
+            compact_text(
+                &enabled
+                    .iter()
+                    .map(|chapter| chapter.original_text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            ),
+            compact_text(&body)
+        );
+
+        let paragraph_body = format!("{}\n\n{}", "甲".repeat(4_000), "乙".repeat(4_001));
+        let paragraph_split = split_long_detected_chapters(
+            "novel-1",
+            vec![pending_test_chapter("第二章 段落", &paragraph_body)],
+            true,
+        );
+        assert_eq!(paragraph_split.len(), 2);
+        assert!(paragraph_split[0].original_text.ends_with('甲'));
+        assert!(paragraph_split[1].original_text.starts_with('乙'));
+    }
+
+    #[test]
+    fn long_chapter_split_is_skipped_for_undetected_chunks() {
+        let body = "字".repeat(10_001);
+        let chapters = maybe_split_long_detected_chapters(
+            "novel-1",
+            vec![pending_test_chapter("自动分段 1", &body)],
+            false,
+            Some(true),
+        );
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "自动分段 1");
+    }
+
+    #[test]
+    fn custom_rule_preview_can_show_split_long_chapter_titles() {
+        let text = format!("第一章 开始\n{}\n第二章 继续\n短正文", "字".repeat(5_001));
+        let split = split_chapters_with_custom_rule("novel-1", &text, &test_rule())
+            .expect("split with custom rule");
+        let chapters = maybe_split_long_detected_chapters(
+            "novel-1",
+            split.chapters,
+            split.detected_chapters,
+            Some(true),
+        );
+        let preview = preview_from_chapters(&chapters, "ok");
+
+        assert_eq!(preview.total_chapters, 3);
+        assert_eq!(preview.chapters[0].title, "第一章 开始（1）");
+        assert_eq!(preview.chapters[1].title, "第一章 开始（2）");
+        assert_eq!(preview.chapters[2].title, "第二章 继续");
     }
 
     #[test]

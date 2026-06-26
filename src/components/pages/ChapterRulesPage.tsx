@@ -29,7 +29,7 @@ type ChapterRulesPageProps = {
   processing: boolean;
   onBack: () => void;
   onApplied: (novelId: string) => Promise<void>;
-  onUseBuiltin: (novelId: string) => Promise<void>;
+  onUseBuiltin: (novelId: string, splitLongChapters?: boolean) => Promise<void>;
   showNotice: (message: string) => void;
 };
 
@@ -93,10 +93,13 @@ function chapterRuleApplyState(
   };
 }
 
-function confirmApplyChapterRule(pendingSplit: boolean) {
+function confirmApplyChapterRule(pendingSplit: boolean, splitLongChapters: boolean) {
   if (pendingSplit) return true;
+  const splitNotice = splitLongChapters
+    ? "\n\n已开启长章节自动拆分，超过 5000 字的单章会按拆分结果重建为多个章节。"
+    : "";
   return window.confirm(
-    "重新生成章节列表会替换当前章节划分和批次范围，并清空尚未使用的一致性资产。\n\n不会删除原始 TXT、小说设定、模型配置或应用设置。\n\n确定继续吗？"
+    `重新生成章节列表会替换当前章节划分和批次范围，并清空尚未使用的一致性资产。${splitNotice}\n\n不会删除原始 TXT、小说设定、模型配置或应用设置。\n\n确定继续吗？`
   );
 }
 
@@ -117,6 +120,7 @@ export function ChapterRulesPage({
   const [loadingRule, setLoadingRule] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [splitLongChapters, setSplitLongChapters] = useState(false);
 
   const pendingSplit = novel?.status === "pending_split";
   const applyState = useMemo(
@@ -138,6 +142,7 @@ export function ChapterRulesPage({
   useEffect(() => {
     setPreview(null);
     setQuery("");
+    setSplitLongChapters(false);
     if (!novel) {
       setRule(defaultRule);
       return;
@@ -167,7 +172,8 @@ export function ChapterRulesPage({
     try {
       const result = await invokeCommand("preview_chapter_rule", {
         novelId: novel.id,
-        rule
+        rule,
+        splitLongChapters
       });
       setPreview(result);
       showNotice(result.message);
@@ -180,12 +186,13 @@ export function ChapterRulesPage({
 
   async function saveAndApply() {
     if (!novel || !preview?.can_apply || !applyState.canApply) return;
-    if (!confirmApplyChapterRule(Boolean(pendingSplit))) return;
+    if (!confirmApplyChapterRule(Boolean(pendingSplit), splitLongChapters)) return;
     setSaving(true);
     try {
       await invokeCommand("save_chapter_rule_and_split", {
         novelId: novel.id,
-        rule
+        rule,
+        splitLongChapters
       });
       await onApplied(novel.id);
     } catch (error) {
@@ -197,10 +204,10 @@ export function ChapterRulesPage({
 
   async function useBuiltinRule() {
     if (!novel || !applyState.canApply) return;
-    if (!confirmApplyChapterRule(Boolean(pendingSplit))) return;
+    if (!confirmApplyChapterRule(Boolean(pendingSplit), splitLongChapters)) return;
     setSaving(true);
     try {
-      await onUseBuiltin(novel.id);
+      await onUseBuiltin(novel.id, splitLongChapters);
     } finally {
       setSaving(false);
     }
@@ -355,6 +362,19 @@ export function ChapterRulesPage({
           <span className="muted">
             预览不会修改数据库；满意后点击保存才会生成章节列表。
           </span>
+        </div>
+
+        <div className="setting-toggle-row chapter-rule-long-split">
+          <button
+            type="button"
+            className={splitLongChapters ? "setting-switch active" : "setting-switch"}
+            onClick={() => setSplitLongChapters((enabled) => !enabled)}
+            disabled={disabled}
+            aria-pressed={splitLongChapters}
+          >
+            {splitLongChapters ? "开启" : "关闭"}
+          </button>
+          <span>长章节自动拆分：仅影响本次预览和生成章节列表；单章正文超过 5000 字时会拆成（1）（2）等多个章节。</span>
         </div>
       </section>
 

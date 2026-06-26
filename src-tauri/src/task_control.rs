@@ -176,6 +176,7 @@ pub(crate) struct AutoRunControl {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AutoRunProgressState {
+    pub(crate) job_id: Option<String>,
     pub(crate) phase: Option<String>,
     pub(crate) batch_index: Option<i64>,
     pub(crate) batch_total: Option<i64>,

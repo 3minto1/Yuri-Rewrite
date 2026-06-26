@@ -33,9 +33,16 @@ pub(crate) fn begin_auto_batch_progress(
     {
         return Ok(());
     }
+    let job_id = state
+        .auto_runs
+        .lock()
+        .map_err(to_string)?
+        .get(novel_id)
+        .and_then(|control| control.job_id.clone());
     state.auto_run_progress.lock().map_err(to_string)?.insert(
         novel_id.to_string(),
         AutoRunProgressState {
+            job_id,
             phase: Some(phase.to_string()),
             batch_index: Some(batch_index),
             batch_total: Some(batch_total),
@@ -46,6 +53,43 @@ pub(crate) fn begin_auto_batch_progress(
     emit_auto_runtime_progress(state, novel_id)
 }
 
+pub(crate) fn begin_job_progress(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    job_id: &str,
+    phase: &str,
+    batch_label: &str,
+) -> Result<(), String> {
+    state.auto_run_progress.lock().map_err(to_string)?.insert(
+        novel_id.to_string(),
+        AutoRunProgressState {
+            job_id: Some(job_id.to_string()),
+            phase: Some(phase.to_string()),
+            batch_index: Some(1),
+            batch_total: Some(1),
+            batch_label: Some(batch_label.to_string()),
+            ..AutoRunProgressState::default()
+        },
+    );
+    emit_auto_runtime_progress(state, novel_id)
+}
+
+pub(crate) fn clear_job_progress(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    job_id: &str,
+) -> Result<(), String> {
+    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    if progress
+        .get(novel_id)
+        .and_then(|entry| entry.job_id.as_deref())
+        .is_some_and(|active_job_id| active_job_id == job_id)
+    {
+        progress.remove(novel_id);
+    }
+    Ok(())
+}
+
 pub(crate) fn set_auto_progress_shard_total(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -54,16 +98,29 @@ pub(crate) fn set_auto_progress_shard_total(
     chapter_total: usize,
     completed_chapter_ids: HashSet<String>,
 ) -> Result<(), String> {
-    if !state
+    let auto_job_id = state
         .auto_runs
         .lock()
         .map_err(to_string)?
-        .contains_key(novel_id)
-    {
-        return Ok(());
-    }
+        .get(novel_id)
+        .and_then(|control| control.job_id.clone());
     let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
+    if !progress.contains_key(novel_id) {
+        let Some(job_id) = auto_job_id.clone() else {
+            return Ok(());
+        };
+        progress.insert(
+            novel_id.to_string(),
+            AutoRunProgressState {
+                job_id: Some(job_id),
+                ..AutoRunProgressState::default()
+            },
+        );
+    }
     let entry = progress.entry(novel_id.to_string()).or_default();
+    if entry.job_id.is_none() {
+        entry.job_id = auto_job_id;
+    }
     entry.phase = Some(phase.to_string());
     entry.shard_total = shard_total;
     entry.completed_shards.clear();
@@ -191,12 +248,6 @@ fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Re
         .map_err(to_string)?
         .get(novel_id)
         .cloned();
-    let Some(control) = control else {
-        return Ok(());
-    };
-    let Some(job_id) = control.job_id.as_deref() else {
-        return Ok(());
-    };
     let progress_state = state
         .auto_run_progress
         .lock()
@@ -204,6 +255,14 @@ fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Re
         .get(novel_id)
         .cloned()
         .unwrap_or_default();
+    let job_id = progress_state.job_id.as_deref().or_else(|| {
+        control
+            .as_ref()
+            .and_then(|control| control.job_id.as_deref())
+    });
+    let Some(job_id) = job_id else {
+        return Ok(());
+    };
     let conn = state.conn.lock().map_err(to_string)?;
     let job = conn
         .query_row(
@@ -239,23 +298,25 @@ fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Re
             phase_label(phase)
         )
     };
-    update_job(
-        state,
-        &job.id,
-        "running",
-        control
-            .completed_batches
-            .saturating_sub(control.start_batch_index),
-        &message,
-    )?;
+    let current_chapter = control
+        .as_ref()
+        .map(|control| {
+            control
+                .completed_batches
+                .saturating_sub(control.start_batch_index)
+        })
+        .unwrap_or_else(|| {
+            i64::try_from(chapter_completed)
+                .unwrap_or(i64::MAX)
+                .min(job.total_chapters)
+        });
+    update_job(state, &job.id, "running", current_chapter, &message)?;
     let payload = JobProgress {
         id: job.id,
         novel_id: job.novel_id,
         job_type: job.job_type,
         status: "running".to_string(),
-        current_chapter: control
-            .completed_batches
-            .saturating_sub(control.start_batch_index),
+        current_chapter,
         total_chapters: job.total_chapters,
         message,
         phase: progress_state.phase,

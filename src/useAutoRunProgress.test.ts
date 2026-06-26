@@ -101,6 +101,36 @@ describe("useAutoRunProgress", () => {
     );
   });
 
+  it("accepts standalone analysis and rewrite progress events", async () => {
+    const onProgress = vi.fn();
+    renderHook(() => useAutoRunProgress("novel-1", onProgress));
+    await waitFor(() => expect(progressHandler).toBeDefined());
+
+    act(() => progressHandler?.({
+      payload: progress({
+        id: "analysis-job",
+        job_type: "analysis",
+        phase: "analysis",
+        message: "批次分析中"
+      })
+    }));
+    act(() => progressHandler?.({
+      payload: progress({
+        id: "rewrite-job",
+        job_type: "rewrite",
+        phase: "rewrite",
+        message: "批次改写中"
+      })
+    }));
+
+    expect(onProgress).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "analysis-job", job_type: "analysis", phase: "analysis" })
+    );
+    expect(onProgress).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "rewrite-job", job_type: "rewrite", phase: "rewrite" })
+    );
+  });
+
   it("unsubscribes when the component unmounts", async () => {
     const hook = renderHook(() => useAutoRunProgress("novel-1", vi.fn()));
     await waitFor(() => expect(progressHandler).toBeDefined());

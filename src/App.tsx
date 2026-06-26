@@ -303,6 +303,13 @@ const jobPhaseText: Record<string, string> = {
   export: "导出"
 };
 
+const jobTypeText: Record<string, string> = {
+  analysis: "分析",
+  rewrite: "改写",
+  auto: "一键分析改写",
+  auto_batch: "当前批次一键任务"
+};
+
 function localDateString(date: Date) {
   return [
     date.getFullYear(),
@@ -468,8 +475,11 @@ export default function App() {
     action?.();
   }, [commitActiveView, pendingNovelSettingsActiveView]);
 
-  const autoProgressPercent = useMemo(() => {
-    if (!job || !["auto", "auto_batch"].includes(job.job_type) || job.total_chapters <= 0) return 0;
+  const jobProgressPercent = useMemo(() => {
+    if (!job || job.total_chapters <= 0) return 0;
+    if (["analysis", "rewrite"].includes(job.job_type) && job.chapter_total) {
+      return Math.min(100, Math.max(0, Math.round(((job.chapter_completed ?? 0) / job.chapter_total) * 100)));
+    }
     if (job.job_type === "auto_batch" && job.status === "running") {
       const stageRatio = job.chapter_total
         ? (job.chapter_completed ?? 0) / job.chapter_total
@@ -631,6 +641,15 @@ export default function App() {
 
   useAutoRunProgress(detail?.novel.id ?? null, (progress: AutoRunProgress) => {
       setJob(progress);
+      const isAutoProgress = ["auto", "auto_batch"].includes(progress.job_type);
+      if (!isAutoProgress && ["analysis", "rewrite"].includes(progress.job_type)) {
+        if (progress.status === "running") {
+          setBusy(progress.job_type);
+        } else if (busyRef.current === progress.job_type) {
+          setBusy("");
+        }
+        return;
+      }
       setAutoRunMode(progress.job_type === "auto_batch" ? "batch" : "range");
       if (progress.status === "running") {
         tokenStatsDirtyRef.current = true;
@@ -1085,11 +1104,11 @@ export default function App() {
     }
   }
 
-  async function splitNovelWithBuiltinRule(novelId: string) {
+  async function splitNovelWithBuiltinRule(novelId: string, splitLongChapters = false) {
     setBusy("chapter-split");
     setNotice("");
     try {
-      await invoke("split_novel_with_builtin_rule", { novelId });
+      await invoke("split_novel_with_builtin_rule", { novelId, splitLongChapters });
       setPendingSplitPrompt(null);
       await refreshAll();
       await loadNovel(novelId);
@@ -2299,20 +2318,20 @@ export default function App() {
             <CheckCircle2 size={17} />
             <div className="job-content">
               <span className="job-summary">
-                <span>{job.job_type === "auto_batch" ? "当前批次一键任务" : job.job_type}</span>
+                <span>{jobTypeText[job.job_type] ?? job.job_type}</span>
                 <StatusBadge status={job.status} label={statusText[job.status] ?? job.status} />
                 <span>{job.current_chapter}/{job.total_chapters} · {job.message}</span>
                 {job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running"
                   ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}`
                   : ""}
               </span>
-              {["auto", "auto_batch"].includes(job.job_type) && (
+              {["analysis", "rewrite", "auto", "auto_batch"].includes(job.job_type) && (
                 <>
-                  <div className="job-progress-row" aria-label={`一键分析改写进度 ${autoProgressPercent}%`}>
+                  <div className="job-progress-row" aria-label={`任务进度 ${jobProgressPercent}%`}>
                     <div className="job-progress-bar">
-                      <div className="job-progress-fill" style={{ width: `${autoProgressPercent}%` }} />
+                      <div className="job-progress-fill" style={{ width: `${jobProgressPercent}%` }} />
                     </div>
-                    <strong>{autoProgressPercent}%</strong>
+                    <strong>{jobProgressPercent}%</strong>
                   </div>
                   {job.shard_total !== undefined && job.shard_total > 0 && (
                     <div className="job-stage-progress">
