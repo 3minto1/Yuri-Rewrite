@@ -82,6 +82,25 @@ function selectChapter(title: string) {
   fireEvent.click(screen.getByRole("option", { name: new RegExp(title) }));
 }
 
+async function waitForQualityButtonCount(count: number) {
+  await waitFor(() => {
+    const button = screen.getByText("检查").closest("button");
+    expect(button).not.toBeNull();
+    if (count === 0) {
+      expect(button!).not.toHaveTextContent(/\d/);
+    } else {
+      expect(button!).toHaveTextContent(String(count));
+    }
+  });
+  return screen.getByText("检查").closest("button")!;
+}
+
+async function waitForQualityPanelText(text: string) {
+  const panel = screen.getByLabelText("本地质量检查");
+  await waitFor(() => expect(panel).toHaveTextContent(text));
+  return panel;
+}
+
 describe("CompareView", () => {
   beforeEach(() => {
     clearDiffCache();
@@ -119,6 +138,42 @@ describe("CompareView", () => {
 
     await waitFor(() => expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("人工修改后的目标正文"));
     expect(screen.getByRole("button", { name: "恢复 AI 稿" })).toBeInTheDocument();
+  });
+
+  it("preserves rewrite scroll position when entering edit mode", () => {
+    render(<Harness initialChapters={[
+      {
+        ...chapters[0],
+        rewrite_text: Array.from({ length: 80 }, (_, index) => `第 ${index + 1} 行改写内容`).join("\n")
+      }
+    ]} />);
+
+    const rewritePane = screen.getByLabelText("改写稿内容") as HTMLDivElement;
+    rewritePane.scrollTop = 420;
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+
+    expect(screen.getByRole("textbox", { name: "编辑改写稿正文" })).toHaveProperty("scrollTop", 420);
+  });
+
+  it("preserves rewrite scroll position after saving edited text", async () => {
+    render(<Harness initialChapters={[
+      {
+        ...chapters[0],
+        rewrite_text: Array.from({ length: 80 }, (_, index) => `第 ${index + 1} 行改写内容`).join("\n")
+      }
+    ]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    const editor = screen.getByRole("textbox", { name: "编辑改写稿正文" }) as HTMLTextAreaElement;
+    editor.scrollTop = 560;
+    fireEvent.change(editor, {
+      target: { value: `${editor.value}\n新增保存内容` }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("新增保存内容"));
+    expect(screen.getByLabelText("改写稿内容")).toHaveProperty("scrollTop", 560);
   });
 
   it("reports dirty state while editing and clears it after saving or cancelling", async () => {
@@ -187,16 +242,16 @@ describe("CompareView", () => {
     expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
   });
 
-  it("opens a compact quality panel with current and full-book counts", () => {
+  it("opens a compact quality panel with current and full-book counts", async () => {
     render(<Harness initialChapters={[
       { ...chapters[0], rewrite_text: "萧妍走进大厅。" },
       { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
     ]} />);
 
+    await waitForQualityButtonCount(1);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
 
-    const panel = screen.getByLabelText("本地质量检查");
-    expect(panel).toHaveTextContent("当前章 0 · 全书 1");
+    const panel = await waitForQualityPanelText("当前章 0 · 全书 1");
     expect(within(panel).getByRole("button", { name: "全部" })).toHaveClass("active");
     const ignoreButton = within(panel).getByRole("button", { name: "忽略当前问题" });
     const closeButton = within(panel).getByRole("button", { name: "关闭检查" });
@@ -204,36 +259,37 @@ describe("CompareView", () => {
     expect(within(panel).getByText("仍残留主角原名或别名：萧炎")).toBeInTheDocument();
   });
 
-  it("ignores current quality issues across filters and updates counts", () => {
+  it("ignores current quality issues across filters and updates counts", async () => {
     render(<Harness initialChapters={[
       { ...chapters[0], rewrite_text: "萧妍 ******" },
       { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
     ]} />);
 
-    expect(screen.getByText("检查").closest("button")).toHaveTextContent("2");
+    await waitForQualityButtonCount(2);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
-    const panel = screen.getByLabelText("本地质量检查");
-    expect(panel).toHaveTextContent("当前章 1 · 全书 2");
+    const panel = await waitForQualityPanelText("当前章 1 · 全书 2");
     fireEvent.click(within(panel).getByRole("button", { name: "警告" }));
     expect(within(panel).queryByText("仍残留主角原名或别名：萧炎")).not.toBeInTheDocument();
 
     fireEvent.click(within(panel).getByRole("button", { name: "忽略当前问题" }));
 
-    expect(screen.getByRole("button", { name: "检查" })).not.toHaveTextContent(/\d/);
-    expect(panel).toHaveTextContent("当前章 0 · 全书 0");
+    await waitForQualityButtonCount(0);
+    await waitFor(() => expect(panel).toHaveTextContent("当前章 0 · 全书 0"));
     expect(panel).toHaveTextContent("当前章未发现本地规则问题。");
     expect(JSON.parse(window.localStorage.getItem("yuri-rewrite.qualityIgnored.v1.n1") ?? "[]")).toHaveLength(2);
   });
 
-  it("keeps ignored quality issues in localStorage but shows new evidence", () => {
+  it("keeps ignored quality issues in localStorage but shows new evidence", async () => {
     const first = render(<Harness initialChapters={[
       { ...chapters[0], rewrite_text: "萧妍走进大厅。" },
       { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
     ]} />);
 
+    await waitForQualityButtonCount(1);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
-    fireEvent.click(within(screen.getByLabelText("本地质量检查")).getByRole("button", { name: "忽略当前问题" }));
-    expect(screen.getByRole("button", { name: "检查" })).not.toHaveTextContent(/\d/);
+    const firstPanel = await waitForQualityPanelText("当前章 0 · 全书 1");
+    fireEvent.click(within(firstPanel).getByRole("button", { name: "忽略当前问题" }));
+    await waitForQualityButtonCount(0);
 
     first.unmount();
     render(<Harness initialChapters={[
@@ -242,12 +298,11 @@ describe("CompareView", () => {
       { ...chapters[1], id: "c3", index: 3, title: "第三章", rewrite_text: "炎儿又在第三章。" }
     ]} />);
 
-    expect(screen.getByText("检查").closest("button")).toHaveTextContent("1");
+    await waitForQualityButtonCount(1);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
-    const panel = screen.getByLabelText("本地质量检查");
+    const panel = await waitForQualityPanelText("当前章 0 · 全书 1");
     expect(panel).not.toHaveTextContent("仍残留主角原名或别名：萧炎");
     expect(panel).toHaveTextContent("仍残留主角原名或别名：炎儿");
-    expect(panel).toHaveTextContent("当前章 0 · 全书 1");
   });
 
   it("does not count pending empty rewrites as quality issues", () => {
@@ -265,22 +320,21 @@ describe("CompareView", () => {
     expect(screen.getByLabelText("改写稿内容")).toHaveTextContent("尚未改写。");
   });
 
-  it("shows length delta warnings in the quality panel", () => {
+  it("shows length delta warnings in the quality panel", async () => {
     render(<Harness initialChapters={[
       { ...chapters[0], original_text: "原".repeat(2000), rewrite_text: "改".repeat(1000) },
       { ...chapters[1], rewrite_text: "萧妍走进第二章。" }
     ]} />);
 
-    expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("1");
+    await waitForQualityButtonCount(1);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
 
-    const panel = screen.getByLabelText("本地质量检查");
-    expect(panel).toHaveTextContent("当前章 1 · 全书 1");
+    const panel = await waitForQualityPanelText("当前章 1 · 全书 1");
     expect(panel).toHaveTextContent("字数");
     expect(panel).toHaveTextContent("原文 2000 字，改写稿 1000 字，相差 1000 字。");
   });
 
-  it("virtualizes quality issues while keeping later issues reachable", () => {
+  it("virtualizes quality issues while keeping later issues reachable", async () => {
     const manyIssueChapters = Array.from({ length: 85 }, (_, index) => ({
       ...chapters[0],
       id: `c${index + 1}`,
@@ -290,10 +344,10 @@ describe("CompareView", () => {
     }));
     render(<Harness initialChapters={manyIssueChapters} />);
 
+    await waitForQualityButtonCount(85);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
 
-    const panel = screen.getByLabelText("本地质量检查");
-    expect(panel).toHaveTextContent("当前章 1 · 全书 85");
+    const panel = await waitForQualityPanelText("当前章 1 · 全书 85");
     expect(panel).not.toHaveTextContent("已显示前 80 条");
     expect(within(panel).getAllByText("仍残留主角原名或别名：萧炎").length).toBeLessThan(85);
 
@@ -303,22 +357,20 @@ describe("CompareView", () => {
     expect(panel).toHaveTextContent("第 85 章");
   });
 
-  it("ignores one quality issue without opening search or switching chapters", () => {
+  it("ignores one quality issue without opening search or switching chapters", async () => {
     const { rerender } = render(<Harness initialChapters={[
       { ...chapters[0], rewrite_text: "萧炎仍在第一章。" },
       { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
     ]} />);
 
-    const checkButton = screen.getByText("检查").closest("button");
-    expect(checkButton).toHaveTextContent("2");
-    fireEvent.click(checkButton!);
+    const checkButton = await waitForQualityButtonCount(2);
+    fireEvent.click(checkButton);
 
-    const panel = screen.getByLabelText("本地质量检查");
-    expect(panel).toHaveTextContent("当前章 1 · 全书 2");
+    const panel = await waitForQualityPanelText("当前章 1 · 全书 2");
     fireEvent.click(within(panel).getAllByRole("button", { name: "忽略此问题" })[0]);
 
-    expect(screen.getByText("检查").closest("button")).toHaveTextContent("1");
-    expect(panel).toHaveTextContent("当前章 0 · 全书 1");
+    await waitForQualityButtonCount(1);
+    await waitFor(() => expect(panel).toHaveTextContent("当前章 0 · 全书 1"));
     expect(screen.queryByRole("textbox", { name: "全局搜索" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("1. 第一章");
 
@@ -328,7 +380,7 @@ describe("CompareView", () => {
       { ...chapters[0], id: "c3", index: 3, title: "第三章", rewrite_text: "萧炎仍在第三章。" }
     ]} />);
 
-    expect(screen.getByText("检查").closest("button")).toHaveTextContent("2");
+    await waitForQualityButtonCount(2);
   });
 
   it("updates quality counts while editing the current rewrite", () => {
@@ -353,7 +405,9 @@ describe("CompareView", () => {
       { ...chapters[1], rewrite_text: "萧炎仍在第二章。" }
     ]} />);
 
+    await waitForQualityButtonCount(1);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
+    await waitForQualityPanelText("当前章 0 · 全书 1");
     fireEvent.click(screen.getByRole("button", { name: /仍残留主角原名或别名：萧炎/ }));
 
     await waitFor(() => expect(screen.getByRole("combobox", { name: "章节" })).toHaveTextContent("2. 第二章"));
@@ -372,7 +426,9 @@ describe("CompareView", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
       target: { value: "尚未保存的正文" }
     });
+    await waitForQualityButtonCount(1);
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
+    await waitForQualityPanelText("当前章 0 · 全书 1");
     fireEvent.click(screen.getByRole("button", { name: /仍残留主角原名或别名：萧炎/ }));
 
     expect(screen.getByRole("dialog", { name: "改写稿尚未保存" })).toBeInTheDocument();

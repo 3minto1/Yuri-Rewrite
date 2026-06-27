@@ -1,12 +1,12 @@
 import { ArrowLeft, CaseSensitive, ChevronDown, ChevronUp, Download, GitCompareArrows, Pencil, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Square, X } from "lucide-react";
-import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { memo, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { Chapter, NovelSettings } from "../../types";
 import { Modal } from "../common/Modal";
 import { StatusBadge } from "../common/StatusBadge";
 import { calculateDiff, type DiffRange, type DiffResult, type DiffSide } from "./compareDiff";
 import { getCachedDiff, setCachedDiff } from "./compareDiffCache";
 import { HighlightedText } from "./HighlightedText";
-import { scanRewriteQuality, type QualityIssue, type QualityIssueSeverity } from "./compareQuality";
+import { isQualityScannableChapter, scanRewriteQuality, type QualityIssue, type QualityIssueSeverity } from "./compareQuality";
 import { buildSearchMatches, initialSearchIndex, moveSearchIndex, type SearchMatch, type SearchScope } from "./compareSearch";
 
 type CompareViewProps = {
@@ -40,6 +40,7 @@ const qualityIgnoreKeyPrefix = "yuri-rewrite.qualityIgnored.v1.";
 const QUALITY_ISSUE_ROW_HEIGHT = 126;
 const QUALITY_ISSUE_OVERSCAN = 4;
 const QUALITY_LIST_FALLBACK_HEIGHT = 480;
+const QUALITY_SCAN_CHUNK_SIZE = 8;
 
 type DiffState = DiffResult & {
   loading: boolean;
@@ -360,6 +361,66 @@ function storeIgnoredQualityFingerprints(novelId: string, fingerprints: Set<stri
   }
 }
 
+type QualityCacheEntry = {
+  fingerprint: string;
+  issues: QualityIssue[];
+};
+
+function hashText(text: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function textFingerprint(text: string) {
+  return `${text.length}:${hashText(text)}`;
+}
+
+function qualitySettingsFingerprint(settings?: NovelSettings | null) {
+  if (!settings) return "no-settings";
+  return [
+    settings.protagonist_name,
+    settings.protagonist_aliases,
+    settings.rewritten_protagonist_name,
+    settings.additional_feminize_names,
+    settings.bust,
+    settings.body_type,
+    settings.rewrite_mode,
+    settings.advanced_settings,
+    settings.relationship_targets
+  ].join("\u001f");
+}
+
+function qualityChapterFingerprint(chapter: Chapter, settingsKey: string) {
+  return [
+    chapter.id,
+    chapter.rewrite_status,
+    chapter.title,
+    Boolean(chapter.rewrite_edited),
+    Boolean(chapter.single_rewrite_original_available),
+    textFingerprint(chapter.original_text),
+    textFingerprint(chapter.rewrite_text ?? ""),
+    settingsKey
+  ].join("\u001f");
+}
+
+function sortQualityIssues(issues: QualityIssue[]) {
+  return [...issues].sort((left, right) =>
+    left.chapterIndex - right.chapterIndex
+    || left.chapterId.localeCompare(right.chapterId)
+    || left.category.localeCompare(right.category)
+    || left.evidence.localeCompare(right.evidence)
+  );
+}
+
+function scanChapterQuality(chapter: Chapter, settings?: NovelSettings | null, rewriteText?: string) {
+  const row = rewriteText === undefined ? chapter : { ...chapter, rewrite_text: rewriteText };
+  return scanRewriteQuality([row], settings);
+}
+
 type QualityPanelProps = {
   open: boolean;
   filter: QualityFilter;
@@ -530,9 +591,14 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [terminateRewriteBusy, setTerminateRewriteBusy] = useState(false);
   const [qualityOpen, setQualityOpen] = useState(false);
   const [qualityFilter, setQualityFilter] = useState<QualityFilter>("all");
+  const [qualityCache, setQualityCache] = useState<Map<string, QualityCacheEntry>>(() => new Map());
   const [ignoredQualityFingerprints, setIgnoredQualityFingerprints] = useState<Set<string>>(() => new Set());
   const pendingNavigationRef = useRef<(() => void) | null>(null);
   const pendingQualityIssueRef = useRef<QualityIssue | null>(null);
+  const editTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingEditScrollTopRef = useRef<number | null>(null);
+  const pendingReadScrollTopRef = useRef<number | null>(null);
+  const qualityScanVersionRef = useRef(0);
   const deferredQuery = useDeferredValue(query);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const navigationTargetRef = useRef<string | null>(null);
@@ -558,15 +624,23 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const rewriteMatches = useMemo(() => chapterMatches.filter((match) => match.side === "rewrite"), [chapterMatches]);
   const editDirty = editing && editDraft !== rewriteText;
   const novelId = selectedChapter?.novel_id ?? chapters[0]?.novel_id ?? "";
-  const qualityOverride = useMemo(
-    () => editing ? { chapterId: selectedChapterId, rewriteText: editDraft } : null,
-    [editDraft, editing, selectedChapterId]
+  const qualitySettingsKey = useMemo(() => qualitySettingsFingerprint(novelSettings), [novelSettings]);
+  const cachedQualityIssues = useMemo(
+    () => sortQualityIssues([...qualityCache.values()].flatMap((entry) => entry.issues)),
+    [qualityCache]
   );
-  const qualityIssues = useMemo(() => scanRewriteQuality(
-    chapters,
-    novelSettings,
-    qualityOverride
-  ), [chapters, novelSettings, qualityOverride]);
+  const editingQualityIssues = useMemo(() => {
+    if (!editing || !selectedChapter) return [];
+    if (!isQualityScannableChapter(selectedChapter, editDraft)) return [];
+    return scanChapterQuality(selectedChapter, novelSettings, editDraft);
+  }, [editDraft, editing, novelSettings, selectedChapter]);
+  const qualityIssues = useMemo(() => {
+    if (!editing || !selectedChapter) return cachedQualityIssues;
+    return sortQualityIssues([
+      ...cachedQualityIssues.filter((issue) => issue.chapterId !== selectedChapter.id),
+      ...editingQualityIssues
+    ]);
+  }, [cachedQualityIssues, editing, editingQualityIssues, selectedChapter]);
   const activeQualityIssues = useMemo(
     () => qualityIssues.filter((issue) => !ignoredQualityFingerprints.has(qualityIssueFingerprint(issue))),
     [ignoredQualityFingerprints, qualityIssues]
@@ -591,6 +665,70 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   }, [novelId]);
 
   useEffect(() => {
+    const version = qualityScanVersionRef.current + 1;
+    qualityScanVersionRef.current = version;
+    const targets = chapters
+      .filter((chapter) => isQualityScannableChapter(chapter))
+      .map((chapter) => ({
+        chapter,
+        fingerprint: qualityChapterFingerprint(chapter, qualitySettingsKey)
+      }));
+    const validChapterIds = new Set(targets.map((target) => target.chapter.id));
+    setQualityCache((previous) => {
+      let changed = false;
+      const next = new Map(previous);
+      for (const chapterId of next.keys()) {
+        if (!validChapterIds.has(chapterId)) {
+          next.delete(chapterId);
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+
+    const pending = targets.filter((target) =>
+      qualityCache.get(target.chapter.id)?.fingerprint !== target.fingerprint
+    );
+    if (pending.length === 0) return undefined;
+
+    let cancelled = false;
+    let cursor = 0;
+    let timeoutId: number | undefined;
+    const scanNextChunk = () => {
+      if (cancelled || qualityScanVersionRef.current !== version) return;
+      const updates: Array<{ chapterId: string; entry: QualityCacheEntry }> = [];
+      const end = Math.min(cursor + QUALITY_SCAN_CHUNK_SIZE, pending.length);
+      for (; cursor < end; cursor += 1) {
+        const target = pending[cursor];
+        updates.push({
+          chapterId: target.chapter.id,
+          entry: {
+            fingerprint: target.fingerprint,
+            issues: scanChapterQuality(target.chapter, novelSettings)
+          }
+        });
+      }
+      if (updates.length > 0) {
+        setQualityCache((previous) => {
+          const next = new Map(previous);
+          for (const update of updates) {
+            next.set(update.chapterId, update.entry);
+          }
+          return next;
+        });
+      }
+      if (cursor < pending.length) {
+        timeoutId = window.setTimeout(scanNextChunk, 0);
+      }
+    };
+    timeoutId = window.setTimeout(scanNextChunk, 0);
+    return () => {
+      cancelled = true;
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [chapters, novelSettings, qualitySettingsKey]);
+
+  useEffect(() => {
     onDirtyChange?.(editDirty);
   }, [editDirty, onDirtyChange]);
 
@@ -603,13 +741,23 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     setPendingNavigation(true);
   }
 
+  function startEditingRewrite() {
+    pendingEditScrollTopRef.current = rewriteRef.current?.scrollTop ?? 0;
+    setEditDraft(rewriteText);
+    setEditing(true);
+  }
+
   async function saveEdit(closeAfterSave = true) {
     if (!selectedChapter) return false;
     if (!editDraft.trim()) return false;
+    const editorScrollTop = editTextareaRef.current?.scrollTop ?? 0;
     setEditBusy(true);
     try {
       await onSaveRewrite(selectedChapter.id, editDraft);
-      if (closeAfterSave) setEditing(false);
+      if (closeAfterSave) {
+        pendingReadScrollTopRef.current = editorScrollTop;
+        setEditing(false);
+      }
       return true;
     } finally {
       setEditBusy(false);
@@ -793,7 +941,27 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     setRewriteMenuOpen(false);
     pendingNavigationRef.current = null;
     setPendingNavigation(false);
+    pendingEditScrollTopRef.current = null;
+    pendingReadScrollTopRef.current = null;
   }, [selectedChapterId]);
+
+  useLayoutEffect(() => {
+    if (!editing) return;
+    const scrollTop = pendingEditScrollTopRef.current;
+    const editor = editTextareaRef.current;
+    if (scrollTop === null || !editor) return;
+    editor.scrollTop = scrollTop;
+    pendingEditScrollTopRef.current = null;
+  }, [editing]);
+
+  useLayoutEffect(() => {
+    if (editing) return;
+    const scrollTop = pendingReadScrollTopRef.current;
+    const viewer = rewriteRef.current;
+    if (scrollTop === null || !viewer) return;
+    viewer.scrollTop = scrollTop;
+    pendingReadScrollTopRef.current = null;
+  }, [editing, rewriteText, rewriteRef]);
 
   useEffect(() => {
     const issue = pendingQualityIssueRef.current;
@@ -994,10 +1162,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
                 {!editing ? (
                   <button
                     type="button"
-                    onClick={() => {
-                      setEditDraft(rewriteText);
-                      setEditing(true);
-                    }}
+                    onClick={startEditingRewrite}
                     disabled={!editingAllowed || !rewriteText.trim()}
                     title={editingAllowed ? "编辑当前章节改写正文" : editDisabledReason}
                   >
@@ -1023,6 +1188,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
               <textarea
                 className="compare-edit-textarea"
                 aria-label="编辑改写稿正文"
+                ref={editTextareaRef}
                 value={editDraft}
                 onChange={(event) => setEditDraft(event.target.value)}
                 disabled={editBusy}

@@ -162,6 +162,10 @@ function detectDuplicateLine(text: string) {
   return "";
 }
 
+export function isQualityScannableChapter(chapter: Chapter, rewriteText = chapter.rewrite_text ?? "") {
+  return chapter.rewrite_status === "completed" && rewriteText.trim().length > 0;
+}
+
 export function scanRewriteQuality(
   chapters: Chapter[],
   settings?: NovelSettings | null,
@@ -178,10 +182,7 @@ export function scanRewriteQuality(
     const originalCount = normalizeText(chapter.original_text).length;
     const rewriteCount = normalizeText(rewriteText).length;
 
-    if (rewriteCount === 0) {
-      if (hasOverride || chapter.rewrite_status === "completed") {
-        pushIssue(issues, chapter, "missing_rewrite", "error", "已完成但改写稿为空。", "空改写稿", "");
-      }
+    if (!isQualityScannableChapter(chapter, rewriteText)) {
       continue;
     }
 

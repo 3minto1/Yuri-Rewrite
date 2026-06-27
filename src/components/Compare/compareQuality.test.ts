@@ -82,7 +82,7 @@ describe("compare quality scan", () => {
     expect(unsafe.some((issue) => issue.category === "gender_residue")).toBe(true);
   });
 
-  it("ignores pending empty rewrites but flags completed or edited empty rewrites", () => {
+  it("ignores pending or empty rewrites", () => {
     const pending = scanRewriteQuality([
       chapter({ id: "pending", rewrite_text: "", rewrite_status: "pending" })
     ], settings);
@@ -97,12 +97,8 @@ describe("compare quality scan", () => {
     });
 
     expect(pending).toHaveLength(0);
-    expect(completed).toEqual(expect.arrayContaining([
-      expect.objectContaining({ category: "missing_rewrite", severity: "error", message: "已完成但改写稿为空。" })
-    ]));
-    expect(edited).toEqual(expect.arrayContaining([
-      expect.objectContaining({ category: "missing_rewrite", severity: "error", message: "已完成但改写稿为空。" })
-    ]));
+    expect(completed).toHaveLength(0);
+    expect(edited).toHaveLength(0);
   });
 
   it("detects unchanged text, ad noise, garbage, duplicate lines, and short completed rewrites", () => {

@@ -2,6 +2,7 @@ use crate::ai::compact_error_body;
 use crate::domain::{
     AppState, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateProgress,
 };
+use crate::task_control::auto_runs_have_non_paused;
 use crate::{
     sanitize_file_name, to_string, GITHUB_LATEST_RELEASE_API_URL, GITHUB_LATEST_RELEASE_URL,
     GITHUB_REPOSITORY_URL,
@@ -814,7 +815,19 @@ fn spawn_updater(script_path: &Path) -> Result<(), String> {
 }
 
 fn ensure_update_can_start(state: &State<'_, AppState>) -> Result<(), String> {
-    if state.active_tasks.any_active()? || state.single_rewrite_tasks.any_active()? {
+    update_can_start_from_task_state(
+        state.active_tasks.any_active()?,
+        state.single_rewrite_tasks.any_active()?,
+        auto_runs_have_non_paused(&state.auto_runs)?,
+    )
+}
+
+fn update_can_start_from_task_state(
+    has_active_task: bool,
+    has_single_rewrite: bool,
+    has_non_paused_auto_run: bool,
+) -> Result<(), String> {
+    if has_active_task || has_single_rewrite || has_non_paused_auto_run {
         return Err("当前有分析、改写或单章重写任务正在运行，请等待任务结束后再更新。".to_string());
     }
     Ok(())
@@ -959,6 +972,14 @@ mod tests {
             update_auto_install_reason(None, Some("abc")).as_deref(),
             None
         );
+    }
+
+    #[test]
+    fn update_start_guard_blocks_running_work_but_allows_paused_recoveries() {
+        assert!(update_can_start_from_task_state(true, false, false).is_err());
+        assert!(update_can_start_from_task_state(false, true, false).is_err());
+        assert!(update_can_start_from_task_state(false, false, true).is_err());
+        assert!(update_can_start_from_task_state(false, false, false).is_ok());
     }
 
     #[test]

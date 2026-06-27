@@ -502,11 +502,7 @@ pub(crate) fn clamp_parallelism_for_batch_size(value: usize, batch_size: usize) 
         50 => 25,
         _ => 10,
     };
-    if parallelism > max_parallelism {
-        10
-    } else {
-        parallelism
-    }
+    parallelism.min(max_parallelism)
 }
 
 pub(crate) fn load_chapter_batch_size(conn: &Connection) -> Result<usize, String> {
@@ -724,6 +720,14 @@ mod tests {
         for parallelism in [25, 50] {
             assert_eq!(clamp_parallelism_for_batch_size(parallelism, 10), 10);
         }
+    }
+
+    #[test]
+    fn rewrite_parallelism_clamps_to_batch_limit() {
+        assert_eq!(clamp_parallelism_for_batch_size(50, 30), 10);
+        assert_eq!(clamp_parallelism_for_batch_size(50, 50), 25);
+        assert_eq!(clamp_parallelism_for_batch_size(50, 100), 50);
+        assert_eq!(clamp_parallelism_for_batch_size(2, 100), 10);
     }
 
     #[test]
