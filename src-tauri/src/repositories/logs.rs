@@ -1,10 +1,33 @@
 use crate::domain::AppState;
 use crate::model_support::model_output_finish_reason;
 use crate::{to_string, truncate_text};
-use chrono::Utc;
+use chrono::{Duration, Local, TimeZone, Utc};
 use rusqlite::{params, Connection};
 use tauri::State;
 use uuid::Uuid;
+
+const AI_LOG_RETENTION_DAYS: i64 = 7;
+
+pub(crate) fn cleanup_old_ai_logs(conn: &Connection) -> Result<(), String> {
+    let today = Local::now().date_naive();
+    let cutoff_date = today - Duration::days(AI_LOG_RETENTION_DAYS - 1);
+    let cutoff = Local
+        .from_local_datetime(
+            &cutoff_date
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| "日志保留日期无效。".to_string())?,
+        )
+        .single()
+        .ok_or_else(|| "日志保留日期无法转换为本地时间。".to_string())?
+        .with_timezone(&Utc)
+        .to_rfc3339();
+    conn.execute(
+        "DELETE FROM ai_logs WHERE datetime(created_at) < datetime(?1)",
+        params![cutoff],
+    )
+    .map_err(to_string)?;
+    Ok(())
+}
 
 pub(crate) fn extract_token_usage(raw_response: Option<&str>) -> Option<(usize, usize)> {
     let value = serde_json::from_str::<serde_json::Value>(raw_response?).ok()?;
@@ -139,6 +162,7 @@ fn persist_ai_log(
         .map_err(to_string)?;
     }
     tx.commit().map_err(to_string)?;
+    cleanup_old_ai_logs(conn)?;
     Ok(())
 }
 

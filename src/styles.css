@@ -862,6 +862,12 @@ pre {
   opacity: 0.86;
 }
 
+.job-recovery-summary {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .job-strip-close {
   align-self: flex-start;
   color: inherit;
@@ -920,10 +926,51 @@ pre {
   margin: 0;
 }
 
+.log-day-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.log-day-tabs button {
+  align-items: center;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  color: var(--color-text);
+  display: inline-flex;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 10px;
+}
+
+.log-day-tabs button.active {
+  border-color: var(--color-accent-rose);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent-rose) 18%, transparent);
+}
+
+.log-day-tabs button strong {
+  background: var(--color-surface-muted);
+  border-radius: 999px;
+  font-size: 12px;
+  min-width: 24px;
+  padding: 2px 7px;
+  text-align: center;
+}
+
 .full-log-list {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  max-height: min(72vh, 820px);
+  overflow: auto;
+  padding-right: 4px;
+  position: relative;
+}
+
+.full-log-virtual {
+  position: relative;
 }
 
 .full-log-item,
@@ -937,6 +984,15 @@ pre {
 .full-log-item.status-container {
   background: color-mix(in srgb, var(--status-soft) 46%, var(--color-surface));
   border-color: color-mix(in srgb, var(--status-color) 25%, var(--color-border));
+}
+
+.full-log-virtual .full-log-item {
+  box-sizing: border-box;
+  left: 0;
+  overflow: hidden;
+  position: absolute;
+  right: 4px;
+  top: 0;
 }
 
 .full-log-item header {
@@ -957,6 +1013,44 @@ pre {
   color: var(--color-text-muted);
   display: block;
   margin-top: 4px;
+}
+
+.log-card-actions {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-detail-toggle {
+  align-items: center;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.log-detail-toggle svg {
+  transition: transform 0.16s ease;
+}
+
+.log-detail-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.log-preview {
+  color: var(--color-text-muted);
+  line-height: 1.6;
+  margin: 12px 0 0;
+}
+
+.log-detail-sections {
+  margin-top: 12px;
+  max-height: 390px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .full-log-item section {

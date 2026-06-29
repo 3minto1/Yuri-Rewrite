@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { browserMockEnabled } from "./platform/runtime";
 import type {
   AiLog,
+  AiLogDaySummary,
   AppSettings,
   AutoRunRecovery,
   CanonAsset,
@@ -39,6 +40,8 @@ type CommandMap = {
   save_model_profile: { args: { input: ModelProfileInput }; result: ModelProfile };
   delete_model_profile: { args: { profileId: string }; result: void };
   diagnose_model_profile: { args: { profileId: string }; result: ModelDiagnosis };
+  list_ai_log_days: { args: { novelId: string | null }; result: AiLogDaySummary[] };
+  list_ai_logs_by_date: { args: { novelId: string | null; date: string }; result: AiLog[] };
   list_ai_logs: { args: { novelId: string | null }; result: AiLog[] };
   clear_ai_logs: { args: { novelId: string | null }; result: void };
   get_token_usage_stats: {

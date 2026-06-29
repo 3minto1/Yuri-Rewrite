@@ -1,5 +1,6 @@
 import type {
   AiLog,
+  AiLogDaySummary,
   AppSettings,
   CanonAsset,
   Chapter,
@@ -130,6 +131,27 @@ let logs: AiLog[] = [
     created_at: now
   }
 ];
+
+function logDateKey(createdAt: string) {
+  const date = new Date(createdAt);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function recentLogDays(): AiLogDaySummary[] {
+  const today = new Date();
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() - index);
+    const key = logDateKey(date.toISOString());
+    return {
+      date: key,
+      count: logs.filter((log) => logDateKey(log.created_at) === key).length
+    };
+  });
+}
 
 function detail(): NovelDetail {
   if (novel.status === "pending_split") {
@@ -322,6 +344,12 @@ export async function invokeBrowserMock(
           { name: "JSON 输出", status: "ok", message: "浏览器测试 JSON 正常。" }
         ]
       } satisfies ModelDiagnosis;
+    case "list_ai_log_days":
+      return recentLogDays();
+    case "list_ai_logs_by_date":
+      return logs
+        .filter((log) => logDateKey(log.created_at) === args?.date)
+        .map((log) => ({ ...log }));
     case "list_ai_logs":
       return logs.map((log) => ({ ...log }));
     case "clear_ai_logs":

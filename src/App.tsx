@@ -62,6 +62,7 @@ import { useAppStore } from "./store/appStore";
 import { invokeCommand as invoke } from "./tauriApi";
 import type {
   AiLog,
+  AiLogDaySummary,
   AppSettings,
   AutoRunRecovery,
   CanonAsset,
@@ -310,6 +311,16 @@ const jobTypeText: Record<string, string> = {
   auto_batch: "当前批次一键任务"
 };
 
+function formatRecoverySummary(recovery: AutoRunRecovery | undefined) {
+  const summary = recovery?.summary;
+  if (!summary) return "";
+  const phase = jobPhaseText[summary.phase] ?? summary.phase;
+  const ranges = summary.pending_ranges.length > 0
+    ? `待处理：${summary.pending_ranges.join("、")}${summary.pending_ranges_truncated ? " 等" : ""}`
+    : "待处理：无";
+  return `${summary.batch_label} · ${phase} · 已保留 ${summary.staged_chapters}/${summary.total_chapters} 章，剩余 ${summary.pending_chapters} 章 · ${ranges}`;
+}
+
 function localDateString(date: Date) {
   return [
     date.getFullYear(),
@@ -353,6 +364,9 @@ export default function App() {
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
   const [logs, setLogs] = useState<AiLog[]>([]);
+  const [logDays, setLogDays] = useState<AiLogDaySummary[]>([]);
+  const [selectedLogDate, setSelectedLogDate] = useState("");
+  const [logCache, setLogCache] = useState<Record<string, AiLog[]>>({});
   const [settings, setSettings] = useState<AppSettings>({});
   const [corePromptDraft, setCorePromptDraft] = useState("");
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
@@ -803,13 +817,17 @@ export default function App() {
     if (!currentProfileIsValid) {
       setSelectedProfileId(savedProfileIsValid ? savedProfileId : profileRows[0]?.id ?? "");
     }
+    let loadedNovel = false;
     if (!detail && novelRows[0]) {
       const firstRecoveryNovel = recoveryRows.find((recovery) => novelRows.some((novel) => novel.id === recovery.novel_id));
       await loadNovel(firstRecoveryNovel?.novel_id ?? novelRows[0].id, { recoveries: recoveryRows });
+      loadedNovel = true;
     } else if (detail) {
       applyRecoveryForNovel(detail.novel.id, recoveryRows);
     }
-    await refreshLogs();
+    if (!loadedNovel) {
+      await refreshLogs();
+    }
   }
 
   function applyRecoveryForNovel(novelId: string, recoveries = autoRunRecoveries) {
@@ -824,10 +842,11 @@ export default function App() {
     setAutoRunState("paused");
     setAutoRunMode("range");
     if (recovery.job) {
+      const summary = formatRecoverySummary(recovery);
       setJob({
         ...recovery.job,
         status: "paused",
-        message: `检测到上次未完成的一键任务，将继续处理第 ${recovery.next_batch_index + 1} 批的未完成分片。${recovery.pause_reason ? ` ${recovery.pause_reason}` : ""}`
+        message: `检测到上次未完成的一键任务，将继续处理第 ${recovery.next_batch_index + 1} 批的未完成分片。${summary ? ` ${summary}。` : ""}${recovery.pause_reason ? ` ${recovery.pause_reason}` : ""}`
       });
     }
   }
@@ -913,9 +932,47 @@ export default function App() {
     }
   }
 
-  async function refreshLogs(novelId = detail?.novel.id) {
-    const rows = await invoke("list_ai_logs", { novelId: novelId ?? null });
+  async function refreshLogs(novelId = detail?.novel.id, preferredDate = selectedLogDate) {
+    const novelArg = novelId ?? null;
+    const days = await invoke("list_ai_log_days", { novelId: novelArg });
+    if (!Array.isArray(days)) {
+      const rows = await invoke("list_ai_logs", { novelId: novelArg });
+      setLogDays([]);
+      setSelectedLogDate("");
+      setLogCache({});
+      setLogs(rows);
+      return;
+    }
+    const preferredIsVisible = preferredDate && days.some((day) => day.date === preferredDate);
+    const nextDate = preferredIsVisible
+      ? preferredDate
+      : days.find((day) => day.count > 0)?.date ?? days[0]?.date ?? "";
+    const rows = nextDate
+      ? await invoke("list_ai_logs_by_date", { novelId: novelArg, date: nextDate })
+      : [];
+    setLogDays(days);
+    setSelectedLogDate(nextDate);
+    setLogCache(nextDate ? { [nextDate]: rows } : {});
     setLogs(rows);
+  }
+
+  async function selectLogDate(date: string) {
+    setSelectedLogDate(date);
+    const cached = logCache[date];
+    if (cached) {
+      setLogs(cached);
+      return;
+    }
+    try {
+      const rows = await invoke("list_ai_logs_by_date", {
+        novelId: detail?.novel.id ?? null,
+        date
+      });
+      setLogCache((previous) => ({ ...previous, [date]: rows }));
+      setLogs(rows);
+    } catch (error) {
+      showNotice(String(error));
+    }
   }
 
   async function refreshTokenStats(
@@ -1791,6 +1848,7 @@ export default function App() {
     () => autoRunRecoveries.find((recovery) => recovery.novel_id === detail?.novel.id),
     [autoRunRecoveries, detail?.novel.id]
   );
+  const selectedRecoverySummary = formatRecoverySummary(selectedRecovery);
   const selectedChapterBatchPosition = useMemo(() => {
     if (!detail || !selectedChapter) return -1;
     return detail.batches.findIndex(
@@ -2376,6 +2434,9 @@ export default function App() {
                       )}
                     </div>
                   )}
+                  {job.job_type === "auto" && job.status === "paused" && selectedRecoverySummary && (
+                    <div className="job-recovery-summary">{selectedRecoverySummary}</div>
+                  )}
                 </>
               )}
             </div>
@@ -2395,10 +2456,13 @@ export default function App() {
         {activeView === "logs" && (
           <LogsPage
             logs={logs}
+            days={logDays}
+            selectedDate={selectedLogDate}
             busy={busy}
             onBack={() => requestActiveView("workspace")}
             onClear={clearLogs}
             onRefresh={() => refreshLogs()}
+            onSelectDate={selectLogDate}
           />
         )}
 

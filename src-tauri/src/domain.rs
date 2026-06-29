@@ -209,6 +209,19 @@ pub(crate) struct AutoRunRecovery {
     pub(crate) batch_index: Option<i64>,
     pub(crate) profile_ids: Vec<String>,
     pub(crate) job: Option<Job>,
+    pub(crate) summary: Option<AutoRunRecoverySummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct AutoRunRecoverySummary {
+    pub(crate) phase: String,
+    pub(crate) batch_index: i64,
+    pub(crate) batch_label: String,
+    pub(crate) total_chapters: usize,
+    pub(crate) staged_chapters: usize,
+    pub(crate) pending_chapters: usize,
+    pub(crate) pending_ranges: Vec<String>,
+    pub(crate) pending_ranges_truncated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -224,6 +237,12 @@ pub(crate) struct AiLog {
     pub(crate) raw_response: Option<String>,
     pub(crate) finish_reason: Option<String>,
     pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AiLogDaySummary {
+    pub(crate) date: String,
+    pub(crate) count: usize,
 }
 
 #[derive(Debug, Serialize)]

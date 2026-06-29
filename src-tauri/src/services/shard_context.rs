@@ -360,6 +360,61 @@ mod tests {
     }
 
     #[test]
+    fn resumed_pending_chapters_do_not_cross_staged_gaps() {
+        let chapters = (1..=10).map(chapter).collect::<Vec<_>>();
+        let staged = [1, 2, 5, 6, 9]
+            .into_iter()
+            .map(|index| format!("chapter-{index}"))
+            .collect::<HashSet<_>>();
+        let pending = chapters
+            .iter()
+            .filter(|chapter| !staged.contains(&chapter.id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let work = build_contiguous_shard_work(&chapters, &pending, 1);
+        let ranges = work
+            .iter()
+            .map(|work| {
+                work.chapters
+                    .iter()
+                    .map(|chapter| chapter.index)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(ranges, vec![vec![3, 4], vec![7, 8], vec![10]]);
+    }
+
+    #[test]
+    fn resumed_pending_runs_split_only_inside_each_run() {
+        let chapters = (1..=12).map(chapter).collect::<Vec<_>>();
+        let staged = [1, 6, 7, 12]
+            .into_iter()
+            .map(|index| format!("chapter-{index}"))
+            .collect::<HashSet<_>>();
+        let pending = chapters
+            .iter()
+            .filter(|chapter| !staged.contains(&chapter.id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let work = build_contiguous_shard_work(&chapters, &pending, 3);
+        let ranges = work
+            .iter()
+            .map(|work| {
+                work.chapters
+                    .iter()
+                    .map(|chapter| chapter.index)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(ranges, vec![vec![2, 3, 4, 5], vec![8, 9, 10, 11]]);
+        assert!(ranges.iter().all(|range| range.windows(2).all(|pair| pair[1] == pair[0] + 1)));
+    }
+
+    #[test]
     fn resumed_shards_include_completed_neighbors_as_read_only_context() {
         let chapters = (1..=5).map(chapter).collect::<Vec<_>>();
         let target = vec![chapters[2].clone()];

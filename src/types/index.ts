@@ -157,6 +157,18 @@ export type AutoRunRecovery = {
   batch_index?: number | null;
   profile_ids: string[];
   job?: Job | null;
+  summary?: AutoRunRecoverySummary | null;
+};
+
+export type AutoRunRecoverySummary = {
+  phase: string;
+  batch_index: number;
+  batch_label: string;
+  total_chapters: number;
+  staged_chapters: number;
+  pending_chapters: number;
+  pending_ranges: string[];
+  pending_ranges_truncated: boolean;
 };
 
 export type AiLog = {
@@ -171,6 +183,11 @@ export type AiLog = {
   raw_response?: string | null;
   finish_reason?: string | null;
   created_at: string;
+};
+
+export type AiLogDaySummary = {
+  date: string;
+  count: number;
 };
 
 export type AppSettings = {

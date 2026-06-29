@@ -84,6 +84,7 @@ pub fn run() {
             cleanup_deletion_trash(&data_dir);
             let conn = Connection::open(data_dir.join("yuri-rewrite.sqlite3"))?;
             init_db(&conn)?;
+            cleanup_old_ai_logs(&conn).map_err(std::io::Error::other)?;
             let restored_auto_runs = restore_auto_run_controls(&conn)?;
             restore_orphaned_rewrite_statuses(&conn)?;
             let client = Client::builder()
@@ -119,7 +120,9 @@ pub fn run() {
             test_model_profile,
             diagnose_model_profile,
             estimate_job_cost,
+            list_ai_log_days,
             list_ai_logs,
+            list_ai_logs_by_date,
             clear_ai_logs,
             get_token_usage_stats,
             get_app_settings,

@@ -115,6 +115,8 @@ function installDefaultCommands() {
     if (command === "get_app_settings") return settings;
     if (command === "list_auto_run_recoveries") return recoveryRows;
     if (command === "get_novel_detail") return detail;
+    if (command === "list_ai_log_days") return [{ date: "2026-06-19", count: 0 }];
+    if (command === "list_ai_logs_by_date") return [];
     if (command === "list_ai_logs") return [];
     if (command === "get_token_usage_stats") {
       return { start_date: "2026-05-21", end_date: "2026-06-19", requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
@@ -421,7 +423,19 @@ describe("App feature behavior", () => {
       next_batch_index: 1,
       status: "paused",
       pause_reason: "软件意外关闭。",
+      phase: "rewrite",
+      batch_index: 1,
       profile_ids: ["profile-1"],
+      summary: {
+        phase: "rewrite",
+        batch_index: 1,
+        batch_label: "第2批",
+        total_chapters: 10,
+        staged_chapters: 6,
+        pending_chapters: 4,
+        pending_ranges: ["第3-4章", "第7-8章"],
+        pending_ranges_truncated: false
+      },
       job: {
         id: "job-recovery",
         novel_id: "novel-1",
@@ -436,6 +450,8 @@ describe("App feature behavior", () => {
 
     expect(await screen.findByRole("button", { name: "继续" })).toBeEnabled();
     expect(screen.getByText(/检测到上次未完成的一键任务，将继续处理第 2 批的未完成分片/)).toBeInTheDocument();
+    expect(screen.getAllByText(/已保留 6\/10 章，剩余 4 章/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/待处理：第3-4章、第7-8章/).length).toBeGreaterThan(0);
     expect(screen.getByText("未完成")).toBeInTheDocument();
   });
 
@@ -1117,6 +1133,64 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "日志" }));
     await waitFor(() => expect(screen.getAllByText("第一批日志内容").length).toBeGreaterThan(0));
+  });
+
+  it("loads logs by selected recent date", async () => {
+    const dayLogs: Record<string, AiLog[]> = {
+      "2026-06-28": [{
+        id: "today-log",
+        novel_id: "novel-1",
+        profile_id: "profile-1",
+        action: "今日日志",
+        chapter_title: "第一章",
+        status: "success",
+        content: "今天的完整日志",
+        raw_response: "today raw",
+        created_at: "2026-06-28T12:00:00+08:00"
+      }],
+      "2026-06-27": [{
+        id: "yesterday-log",
+        novel_id: "novel-1",
+        profile_id: "profile-1",
+        action: "昨日日志",
+        chapter_title: "第二章",
+        status: "success",
+        content: "昨天的完整日志",
+        raw_response: "yesterday raw",
+        created_at: "2026-06-27T12:00:00+08:00"
+      }]
+    };
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "list_ai_log_days") return [
+        { date: "2026-06-28", count: 1 },
+        { date: "2026-06-27", count: 1 }
+      ];
+      if (command === "list_ai_logs_by_date") {
+        const payload = args as { date?: string } | undefined;
+        return dayLogs[payload?.date ?? ""] ?? [];
+      }
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+
+    await screen.findByText("今天的完整日志");
+    fireEvent.click(screen.getByRole("button", { name: /2026-06-27.*1/ }));
+
+    await screen.findByText("昨天的完整日志");
+    expect(mocks.invoke).toHaveBeenCalledWith("list_ai_logs_by_date", {
+      novelId: "novel-1",
+      date: "2026-06-27"
+    });
   });
 
   it("updates auto run remaining time as batches complete", async () => {
