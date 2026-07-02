@@ -3,7 +3,7 @@ use regex::Regex;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
-const LONG_CHAPTER_SPLIT_LIMIT: usize = 5_000;
+pub(crate) const LONG_CHAPTER_SPLIT_LIMIT: usize = 5_000;
 
 pub(crate) fn split_chapters(novel_id: &str, text: &str) -> SplitResult {
     let matches = chapter_heading_matches(text);

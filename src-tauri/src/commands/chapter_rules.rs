@@ -1,9 +1,11 @@
 use crate::domain::{
-    AppState, Chapter, ChapterRule, ChapterRulePreview, ChapterRulePreviewItem, StoredChapterRule,
+    AppState, Chapter, ChapterRule, ChapterRuleLongChapterPreviewItem, ChapterRulePreview,
+    ChapterRulePreviewItem, StoredChapterRule,
 };
 use crate::{
     create_chapter_batches, decode_text, load_chapter_batch_size, seed_canon_assets,
     split_chapters, split_chapters_with_custom_rule, split_long_detected_chapters, to_string,
+    LONG_CHAPTER_SPLIT_LIMIT,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -29,6 +31,7 @@ pub(crate) fn preview_chapter_rule(
     let conn = state.conn.lock().map_err(to_string)?;
     let text = load_source_text(&conn, &novel_id)?;
     let split = split_chapters_with_custom_rule(&novel_id, &text, &normalize_chapter_rule(rule))?;
+    let long_chapters = long_chapter_preview_items(&split.chapters, split.detected_chapters);
     let chapters = maybe_split_long_detected_chapters(
         &novel_id,
         split.chapters,
@@ -37,6 +40,7 @@ pub(crate) fn preview_chapter_rule(
     );
     Ok(preview_from_chapters(
         &chapters,
+        long_chapters,
         "预览已生成，确认无误后可保存应用。",
     ))
 }
@@ -185,7 +189,11 @@ fn normalize_chapter_rule(mut rule: ChapterRule) -> ChapterRule {
     rule
 }
 
-fn preview_from_chapters(chapters: &[Chapter], message: &str) -> ChapterRulePreview {
+fn preview_from_chapters(
+    chapters: &[Chapter],
+    long_chapters: Vec<ChapterRuleLongChapterPreviewItem>,
+    message: &str,
+) -> ChapterRulePreview {
     ChapterRulePreview {
         total_chapters: chapters.len(),
         chapters: chapters
@@ -195,9 +203,34 @@ fn preview_from_chapters(chapters: &[Chapter], message: &str) -> ChapterRulePrev
                 title: chapter.title.clone(),
             })
             .collect(),
+        long_chapters,
         can_apply: !chapters.is_empty(),
         message: message.to_string(),
     }
+}
+
+fn long_chapter_preview_items(
+    chapters: &[Chapter],
+    detected_chapters: bool,
+) -> Vec<ChapterRuleLongChapterPreviewItem> {
+    if !detected_chapters {
+        return Vec::new();
+    }
+    chapters
+        .iter()
+        .filter_map(|chapter| {
+            let char_count = chapter
+                .original_text
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .count();
+            (char_count > LONG_CHAPTER_SPLIT_LIMIT).then(|| ChapterRuleLongChapterPreviewItem {
+                index: chapter.index,
+                title: chapter.title.clone(),
+                char_count,
+            })
+        })
+        .collect()
 }
 
 fn load_source_text(conn: &Connection, novel_id: &str) -> Result<String, String> {
@@ -401,10 +434,15 @@ mod tests {
         let text = load_source_text(&conn, "novel-1").expect("source text");
         let split = split_chapters_with_custom_rule("novel-1", &text, &test_rule())
             .expect("split with custom rule");
-        let preview = preview_from_chapters(&split.chapters, "ok");
+        let preview = preview_from_chapters(
+            &split.chapters,
+            long_chapter_preview_items(&split.chapters, split.detected_chapters),
+            "ok",
+        );
 
         assert_eq!(preview.total_chapters, 2);
         assert_eq!(preview.chapters[0].title, "第一章 开始");
+        assert!(preview.long_chapters.is_empty());
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM chapters", [], |row| row.get(0))
             .expect("count chapters");
@@ -510,14 +548,34 @@ mod tests {
     #[test]
     fn long_chapter_split_is_skipped_for_undetected_chunks() {
         let body = "字".repeat(10_001);
-        let chapters = maybe_split_long_detected_chapters(
-            "novel-1",
-            vec![pending_test_chapter("自动分段 1", &body)],
-            false,
-            Some(true),
-        );
+        let source_chapters = vec![pending_test_chapter("自动分段 1", &body)];
+        let long_chapters = long_chapter_preview_items(&source_chapters, false);
+        let chapters =
+            maybe_split_long_detected_chapters("novel-1", source_chapters, false, Some(true));
         assert_eq!(chapters.len(), 1);
         assert_eq!(chapters[0].title, "自动分段 1");
+        assert!(long_chapters.is_empty());
+    }
+
+    #[test]
+    fn custom_rule_preview_reports_long_chapters_above_limit_only() {
+        let chapters = vec![
+            pending_test_chapter("第一章 临界", &"字".repeat(5_000)),
+            {
+                let mut chapter = pending_test_chapter(
+                    "第二章 超长",
+                    &format!("{}\n\n{}", "字".repeat(2_500), "字".repeat(2_501)),
+                );
+                chapter.index = 2;
+                chapter
+            },
+        ];
+        let long_chapters = long_chapter_preview_items(&chapters, true);
+
+        assert_eq!(long_chapters.len(), 1);
+        assert_eq!(long_chapters[0].index, 2);
+        assert_eq!(long_chapters[0].title, "第二章 超长");
+        assert_eq!(long_chapters[0].char_count, 5_001);
     }
 
     #[test]
@@ -525,15 +583,19 @@ mod tests {
         let text = format!("第一章 开始\n{}\n第二章 继续\n短正文", "字".repeat(5_001));
         let split = split_chapters_with_custom_rule("novel-1", &text, &test_rule())
             .expect("split with custom rule");
+        let long_chapters = long_chapter_preview_items(&split.chapters, split.detected_chapters);
         let chapters = maybe_split_long_detected_chapters(
             "novel-1",
             split.chapters,
             split.detected_chapters,
             Some(true),
         );
-        let preview = preview_from_chapters(&chapters, "ok");
+        let preview = preview_from_chapters(&chapters, long_chapters, "ok");
 
         assert_eq!(preview.total_chapters, 3);
+        assert_eq!(preview.long_chapters.len(), 1);
+        assert_eq!(preview.long_chapters[0].title, "第一章 开始");
+        assert_eq!(preview.long_chapters[0].char_count, 5_001);
         assert_eq!(preview.chapters[0].title, "第一章 开始（1）");
         assert_eq!(preview.chapters[1].title, "第一章 开始（2）");
         assert_eq!(preview.chapters[2].title, "第二章 继续");

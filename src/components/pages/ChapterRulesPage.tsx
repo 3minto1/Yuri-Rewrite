@@ -1,7 +1,8 @@
 import { ArrowLeft, Loader2, Play, Save, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { invokeCommand } from "../../tauriApi";
-import type { CanonAsset, Chapter, ChapterRule, ChapterRulePreview, Novel } from "../../types";
+import type { CanonAsset, Chapter, ChapterRule, ChapterRuleLongChapterPreviewItem, ChapterRulePreview, Novel } from "../../types";
+import { Modal } from "../common/Modal";
 
 const defaultRule: ChapterRule = {
   mode: "simple",
@@ -103,6 +104,12 @@ function confirmApplyChapterRule(pendingSplit: boolean, splitLongChapters: boole
   );
 }
 
+function summarizeLongChapters(longChapters: ChapterRuleLongChapterPreviewItem[]) {
+  return [...longChapters]
+    .sort((a, b) => b.char_count - a.char_count)
+    .slice(0, 3);
+}
+
 export function ChapterRulesPage({
   novel,
   chapters,
@@ -121,6 +128,8 @@ export function ChapterRulesPage({
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [splitLongChapters, setSplitLongChapters] = useState(false);
+  const [longChapterPrompt, setLongChapterPrompt] = useState<ChapterRuleLongChapterPreviewItem[] | null>(null);
+  const [longSplitPromptedByNovel, setLongSplitPromptedByNovel] = useState<Record<string, true>>({});
 
   const pendingSplit = novel?.status === "pending_split";
   const applyState = useMemo(
@@ -138,11 +147,14 @@ export function ChapterRulesPage({
     }
     return rows.filter((chapter) => chapter.title.toLowerCase().includes(normalizedQuery));
   }, [normalizedQuery, preview?.chapters]);
+  const longChapterHint = preview?.long_chapters ?? [];
+  const longChapterPromptItems = longChapterPrompt ? summarizeLongChapters(longChapterPrompt) : [];
 
   useEffect(() => {
     setPreview(null);
     setQuery("");
     setSplitLongChapters(false);
+    setLongChapterPrompt(null);
     if (!novel) {
       setRule(defaultRule);
       return;
@@ -165,7 +177,7 @@ export function ChapterRulesPage({
     };
   }, [novel?.id, showNotice]);
 
-  async function generatePreview() {
+  async function runPreview(nextSplitLongChapters: boolean, allowLongChapterPrompt: boolean) {
     if (!novel) return;
     setPreviewing(true);
     setPreview(null);
@@ -173,15 +185,38 @@ export function ChapterRulesPage({
       const result = await invokeCommand("preview_chapter_rule", {
         novelId: novel.id,
         rule,
-        splitLongChapters
+        splitLongChapters: nextSplitLongChapters
       });
       setPreview(result);
       showNotice(result.message);
+      if (
+        allowLongChapterPrompt
+        && !nextSplitLongChapters
+        && result.long_chapters.length > 0
+        && !longSplitPromptedByNovel[novel.id]
+      ) {
+        setLongSplitPromptedByNovel((prompted) => ({ ...prompted, [novel.id]: true }));
+        setLongChapterPrompt(result.long_chapters);
+      }
     } catch (error) {
       showNotice(String(error));
     } finally {
       setPreviewing(false);
     }
+  }
+
+  async function generatePreview() {
+    await runPreview(splitLongChapters, true);
+  }
+
+  async function enableLongSplitFromPrompt() {
+    setLongChapterPrompt(null);
+    setSplitLongChapters(true);
+    await runPreview(true, false);
+  }
+
+  function dismissLongSplitPrompt() {
+    setLongChapterPrompt(null);
   }
 
   async function saveAndApply() {
@@ -375,6 +410,11 @@ export function ChapterRulesPage({
             {splitLongChapters ? "开启" : "关闭"}
           </button>
           <span>长章节自动拆分：仅影响本次预览和生成章节列表；单章正文超过 5000 字时会拆成（1）（2）等多个章节。</span>
+          {!splitLongChapters && longChapterHint.length > 0 && (
+            <span className="chapter-rule-long-split-warning">
+              当前预览检测到 {longChapterHint.length} 个超过 5000 字的章节，可开启后重新生成预览。
+            </span>
+          )}
         </div>
       </section>
 
@@ -414,6 +454,33 @@ export function ChapterRulesPage({
           )}
         </div>
       </section>
+
+      {longChapterPrompt && (
+        <Modal labelledBy="long-chapter-split-dialog-title">
+          <header className="dialog-titlebar">
+            <h2 id="long-chapter-split-dialog-title">检测到长章节</h2>
+          </header>
+          <div className="dialog-body">
+            <p>
+              当前预览中有 {longChapterPrompt.length} 个章节正文超过 5000 字。开启长章节自动拆分后，保存时会把这些章节拆成“（1）（2）”等连续章节，降低后续单次改写输入长度。
+            </p>
+            <ul className="chapter-rule-long-chapter-list">
+              {longChapterPromptItems.map((chapter) => (
+                <li key={`${chapter.index}-${chapter.title}`}>
+                  第 {chapter.index} 章：{chapter.title}（{chapter.char_count} 字）
+                </li>
+              ))}
+            </ul>
+          </div>
+          <footer className="dialog-actions">
+            <button type="button" onClick={dismissLongSplitPrompt}>暂不开启</button>
+            <button className="dialog-primary" type="button" onClick={() => void enableLongSplitFromPrompt()} disabled={previewing}>
+              {previewing ? <Loader2 className="spin" size={16} /> : null}
+              开启并重新生成预览
+            </button>
+          </footer>
+        </Modal>
+      )}
     </div>
   );
 }

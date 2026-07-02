@@ -41,10 +41,19 @@ const preview: ChapterRulePreview = {
   total_chapters: 3,
   can_apply: true,
   message: "预览已生成",
+  long_chapters: [],
   chapters: [
     { index: 1, title: "第一章 开始" },
     { index: 2, title: "第二章 转折" },
     { index: 3, title: "第三章 结束" }
+  ]
+};
+
+const longChapterPreview: ChapterRulePreview = {
+  ...preview,
+  long_chapters: [
+    { index: 1, title: "第一章 开始", char_count: 5001 },
+    { index: 3, title: "第三章 结束", char_count: 7200 }
   ]
 };
 
@@ -122,6 +131,7 @@ describe("ChapterRulesPage", () => {
       if (command === "preview_chapter_rule") return {
         ...preview,
         total_chapters: 4,
+        long_chapters: [],
         chapters: [
           { index: 1, title: "第一章 开始（1）" },
           { index: 2, title: "第一章 开始（2）" },
@@ -166,6 +176,118 @@ describe("ChapterRulesPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "使用内置规则" }));
     await waitFor(() => expect(onUseBuiltin).toHaveBeenCalledWith("novel-1", true));
+  });
+
+  it("prompts once after preview finds long chapters while long splitting is off", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_chapter_rule") return null;
+      if (command === "preview_chapter_rule") return longChapterPreview;
+      return undefined;
+    });
+
+    render(
+      <ChapterRulesPage
+        novel={novel}
+        chapters={[]}
+        canonAssets={[]}
+        busy=""
+        processing={false}
+        onBack={vi.fn()}
+        onApplied={vi.fn()}
+        onUseBuiltin={vi.fn()}
+        showNotice={vi.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "生成预览" }));
+    const dialog = await screen.findByRole("dialog", { name: "检测到长章节" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByText(/当前预览检测到 2 个超过 5000 字的章节/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/第三章 结束/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "暂不开启" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "检测到长章节" })).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "生成预览" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole("dialog", { name: "检测到长章节" })).not.toBeInTheDocument();
+  });
+
+  it("enables long splitting from the prompt and regenerates preview", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: { splitLongChapters?: boolean }) => {
+      if (command === "get_chapter_rule") return null;
+      if (command === "preview_chapter_rule" && args?.splitLongChapters) {
+        return {
+          ...longChapterPreview,
+          total_chapters: 4,
+          chapters: [
+            { index: 1, title: "第一章 开始（1）" },
+            { index: 2, title: "第一章 开始（2）" },
+            { index: 3, title: "第二章 转折" },
+            { index: 4, title: "第三章 结束" }
+          ]
+        };
+      }
+      if (command === "preview_chapter_rule") return longChapterPreview;
+      return undefined;
+    });
+
+    render(
+      <ChapterRulesPage
+        novel={novel}
+        chapters={[]}
+        canonAssets={[]}
+        busy=""
+        processing={false}
+        onBack={vi.fn()}
+        onApplied={vi.fn()}
+        onUseBuiltin={vi.fn()}
+        showNotice={vi.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "生成预览" }));
+    expect(await screen.findByRole("dialog", { name: "检测到长章节" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /开启并重新生成预览/ }));
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("preview_chapter_rule", expect.objectContaining({
+      novelId: "novel-1",
+      splitLongChapters: true
+    })));
+    expect(await screen.findByText("第一章 开始（1）")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开启" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("dialog", { name: "检测到长章节" })).not.toBeInTheDocument();
+  });
+
+  it("does not prompt when long splitting is already enabled", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_chapter_rule") return null;
+      if (command === "preview_chapter_rule") return longChapterPreview;
+      return undefined;
+    });
+
+    render(
+      <ChapterRulesPage
+        novel={novel}
+        chapters={[]}
+        canonAssets={[]}
+        busy=""
+        processing={false}
+        onBack={vi.fn()}
+        onApplied={vi.fn()}
+        onUseBuiltin={vi.fn()}
+        showNotice={vi.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "生成预览" }));
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("preview_chapter_rule", expect.objectContaining({
+      splitLongChapters: true
+    })));
+    expect(screen.queryByRole("dialog", { name: "检测到长章节" })).not.toBeInTheDocument();
   });
 
   it("allows an imported novel without processing traces to resplit after confirmation", async () => {

@@ -1411,6 +1411,23 @@ textarea:focus-visible {
   color: #fff;
 }
 
+.chapter-rule-long-split-warning {
+  color: var(--color-warning);
+  flex-basis: 100%;
+}
+
+.chapter-rule-long-chapter-list {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 0;
+  padding-left: 20px;
+}
+
+.chapter-rule-long-chapter-list li {
+  color: var(--color-text);
+  line-height: 1.55;
+}
+
 .setting-parallelism {
   max-width: 420px;
   min-width: min(100%, 320px);

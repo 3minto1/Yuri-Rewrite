@@ -83,9 +83,16 @@ export type ChapterRulePreviewItem = {
   title: string;
 };
 
+export type ChapterRuleLongChapterPreviewItem = {
+  index: number;
+  title: string;
+  char_count: number;
+};
+
 export type ChapterRulePreview = {
   total_chapters: number;
   chapters: ChapterRulePreviewItem[];
+  long_chapters: ChapterRuleLongChapterPreviewItem[];
   can_apply: boolean;
   message: string;
 };

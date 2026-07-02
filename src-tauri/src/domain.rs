@@ -343,9 +343,17 @@ pub(crate) struct ChapterRulePreviewItem {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct ChapterRuleLongChapterPreviewItem {
+    pub(crate) index: i64,
+    pub(crate) title: String,
+    pub(crate) char_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ChapterRulePreview {
     pub(crate) total_chapters: usize,
     pub(crate) chapters: Vec<ChapterRulePreviewItem>,
+    pub(crate) long_chapters: Vec<ChapterRuleLongChapterPreviewItem>,
     pub(crate) can_apply: bool,
     pub(crate) message: String,
 }

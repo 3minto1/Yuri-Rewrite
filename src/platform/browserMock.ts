@@ -208,6 +208,9 @@ function mockChapterRulePreview(splitLongChapters = false): ChapterRulePreview {
   return {
     total_chapters: previewTitles.length,
     chapters: previewTitles.map((title, index) => ({ index: index + 1, title })),
+    long_chapters: splitLongChapters
+      ? []
+      : [{ index: 1, title: baseTitles[0], char_count: 5200 }],
     can_apply: true,
     message: "浏览器测试模式：预览已生成。"
   };
