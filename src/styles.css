@@ -3121,11 +3121,30 @@ label {
   margin-top: 4px;
 }
 
+.token-model-title {
+  min-width: 0;
+}
+
+.token-model-header-actions {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+}
+
 .token-model-totals {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 18px;
   justify-content: flex-end;
+}
+
+.token-model-delete {
+  background: var(--color-danger-soft);
+  border-color: color-mix(in srgb, var(--color-danger) 36%, transparent);
+  color: var(--color-danger);
+  flex: 0 0 auto;
+  min-height: 32px;
+  width: 32px;
 }
 
 .token-model-totals span {
@@ -3235,6 +3254,11 @@ label {
 
   .token-model-card > header {
     flex-direction: column;
+  }
+
+  .token-model-header-actions {
+    justify-content: space-between;
+    width: 100%;
   }
 
   .token-model-totals {

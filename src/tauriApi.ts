@@ -48,6 +48,10 @@ type CommandMap = {
     args: { startDate: string; endDate: string };
     result: TokenUsageReport;
   };
+  delete_token_usage_for_model: {
+    args: { profileId: string; startDate: string; endDate: string };
+    result: number;
+  };
   get_app_settings: { args?: undefined; result: AppSettings };
   save_app_settings: { args: { settings: AppSettings }; result: AppSettings };
   save_selected_profile_id: { args: { profileId: string | null }; result: AppSettings };

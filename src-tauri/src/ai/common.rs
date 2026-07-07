@@ -496,15 +496,33 @@ pub(crate) fn is_temporary_gateway_error(message: &str) -> bool {
 }
 
 pub(crate) fn is_recoverable_model_format_error(message: &str) -> bool {
+    let trimmed = message.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("HTTP 401")
+        || trimmed.starts_with("HTTP 403")
+        || trimmed.contains("模型内容安全策略拦截")
+        || trimmed.contains("content_filter")
+    {
+        return false;
+    }
+
     [
         "分析输出格式多次修复后仍无法解析",
         "分析输出格式修复重试调用失败",
+        "AI 输出缺少章节分析开始标记",
+        "AI 输出缺少章节分析结束标记",
+        "AI 输出缺少章节开始标记",
+        "AI 输出缺少章节结束标记",
+        "无法从无 marker 输出中稳定拆回当前分片章节",
+        "AI 输出为空，无法兜底解析",
+        "兜底解析也失败",
+        "自动细分到单章后仍无法解析",
         "审查决策无法解析",
         "格式修复重试后仍失败",
         "格式修复重试调用失败",
     ]
     .iter()
-    .any(|needle| message.contains(needle))
+    .any(|needle| trimmed.contains(needle))
 }
 
 pub(crate) fn openai_content_filter_error(
@@ -1089,8 +1107,15 @@ mod tests {
         assert!(is_recoverable_model_format_error(
             "第1-30章：审查决策无法解析：expected value；格式修复重试调用失败：timeout"
         ));
+        assert!(is_recoverable_model_format_error("AI 输出缺少章节结束标记"));
+        assert!(is_recoverable_model_format_error(
+            "第221-230章 · 分片 9/10 · 第229章：自动细分到单章后仍无法解析：AI 输出缺少章节开始标记；兜底解析也失败：AI 输出为空，无法兜底解析。"
+        ));
+        assert!(is_recoverable_model_format_error(
+            "无法从无 marker 输出中稳定拆回当前分片章节。"
+        ));
         assert!(!is_recoverable_model_format_error(
-            "AI 输出缺少章节结束标记"
+            "模型内容安全策略拦截，未返回可解析文本。"
         ));
         assert!(!is_recoverable_model_format_error("HTTP 401: unauthorized"));
     }

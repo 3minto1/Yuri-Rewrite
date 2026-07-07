@@ -199,6 +199,31 @@ pub(crate) fn get_token_usage_stats(
     end_date: String,
     state: State<AppState>,
 ) -> Result<TokenUsageReport, String> {
+    let (start, end) = parse_token_usage_date_range(&start_date, &end_date)?;
+    let conn = state.conn.lock().map_err(to_string)?;
+    build_token_usage_report(&conn, start, end)
+}
+
+#[tauri::command]
+pub(crate) fn delete_token_usage_for_model(
+    profile_id: String,
+    start_date: String,
+    end_date: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let profile_id = profile_id.trim();
+    if profile_id.is_empty() {
+        return Err("模型配置 ID 不能为空。".to_string());
+    }
+    let (start, end) = parse_token_usage_date_range(&start_date, &end_date)?;
+    let conn = state.conn.lock().map_err(to_string)?;
+    delete_token_usage_for_model_from_connection(&conn, profile_id, start, end)
+}
+
+fn parse_token_usage_date_range(
+    start_date: &str,
+    end_date: &str,
+) -> Result<(NaiveDate, NaiveDate), String> {
     let start = NaiveDate::parse_from_str(start_date.trim(), "%Y-%m-%d")
         .map_err(|_| "开始日期格式无效。".to_string())?;
     let end = NaiveDate::parse_from_str(end_date.trim(), "%Y-%m-%d")
@@ -209,8 +234,49 @@ pub(crate) fn get_token_usage_stats(
     if (end - start).num_days() > 366 {
         return Err("单次统计范围不能超过 366 天。".to_string());
     }
-    let conn = state.conn.lock().map_err(to_string)?;
-    build_token_usage_report(&conn, start, end)
+    Ok((start, end))
+}
+
+fn delete_token_usage_for_model_from_connection(
+    conn: &Connection,
+    profile_id: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, created_at
+             FROM token_usage_records
+             WHERE profile_id = ?1",
+        )
+        .map_err(to_string)?;
+    let rows = stmt
+        .query_map(params![profile_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(to_string)?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let (id, created_at) = row.map_err(to_string)?;
+        let local_date = DateTime::parse_from_rfc3339(&created_at)
+            .map_err(to_string)?
+            .with_timezone(&Local)
+            .date_naive();
+        if local_date >= start && local_date <= end {
+            ids.push(id);
+        }
+    }
+
+    let mut deleted = 0;
+    for id in ids {
+        deleted += conn
+            .execute(
+                "DELETE FROM token_usage_records WHERE profile_id = ?1 AND id = ?2",
+                params![profile_id, id],
+            )
+            .map_err(to_string)?;
+    }
+    Ok(deleted)
 }
 
 fn build_token_usage_report(
@@ -456,6 +522,108 @@ mod tests {
         assert_eq!(report.models[0].model, "model-a");
         assert_eq!(report.models[0].days.len(), 2);
         assert_eq!(report.models[0].days[0].requests, 2);
+    }
+
+    #[test]
+    fn deleting_token_usage_for_model_removes_only_selected_date_range() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        for (id, name, model) in [
+            ("profile-1", "主力模型", "model-a"),
+            ("profile-2", "备用模型", "model-b"),
+        ] {
+            conn.execute(
+                "INSERT INTO model_profiles (
+                    id, name, provider, base_url, model, temperature, thinking_mode, updated_at
+                 ) VALUES (?1, ?2, 'openai-compatible', 'https://example.com', ?3, 0.7, 'auto', 'now')",
+                params![id, name, model],
+            )
+            .expect("insert profile");
+        }
+        insert_ai_log(
+            &conn,
+            "log-keep",
+            Some("novel-1"),
+            "改写",
+            "ok",
+            "2026-06-18T10:00:00+08:00",
+        );
+        for (id, profile_id, profile_name, model, input, output, created_at) in [
+            (
+                "delete-in-range",
+                "profile-1",
+                "主力模型",
+                "model-a",
+                500_i64,
+                100_i64,
+                "2026-06-18T10:00:00+08:00",
+            ),
+            (
+                "keep-outside-range",
+                "profile-1",
+                "主力模型",
+                "model-a",
+                300_i64,
+                60_i64,
+                "2026-06-19T10:00:00+08:00",
+            ),
+            (
+                "keep-other-profile",
+                "profile-2",
+                "备用模型",
+                "model-b",
+                200_i64,
+                40_i64,
+                "2026-06-18T12:00:00+08:00",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO token_usage_records (
+                    id, novel_id, profile_id, profile_name, model,
+                    input_tokens, output_tokens, created_at
+                 ) VALUES (?1, 'novel-1', ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, profile_id, profile_name, model, input, output, created_at],
+            )
+            .expect("insert token usage");
+        }
+
+        let deleted = delete_token_usage_for_model_from_connection(
+            &conn,
+            "profile-1",
+            NaiveDate::from_ymd_opt(2026, 6, 18).expect("start date"),
+            NaiveDate::from_ymd_opt(2026, 6, 18).expect("end date"),
+        )
+        .expect("delete usage");
+
+        assert_eq!(deleted, 1);
+        let remaining_ids = conn
+            .prepare("SELECT id FROM token_usage_records ORDER BY id")
+            .expect("prepare remaining query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query remaining")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect remaining");
+        assert_eq!(remaining_ids, ["keep-other-profile", "keep-outside-range"]);
+        let log_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ai_logs", [], |row| row.get(0))
+            .expect("count logs");
+        assert_eq!(log_count, 1);
+        let profile_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM model_profiles", [], |row| row.get(0))
+            .expect("count profiles");
+        assert_eq!(profile_count, 2);
+
+        let report = build_token_usage_report(
+            &conn,
+            NaiveDate::from_ymd_opt(2026, 6, 18).expect("start date"),
+            NaiveDate::from_ymd_opt(2026, 6, 18).expect("end date"),
+        )
+        .expect("build report");
+        assert_eq!(report.requests, 1);
+        assert_eq!(report.input_tokens, 200);
+        assert_eq!(report.output_tokens, 40);
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(report.models[0].profile_id, "profile-2");
     }
 
     #[test]

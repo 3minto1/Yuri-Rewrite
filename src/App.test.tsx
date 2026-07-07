@@ -131,6 +131,9 @@ function installDefaultCommands() {
     if (command === "start_analyze_rewrite_all") {
       return { id: "job-auto", novel_id: "novel-1", job_type: "auto", status: "paused", current_chapter: 0, total_chapters: 1, message: "已暂停" };
     }
+    if (command === "start_analyze_rewrite_batch") {
+      return { id: "job-auto-batch", novel_id: "novel-1", job_type: "auto_batch", status: "completed", current_chapter: 1, total_chapters: 1, message: "当前批次完成" };
+    }
     if (command === "save_model_profile") return profile;
     if (command === "save_selected_profile_id") return settings;
     if (command === "update_chapter_title") {
@@ -429,6 +432,7 @@ describe("App feature behavior", () => {
       summary: {
         phase: "rewrite",
         batch_index: 1,
+        batch_id: "batch-1",
         batch_label: "第2批",
         total_chapters: 10,
         staged_chapters: 6,
@@ -453,6 +457,55 @@ describe("App feature behavior", () => {
     expect(screen.getAllByText(/已保留 6\/10 章，剩余 4 章/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/待处理：第3-4章、第7-8章/).length).toBeGreaterThan(0);
     expect(screen.getByText("未完成")).toBeInTheDocument();
+  });
+
+  it("continues a paused current-batch auto task from the recovered batch", async () => {
+    recoveryRows = [{
+      novel_id: "novel-1",
+      start_batch_index: 1,
+      next_batch_index: 1,
+      status: "paused",
+      pause_reason: "模型输出格式无法解析。",
+      phase: "analysis",
+      batch_index: 2,
+      profile_ids: ["profile-1"],
+      summary: {
+        phase: "analysis",
+        batch_index: 2,
+        batch_id: "batch-2",
+        batch_label: "第二批",
+        total_chapters: 10,
+        staged_chapters: 4,
+        pending_chapters: 6,
+        pending_ranges: ["第5-10章"],
+        pending_ranges_truncated: false
+      },
+      job: {
+        id: "job-recovery-batch",
+        novel_id: "novel-1",
+        job_type: "auto_batch",
+        status: "paused",
+        current_chapter: 0,
+        total_chapters: 1,
+        message: "旧消息"
+      }
+    }];
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "继续" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-2");
+    expect(screen.getByText(/检测到上次未完成的当前批次一键任务/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_analyze_rewrite_batch", {
+        novelId: "novel-1",
+        profileId: "profile-1",
+        batchId: "batch-2"
+      })
+    );
+    expect(mocks.invoke).not.toHaveBeenCalledWith("start_analyze_rewrite_all", expect.anything());
   });
 
   it("shows the updated quick start help text", async () => {
@@ -536,7 +589,7 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("combobox", { name: "当前批次" })).toBeEnabled();
   });
 
-  it("shows detailed progress and terminate-only controls for the current-batch auto task", async () => {
+  it("shows detailed progress and pause controls for the current-batch auto task", async () => {
     let resolveBatchJob!: (job: Job) => void;
     const batchJob = new Promise<Job>((resolve) => {
       resolveBatchJob = resolve;
@@ -568,7 +621,7 @@ describe("App feature behavior", () => {
       })
     );
     expect(screen.getByRole("button", { name: "终止" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "继续" })).not.toBeInTheDocument();
 
     act(() => {
@@ -600,7 +653,7 @@ describe("App feature behavior", () => {
     expect(await screen.findByLabelText("任务进度 20%")).toBeInTheDocument();
     expect(screen.getByText(/章节 40\/100 · 分片 1\/6/)).toBeInTheDocument();
     expect(screen.getByText("2/6 第2章（分析）")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeEnabled();
 
     await act(async () => {
       resolveBatchJob({
@@ -846,6 +899,122 @@ describe("App feature behavior", () => {
       startDate: expect.any(String),
       endDate: expect.any(String)
     }));
+  });
+
+  it("deletes token statistics for a model after confirmation and refreshes totals", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let deleted = false;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_log_days") return [{ date: "2026-06-19", count: 0 }];
+      if (command === "list_ai_logs_by_date") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "get_token_usage_stats") {
+        return deleted
+          ? {
+              start_date: "2026-05-21",
+              end_date: "2026-06-19",
+              requests: 0,
+              input_tokens: 0,
+              output_tokens: 0,
+              models: []
+            }
+          : {
+              start_date: "2026-05-21",
+              end_date: "2026-06-19",
+              requests: 2,
+              input_tokens: 1000,
+              output_tokens: 250,
+              models: [{
+                profile_id: "profile-1",
+                profile_name: "测试模型",
+                model: "test-model",
+                requests: 2,
+                input_tokens: 1000,
+                output_tokens: 250,
+                days: [{ date: "2026-06-19", requests: 2, input_tokens: 1000, output_tokens: 250 }]
+              }]
+            };
+      }
+      if (command === "delete_token_usage_for_model") {
+        deleted = true;
+        return 2;
+      }
+      if (command === "check_for_updates") return { current_version: "0.3.2", latest_version: "0.3.2", latest_tag: "v0.3.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    try {
+      render(<App />);
+      await screen.findByRole("heading", { name: "测试小说" });
+      fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+      expect(await screen.findByText("test-model")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "删除 测试模型 Token 统计" }));
+
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith("delete_token_usage_for_model", {
+          profileId: "profile-1",
+          startDate: expect.any(String),
+          endDate: expect.any(String)
+        })
+      );
+      await waitFor(() => expect(screen.getByText("该日期范围内暂无可统计的模型 Token 记录。")).toBeInTheDocument());
+      expect(screen.getAllByText("0").length).toBeGreaterThan(0);
+      expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("不会删除 AI 日志、模型配置、API Key 或小说数据"));
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("does not delete token statistics when confirmation is cancelled", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_log_days") return [{ date: "2026-06-19", count: 0 }];
+      if (command === "list_ai_logs_by_date") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "get_token_usage_stats") {
+        return {
+          start_date: "2026-05-21",
+          end_date: "2026-06-19",
+          requests: 1,
+          input_tokens: 100,
+          output_tokens: 25,
+          models: [{
+            profile_id: "profile-1",
+            profile_name: "测试模型",
+            model: "test-model",
+            requests: 1,
+            input_tokens: 100,
+            output_tokens: 25,
+            days: [{ date: "2026-06-19", requests: 1, input_tokens: 100, output_tokens: 25 }]
+          }]
+        };
+      }
+      if (command === "check_for_updates") return { current_version: "0.3.2", latest_version: "0.3.2", latest_tag: "v0.3.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    try {
+      render(<App />);
+      await screen.findByRole("heading", { name: "测试小说" });
+      fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+      expect(await screen.findByText("test-model")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "删除 测试模型 Token 统计" }));
+
+      expect(confirmSpy).toHaveBeenCalledOnce();
+      expect(mocks.invoke.mock.calls.some(([command]) => command === "delete_token_usage_for_model")).toBe(false);
+    } finally {
+      confirmSpy.mockRestore();
+    }
   });
 
   it("rolls the default token statistics range forward after the app crosses midnight", async () => {

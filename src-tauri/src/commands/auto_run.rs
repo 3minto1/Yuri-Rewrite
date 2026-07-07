@@ -1,6 +1,6 @@
 use crate::domain::{AppState, Chapter, ChapterBatch, Job};
 use crate::rate_limit::is_rate_limit_retry_exhausted;
-use crate::task_control::{AutoRunCleanup, AutoRunControl};
+use crate::task_control::AutoRunCleanup;
 use crate::{
     analyze_chapters_for_auto, begin_auto_batch_progress, build_rewritten_export_body,
     chinese_batch_label, clear_auto_run, create_job, emit_job_progress, finish_stopped_auto_run,
@@ -17,7 +17,7 @@ use crate::{
 use crate::{
     is_recoverable_model_format_error, is_recoverable_network_error, is_temporary_gateway_error,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::HashSet,
     fs,
@@ -32,6 +32,91 @@ enum RecoverableAutoRunFailure {
     TemporaryGateway,
     Network,
     ModelFormat,
+}
+
+fn paused_recovery_job_type(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let job_type = conn
+        .query_row(
+            "SELECT jobs.job_type
+             FROM auto_run_checkpoints
+             JOIN jobs ON jobs.id = auto_run_checkpoints.job_id
+             WHERE auto_run_checkpoints.novel_id = ?1
+               AND auto_run_checkpoints.status = 'paused'",
+            params![novel_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(job_type)
+}
+
+fn paused_recovery_batch_index(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+) -> Result<Option<i64>, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    conn.query_row(
+        "SELECT batch_index
+         FROM auto_run_checkpoints
+         WHERE novel_id = ?1 AND status = 'paused'",
+        params![novel_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .map(|value| value.flatten())
+    .map_err(to_string)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pause_auto_run_after_recoverable_failure(
+    kind: RecoverableAutoRunFailure,
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    start_batch_index: i64,
+    error: &str,
+) -> Result<Job, String> {
+    match kind {
+        RecoverableAutoRunFailure::RateLimit => pause_auto_run_after_rate_limit(
+            state,
+            app,
+            job,
+            completed_batches,
+            start_batch_index,
+            error,
+        ),
+        RecoverableAutoRunFailure::TemporaryGateway => {
+            pause_auto_run_after_temporary_gateway_error(
+                state,
+                app,
+                job,
+                completed_batches,
+                start_batch_index,
+                error,
+            )
+        }
+        RecoverableAutoRunFailure::Network => pause_auto_run_after_network_error(
+            state,
+            app,
+            job,
+            completed_batches,
+            start_batch_index,
+            error,
+        ),
+        RecoverableAutoRunFailure::ModelFormat => pause_auto_run_after_model_format_error(
+            state,
+            app,
+            job,
+            completed_batches,
+            start_batch_index,
+            error,
+        ),
+    }
 }
 
 #[tauri::command]
@@ -63,6 +148,14 @@ pub(crate) async fn start_analyze_rewrite_batch(
     if chapters.is_empty() {
         return Err("当前批次没有可处理的内容。".to_string());
     }
+    if let Some(job_type) = paused_recovery_job_type(&state, &novel_id)? {
+        if job_type != "auto_batch" {
+            return Err("当前有未完成的全文一键分析改写任务，请先继续或终止该任务。".to_string());
+        }
+        if paused_recovery_batch_index(&state, &novel_id)? != Some(batch.batch_index) {
+            return Err("当前有未完成的其他批次一键任务，请先继续或终止该任务。".to_string());
+        }
+    }
 
     let (review_profile, _review_api_key) = load_review_profile_for_run(
         &state,
@@ -90,22 +183,11 @@ pub(crate) async fn start_analyze_rewrite_batch(
         active_profile_ids.iter().copied(),
         "一键分析改写当前批次",
     )?;
-    {
-        let mut runs = state.auto_runs.lock().map_err(to_string)?;
-        if runs.contains_key(&novel_id) {
-            return Err("当前已有一键分析改写任务，请先终止现有任务。".to_string());
-        }
-        runs.insert(
-            novel_id.clone(),
-            AutoRunControl {
-                status: "running".to_string(),
-                start_batch_index: 0,
-                completed_batches: 0,
-                job_id: None,
-                profile_ids,
-                recoverable: false,
-            },
-        );
+    let current_start_batch_index = batch.batch_index.saturating_sub(1);
+    let (resume_from, start_batch_index) =
+        prepare_auto_run(&state, &novel_id, profile_ids, current_start_batch_index)?;
+    if start_batch_index != current_start_batch_index || resume_from != current_start_batch_index {
+        return Err("当前有未完成的一键分析改写任务，请先继续或终止该任务。".to_string());
     }
     let _auto_run_cleanup = AutoRunCleanup::new(
         &state.auto_runs,
@@ -114,11 +196,18 @@ pub(crate) async fn start_analyze_rewrite_batch(
         &novel_id,
     );
     let mut job = create_job(&state, &novel_id, "auto_batch", 1)?;
-    register_auto_run_job(&state, &novel_id, &job.id, 0, 0)?;
+    register_auto_run_job(
+        &state,
+        &novel_id,
+        &job.id,
+        current_start_batch_index,
+        current_start_batch_index,
+    )?;
     let start_message = format!("准备分析并改写当前批次：{}", batch.label);
     update_job(&state, &job.id, "running", 0, &start_message)?;
     emit_job_progress(&app, &job, "running", 0, &start_message);
 
+    update_auto_run_checkpoint_phase(&state, &novel_id, "analysis", batch.batch_index)?;
     begin_auto_batch_progress(&state, &novel_id, "analysis", 1, 1, &batch.label)?;
     if let Err(error) = analyze_chapters_for_auto(
         &state,
@@ -126,12 +215,30 @@ pub(crate) async fn start_analyze_rewrite_batch(
         &analysis_profile,
         &analysis_api_key,
         &chapters,
-        None,
+        Some(batch.batch_index),
     )
     .await
     {
-        if error == AUTO_RUN_TERMINATED {
-            return finish_stopped_auto_run(&state, &app, job, 0, 0, &error);
+        if error == AUTO_RUN_PAUSED || error == AUTO_RUN_TERMINATED {
+            return finish_stopped_auto_run(
+                &state,
+                &app,
+                job,
+                current_start_batch_index,
+                current_start_batch_index,
+                &error,
+            );
+        }
+        if let Some(kind) = classify_recoverable_auto_run_failure(&error) {
+            return pause_auto_run_after_recoverable_failure(
+                kind,
+                &state,
+                &app,
+                job,
+                current_start_batch_index,
+                current_start_batch_index,
+                &error,
+            );
         }
         update_job(&state, &job.id, "failed", 0, &error)?;
         emit_job_progress(&app, &job, "failed", 0, &error);
@@ -139,15 +246,48 @@ pub(crate) async fn start_analyze_rewrite_batch(
         return load_job(&state, &job.id);
     }
     if let Some(status) = requested_auto_run_stop(&state, &novel_id)? {
-        return finish_stopped_auto_run(&state, &app, job, 0, 0, &status);
+        return finish_stopped_auto_run(
+            &state,
+            &app,
+            job,
+            current_start_batch_index,
+            current_start_batch_index,
+            &status,
+        );
     }
 
+    update_auto_run_checkpoint_phase(&state, &novel_id, "rewrite", batch.batch_index)?;
     begin_auto_batch_progress(&state, &novel_id, "rewrite", 1, 1, &batch.label)?;
-    if let Err(error) =
-        rewrite_chapters_for_auto(&state, &novel_id, &profile, &api_key, &batch.id, None).await
+    if let Err(error) = rewrite_chapters_for_auto(
+        &state,
+        &novel_id,
+        &profile,
+        &api_key,
+        &batch.id,
+        Some(batch.batch_index),
+    )
+    .await
     {
-        if error == AUTO_RUN_TERMINATED {
-            return finish_stopped_auto_run(&state, &app, job, 0, 0, &error);
+        if error == AUTO_RUN_PAUSED || error == AUTO_RUN_TERMINATED {
+            return finish_stopped_auto_run(
+                &state,
+                &app,
+                job,
+                current_start_batch_index,
+                current_start_batch_index,
+                &error,
+            );
+        }
+        if let Some(kind) = classify_recoverable_auto_run_failure(&error) {
+            return pause_auto_run_after_recoverable_failure(
+                kind,
+                &state,
+                &app,
+                job,
+                current_start_batch_index,
+                current_start_batch_index,
+                &error,
+            );
         }
         update_job(&state, &job.id, "failed", 0, &error)?;
         emit_job_progress(&app, &job, "failed", 0, &error);
@@ -207,6 +347,9 @@ pub(crate) async fn start_analyze_rewrite_all(
     };
     if batches.is_empty() {
         return Err("当前小说没有可处理的批次。".to_string());
+    }
+    if paused_recovery_job_type(&state, &novel_id)?.as_deref() == Some("auto_batch") {
+        return Err("当前有未完成的当前批次一键任务，请先继续或终止该任务。".to_string());
     }
     let requested_start_batch_index =
         resolve_auto_run_start_batch_index(&batches, start_batch_id.as_deref())?;
@@ -792,6 +935,12 @@ mod tests {
         assert_eq!(
             classify_recoverable_auto_run_failure(
                 "分析输出格式修复重试调用失败：HTTP 500: provider error"
+            ),
+            Some(RecoverableAutoRunFailure::ModelFormat)
+        );
+        assert_eq!(
+            classify_recoverable_auto_run_failure(
+                "第221-230章 · 分片 9/10 · 第229章：自动细分到单章后仍无法解析：AI 输出缺少章节开始标记；兜底解析也失败：AI 输出为空，无法兜底解析。"
             ),
             Some(RecoverableAutoRunFailure::ModelFormat)
         );

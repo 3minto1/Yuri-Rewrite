@@ -170,6 +170,7 @@ export type AutoRunRecovery = {
 export type AutoRunRecoverySummary = {
   phase: string;
   batch_index: number;
+  batch_id: string;
   batch_label: string;
   total_chapters: number;
   staged_chapters: number;

@@ -3,6 +3,31 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 chcp 65001 | Out-Null
 
+function Get-Sha256Hex {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$LiteralPath
+  )
+
+  $GetFileHashCommand = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+  if ($GetFileHashCommand) {
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $LiteralPath).Hash
+  }
+
+  $Stream = [System.IO.File]::OpenRead($LiteralPath)
+  try {
+    $Sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $Bytes = $Sha256.ComputeHash($Stream)
+    } finally {
+      $Sha256.Dispose()
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+  return ([System.BitConverter]::ToString($Bytes) -replace "-", "")
+}
+
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $PortableDir = Join-Path $Root "portable"
 $ResolvedRoot = [System.IO.Path]::GetFullPath($Root)
@@ -45,6 +70,6 @@ if (($Entries -join "|") -ne ($Expected -join "|")) {
   throw "Portable ZIP contents are invalid: $($Entries -join ', ')"
 }
 
-$Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath).Hash
+$Hash = Get-Sha256Hex -LiteralPath $ZipPath
 Write-Host "Portable package verified: $ZipPath"
 Write-Host "SHA-256: $Hash"

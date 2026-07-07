@@ -125,6 +125,7 @@ pub fn run() {
             list_ai_logs_by_date,
             clear_ai_logs,
             get_token_usage_stats,
+            delete_token_usage_for_model,
             get_app_settings,
             save_app_settings,
             save_selected_profile_id,
@@ -288,11 +289,11 @@ fn restore_auto_run_controls(
         params![now],
     )?;
     conn.execute(
-        "UPDATE jobs SET status = 'paused', message = '检测到上次未完成的一键任务，可点击继续处理当前批次的未完成分片。', updated_at = ?1 WHERE job_type = 'auto' AND status IN ('running', 'pausing', 'terminating') AND id IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
+        "UPDATE jobs SET status = 'paused', message = '检测到上次未完成的一键任务，可点击继续处理当前批次的未完成分片。', updated_at = ?1 WHERE job_type IN ('auto', 'auto_batch') AND status IN ('running', 'pausing', 'terminating') AND id IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
         params![now],
     )?;
     conn.execute(
-        "UPDATE jobs SET status = 'failed', message = '旧版本任务在软件关闭时中断，缺少恢复检查点，无法继续。', updated_at = ?1 WHERE job_type = 'auto' AND status IN ('running', 'pausing', 'terminating') AND id NOT IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
+        "UPDATE jobs SET status = 'failed', message = '旧版本任务在软件关闭时中断，缺少恢复检查点，无法继续。', updated_at = ?1 WHERE job_type IN ('auto', 'auto_batch') AND status IN ('running', 'pausing', 'terminating') AND id NOT IN (SELECT job_id FROM auto_run_checkpoints WHERE job_id IS NOT NULL)",
         params![now],
     )?;
 
@@ -7628,8 +7629,8 @@ mod tests {
         assert!(prompt.contains("主角别名和其他指定女性化人物"));
         assert!(prompt.contains("必须逐字使用指定改写名"));
 
-        let content = build_name_mapping_asset_content(&settings, Vec::new())
-            .expect("valid mapping content");
+        let content =
+            build_name_mapping_asset_content(&settings, Vec::new()).expect("valid mapping content");
         let entries = parse_name_mapping_entries(&content);
         assert!(entries
             .iter()
@@ -7715,15 +7716,30 @@ mod tests {
         )
         .expect("insert novel");
         conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, created_at) VALUES ('novel-2', '测试2', 'b.txt', 'UTF-8', 'imported', 'now')",
+            [],
+        )
+        .expect("insert second novel");
+        conn.execute(
             "INSERT INTO jobs (id, novel_id, job_type, status, current_chapter, total_chapters, message, created_at, updated_at) VALUES ('job-1', 'novel-1', 'auto', 'running', 2, 10, '运行中', 'now', 'now')",
             [],
         )
         .expect("insert job");
         conn.execute(
+            "INSERT INTO jobs (id, novel_id, job_type, status, current_chapter, total_chapters, message, created_at, updated_at) VALUES ('job-2', 'novel-2', 'auto_batch', 'running', 0, 1, '当前批次运行中', 'now', 'now')",
+            [],
+        )
+        .expect("insert auto batch job");
+        conn.execute(
             "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, job_id, status, pause_reason, phase, batch_index, profile_ids, created_at, updated_at) VALUES ('novel-1', 0, 2, 'job-1', 'running', '', 'rewrite', 3, '[\"profile-1\"]', 'now', 'now')",
             [],
         )
         .expect("insert checkpoint");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, job_id, status, pause_reason, phase, batch_index, profile_ids, created_at, updated_at) VALUES ('novel-2', 1, 1, 'job-2', 'running', '', 'analysis', 2, '[\"profile-2\"]', 'now', 'now')",
+            [],
+        )
+        .expect("insert auto batch checkpoint");
 
         let restored = restore_auto_run_controls(&conn).expect("restore controls");
         let control = restored.get("novel-1").expect("restored novel");
@@ -7736,6 +7752,19 @@ mod tests {
             })
             .expect("load job");
         assert_eq!(status, "paused");
+        let batch_status: String = conn
+            .query_row("SELECT status FROM jobs WHERE id = 'job-2'", [], |row| {
+                row.get(0)
+            })
+            .expect("load auto batch job");
+        assert_eq!(batch_status, "paused");
+        assert_eq!(
+            restored
+                .get("novel-2")
+                .expect("restored auto batch")
+                .completed_batches,
+            1
+        );
     }
 
     #[test]

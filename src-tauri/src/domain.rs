@@ -216,6 +216,7 @@ pub(crate) struct AutoRunRecovery {
 pub(crate) struct AutoRunRecoverySummary {
     pub(crate) phase: String,
     pub(crate) batch_index: i64,
+    pub(crate) batch_id: String,
     pub(crate) batch_label: String,
     pub(crate) total_chapters: usize,
     pub(crate) staged_chapters: usize,

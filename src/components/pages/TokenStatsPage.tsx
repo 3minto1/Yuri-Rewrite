@@ -1,4 +1,4 @@
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { memo, useMemo } from "react";
 import type { TokenUsageDay, TokenUsageReport } from "../../types";
 
@@ -7,8 +7,10 @@ type TokenStatsPageProps = {
   startDate: string;
   endDate: string;
   busy: boolean;
+  deletingProfileId?: string;
   onStartDateChange: (value: string) => void;
   onEndDateChange: (value: string) => void;
+  onDeleteModel: (profileId: string, profileName: string, model: string) => void;
   onRefresh: () => void;
   onBack: () => void;
 };
@@ -120,8 +122,8 @@ const UsageCharts = memo(function UsageCharts({
 
 export function TokenStatsPage(props: TokenStatsPageProps) {
   const {
-    report, startDate, endDate, busy,
-    onStartDateChange, onEndDateChange, onRefresh, onBack
+    report, startDate, endDate, busy, deletingProfileId,
+    onStartDateChange, onEndDateChange, onDeleteModel, onRefresh, onBack
   } = props;
   return (
     <div className="page-panel token-stats-page">
@@ -132,7 +134,7 @@ export function TokenStatsPage(props: TokenStatsPageProps) {
         </div>
         <div className="panel-actions">
           <button onClick={onBack}><ArrowLeft size={16} />返回</button>
-          <button onClick={onRefresh} disabled={busy || !startDate || !endDate}>
+          <button onClick={onRefresh} disabled={busy || Boolean(deletingProfileId) || !startDate || !endDate}>
             <RefreshCw className={busy ? "spin" : ""} size={16} />统计
           </button>
         </div>
@@ -153,12 +155,24 @@ export function TokenStatsPage(props: TokenStatsPageProps) {
         {report?.models.map((model) => (
           <article className="token-model-card" key={model.profile_id}>
             <header>
-              <div><strong>{model.model}</strong><span>{model.profile_name}</span></div>
-              <div className="token-model-totals">
-                <span>请求 <b>{fullNumber(model.requests)}</b></span>
-                <span>输入 <b>{fullNumber(model.input_tokens)}</b></span>
-                <span>输出 <b>{fullNumber(model.output_tokens)}</b></span>
-                <span>合计 <b>{fullNumber(model.input_tokens + model.output_tokens)}</b></span>
+              <div className="token-model-title"><strong>{model.model}</strong><span>{model.profile_name}</span></div>
+              <div className="token-model-header-actions">
+                <div className="token-model-totals">
+                  <span>请求 <b>{fullNumber(model.requests)}</b></span>
+                  <span>输入 <b>{fullNumber(model.input_tokens)}</b></span>
+                  <span>输出 <b>{fullNumber(model.output_tokens)}</b></span>
+                  <span>合计 <b>{fullNumber(model.input_tokens + model.output_tokens)}</b></span>
+                </div>
+                <button
+                  className="icon-button token-model-delete"
+                  type="button"
+                  aria-label={`删除 ${model.profile_name} Token 统计`}
+                  title="删除当前日期范围内该模型 Token 统计"
+                  disabled={busy || Boolean(deletingProfileId)}
+                  onClick={() => onDeleteModel(model.profile_id, model.profile_name, model.model)}
+                >
+                  {deletingProfileId === model.profile_id ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+                </button>
               </div>
             </header>
             <UsageCharts days={model.days} startDate={report.start_date} endDate={report.end_date} />

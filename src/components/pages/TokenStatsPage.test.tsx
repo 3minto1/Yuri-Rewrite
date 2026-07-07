@@ -5,6 +5,7 @@ import { TokenStatsPage } from "./TokenStatsPage";
 describe("TokenStatsPage", () => {
   it("renders totals by model and refreshes the selected date range", () => {
     const onRefresh = vi.fn();
+    const onDeleteModel = vi.fn();
     render(
       <TokenStatsPage
         report={{
@@ -31,6 +32,7 @@ describe("TokenStatsPage", () => {
         busy={false}
         onStartDateChange={vi.fn()}
         onEndDateChange={vi.fn()}
+        onDeleteModel={onDeleteModel}
         onRefresh={onRefresh}
         onBack={vi.fn()}
       />
@@ -40,6 +42,8 @@ describe("TokenStatsPage", () => {
     expect(screen.getAllByText("1,200")).toHaveLength(2);
     expect(screen.getByRole("img", { name: "每日 API 请求次数" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "每日输入和输出 Token" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除 主力模型 Token 统计" }));
+    expect(onDeleteModel).toHaveBeenCalledWith("p1", "主力模型", "deepseek-v4-pro");
     fireEvent.click(screen.getByRole("button", { name: "统计" }));
     expect(onRefresh).toHaveBeenCalledOnce();
   });

@@ -375,6 +375,8 @@ export async function invokeBrowserMock(
           days: [{ date: "2026-06-24", requests: 19, input_tokens: 235_600, output_tokens: 91_200 }]
         }]
       } satisfies TokenUsageReport;
+    case "delete_token_usage_for_model":
+      return 1;
     case "save_novel_settings":
       novelSettings = {
         novel_id: novel.id,

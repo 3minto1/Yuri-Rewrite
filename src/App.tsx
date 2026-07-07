@@ -385,6 +385,7 @@ export default function App() {
   const [tokenStatsStartDate, setTokenStatsStartDate] = useState(initialTokenStatsRangeRef.current.startDate);
   const [tokenStatsEndDate, setTokenStatsEndDate] = useState(initialTokenStatsRangeRef.current.endDate);
   const [tokenStatsLoading, setTokenStatsLoading] = useState(false);
+  const [tokenStatsDeletingProfileId, setTokenStatsDeletingProfileId] = useState("");
   const [pendingUpdate, setPendingUpdate] = useState<UpdateCheckResult | null>(null);
   const { notice, setNotice, showNotice } = useNotice(setPendingUpdate);
   const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
@@ -840,13 +841,17 @@ export default function App() {
       return;
     }
     setAutoRunState("paused");
-    setAutoRunMode("range");
+    setAutoRunMode(recovery.job?.job_type === "auto_batch" ? "batch" : "range");
     if (recovery.job) {
       const summary = formatRecoverySummary(recovery);
+      const jobKind = recovery.job.job_type === "auto_batch" ? "当前批次一键任务" : "一键任务";
+      const continueTarget = recovery.job.job_type === "auto_batch"
+        ? "当前批次"
+        : `第 ${recovery.next_batch_index + 1} 批`;
       setJob({
         ...recovery.job,
         status: "paused",
-        message: `检测到上次未完成的一键任务，将继续处理第 ${recovery.next_batch_index + 1} 批的未完成分片。${summary ? ` ${summary}。` : ""}${recovery.pause_reason ? ` ${recovery.pause_reason}` : ""}`
+        message: `检测到上次未完成的${jobKind}，将继续处理${continueTarget}的未完成分片。${summary ? ` ${summary}。` : ""}${recovery.pause_reason ? ` ${recovery.pause_reason}` : ""}`
       });
     }
   }
@@ -861,6 +866,8 @@ export default function App() {
     }
     const next = await invoke("get_novel_detail", { novelId });
     setDetail(next);
+    const recovery = (options.recoveries ?? autoRunRecoveries).find((item) => item.novel_id === novelId);
+    const recoveryBatchId = recovery?.job?.job_type === "auto_batch" ? recovery.summary?.batch_id : undefined;
     const nextChapterId =
       options.preserveChapterId && next.chapters.some((chapter) => chapter.id === options.preserveChapterId)
         ? options.preserveChapterId
@@ -868,6 +875,8 @@ export default function App() {
     const nextBatchId =
       options.preserveBatchId && next.batches.some((batch) => batch.id === options.preserveBatchId)
         ? options.preserveBatchId
+        : recoveryBatchId && next.batches.some((batch) => batch.id === recoveryBatchId)
+          ? recoveryBatchId
         : batchIdContainingChapter(next, nextChapterId);
     setSelectedChapterId(nextChapterId);
     setSelectedBatchId(nextBatchId);
@@ -1021,6 +1030,30 @@ export default function App() {
   function changeTokenStatsEndDate(value: string) {
     tokenStatsRangeCustomizedRef.current = true;
     setTokenStatsEndDate(value);
+  }
+
+  async function deleteTokenUsageModel(profileId: string, profileName: string, model: string) {
+    if (!tokenStatsStartDate || !tokenStatsEndDate) return;
+    const displayName = profileName && profileName !== model
+      ? `${profileName}（${model}）`
+      : model || profileName || profileId;
+    if (!window.confirm(
+      `删除 ${tokenStatsStartDate} 至 ${tokenStatsEndDate} 内「${displayName}」的 Token 统计？\n\n只会删除当前日期范围内该模型的 Token 统计，不会删除 AI 日志、模型配置、API Key 或小说数据。`
+    )) return;
+    setTokenStatsDeletingProfileId(profileId);
+    try {
+      const deleted = await invoke("delete_token_usage_for_model", {
+        profileId,
+        startDate: tokenStatsStartDate,
+        endDate: tokenStatsEndDate
+      });
+      await refreshTokenStats(tokenStatsStartDate, tokenStatsEndDate);
+      showNotice(deleted > 0 ? `已删除「${displayName}」的 ${deleted} 条 Token 统计。` : `当前日期范围内没有「${displayName}」的可删除统计。`);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setTokenStatsDeletingProfileId("");
+    }
   }
 
   async function persistSelectedProfileId(profileId: string) {
@@ -1396,7 +1429,7 @@ export default function App() {
     }
   }
 
-  async function runAnalyzeRewriteCurrentBatch() {
+  async function runAnalyzeRewriteCurrentBatch(options: { batchId?: string; resume?: boolean } = {}) {
     if (!detail || !selectedProfileId) {
       showNotice("请先导入小说并选择模型配置。");
       return;
@@ -1406,15 +1439,18 @@ export default function App() {
       requestActiveView("novel-settings");
       return;
     }
-    if (!selectedBatch) {
+    const targetBatch = options.batchId
+      ? detail.batches.find((batch) => batch.id === options.batchId)
+      : selectedBatch;
+    if (!targetBatch) {
       showNotice("当前小说没有可处理的批次。");
       return;
     }
-    const batchId = selectedBatch.id;
+    const batchId = targetBatch.id;
     const novelId = detail.novel.id;
-    if (!confirmRewriteOverwrite(
+    if (!options.resume && !confirmRewriteOverwrite(
       detail.chapters.filter(
-        (chapter) => chapter.index >= selectedBatch.start_chapter && chapter.index <= selectedBatch.end_chapter
+        (chapter) => chapter.index >= targetBatch.start_chapter && chapter.index <= targetBatch.end_chapter
       )
     )) return;
     setBusy("auto-batch");
@@ -1431,16 +1467,35 @@ export default function App() {
       await loadNovel(novelId, { preserveBatchId: batchId, preserveChapterId: selectedChapterId });
       await refreshLogs(novelId);
       if (result.status === "completed") {
+        setAutoRunState("idle");
+        setAutoRunMode(null);
         setActiveView("compare");
+      } else if (result.status === "paused") {
+        setAutoRunState("paused");
+      } else if (result.status === "terminated" || result.status === "failed") {
+        setAutoRunState("idle");
+        setAutoRunMode(null);
       }
       showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
-      showNotice(String(error));
-    } finally {
       setAutoRunState("idle");
       setAutoRunMode(null);
+      showNotice(String(error));
+    } finally {
       setBusy("");
     }
+  }
+
+  async function continueAnalyzeRewrite() {
+    const recovery = selectedRecovery;
+    if (recovery?.job?.job_type === "auto_batch") {
+      await runAnalyzeRewriteCurrentBatch({
+        batchId: recovery.summary?.batch_id ?? selectedBatch?.id,
+        resume: true
+      });
+      return;
+    }
+    await runAnalyzeRewriteAll();
   }
 
   async function runAnalyzeRewriteAll(startBatchId: string | null = null) {
@@ -2216,23 +2271,21 @@ export default function App() {
             <div className="topbar-actions">
               {autoRunState !== "idle" && (
                 <>
-                  {autoRunMode !== "batch" && (
-                    <button
-                      className="task-control-warning"
-                      onClick={autoRunState === "paused" ? () => void runAnalyzeRewriteAll() : pauseAnalyzeRewriteAll}
-                      disabled={autoControlBusy || autoRunState === "stopping"}
-                      title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
-                    >
-                      {autoControlBusy || autoRunState === "stopping" ? (
-                        <Loader2 className="spin" size={17} />
-                      ) : autoRunState === "paused" ? (
-                        <Play size={17} />
-                      ) : (
-                        <Pause size={17} />
-                      )}
-                      {autoRunState === "paused" ? "继续" : "暂停"}
-                    </button>
-                  )}
+                  <button
+                    className="task-control-warning"
+                    onClick={autoRunState === "paused" ? () => void continueAnalyzeRewrite() : pauseAnalyzeRewriteAll}
+                    disabled={autoControlBusy || autoRunState === "stopping"}
+                    title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
+                  >
+                    {autoControlBusy || autoRunState === "stopping" ? (
+                      <Loader2 className="spin" size={17} />
+                    ) : autoRunState === "paused" ? (
+                      <Play size={17} />
+                    ) : (
+                      <Pause size={17} />
+                    )}
+                    {autoRunState === "paused" ? "继续" : "暂停"}
+                  </button>
                   <button className="task-control-danger" onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy} title="终止一键分析改写">
                     {autoControlBusy ? <Loader2 className="spin" size={17} /> : <Square size={17} />}
                     终止
@@ -2272,7 +2325,7 @@ export default function App() {
               </div>
               <button
                 className="action-primary"
-                onClick={runAnalyzeRewriteCurrentBatch}
+                onClick={() => void runAnalyzeRewriteCurrentBatch()}
                 disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
                 title="AI自动分析并改写当前选中批次"
               >
@@ -2434,7 +2487,7 @@ export default function App() {
                       )}
                     </div>
                   )}
-                  {job.job_type === "auto" && job.status === "paused" && selectedRecoverySummary && (
+                  {["auto", "auto_batch"].includes(job.job_type) && job.status === "paused" && selectedRecoverySummary && (
                     <div className="job-recovery-summary">{selectedRecoverySummary}</div>
                   )}
                 </>
@@ -2472,8 +2525,10 @@ export default function App() {
             startDate={tokenStatsStartDate}
             endDate={tokenStatsEndDate}
             busy={tokenStatsLoading}
+            deletingProfileId={tokenStatsDeletingProfileId}
             onStartDateChange={changeTokenStatsStartDate}
             onEndDateChange={changeTokenStatsEndDate}
+            onDeleteModel={deleteTokenUsageModel}
             onRefresh={() => { void refreshTokenStats(); }}
             onBack={() => requestActiveView("workspace")}
           />
