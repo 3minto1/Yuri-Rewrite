@@ -140,6 +140,16 @@ function installDefaultCommands() {
       const payload = args as { chapterId: string; title: string } | undefined;
       return { ...detail.chapters[0], title: payload?.title ?? detail.chapters[0].title };
     }
+    if (command === "save_chapter_rewrite_edit") {
+      const payload = args as { chapterId: string; rewriteText: string } | undefined;
+      return {
+        ...detail.chapters[0],
+        id: payload?.chapterId ?? detail.chapters[0].id,
+        rewrite_text: payload?.rewriteText ?? detail.chapters[0].rewrite_text,
+        rewrite_edited: true
+      };
+    }
+    if (command === "restore_chapter_rewrite_edit") return detail.chapters[0];
     if (command === "export_novel") return { path: "C:/exports/test.txt" };
     return undefined;
   });
@@ -548,6 +558,160 @@ describe("App feature behavior", () => {
     fireEvent.click(analysisButton as HTMLElement);
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("start_analysis", expect.objectContaining({ batchId: "batch-2" })));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "当前批次" })).toHaveValue("batch-2"));
+  });
+
+  it("allows editing completed rewrites from Compare while standalone analysis is running", async () => {
+    let resolveAnalysis!: (job: Job) => void;
+    const analysisJob = new Promise<Job>((resolve) => {
+      resolveAnalysis = resolve;
+    });
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "start_analysis") return analysisJob;
+      if (command === "save_chapter_rewrite_edit") {
+        const payload = args as { chapterId: string; rewriteText: string };
+        return { ...detail.chapters[0], id: payload.chapterId, rewrite_text: payload.rewriteText, rewrite_edited: true };
+      }
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_ai_log_days") return [{ date: "2026-06-19", count: 0 }];
+      if (command === "list_ai_logs_by_date") return [];
+      if (command === "get_token_usage_stats") return { start_date: "2026-05-21", end_date: "2026-06-19", requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    const analysisButton = screen.getAllByRole("button", { name: "分析" }).find((button) => !button.hasAttribute("disabled"));
+    fireEvent.click(analysisButton as HTMLElement);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("start_analysis", expect.anything()));
+
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    expect(screen.getByRole("button", { name: "编辑" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重写本章（原文）" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "分析运行中保存的人工改写" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_chapter_rewrite_edit", {
+      chapterId: "chapter-1",
+      rewriteText: "分析运行中保存的人工改写"
+    }));
+
+    await act(async () => {
+      resolveAnalysis({ id: "job-1", novel_id: "novel-1", job_type: "analysis", status: "completed", current_chapter: 1, total_chapters: 1, message: "完成" });
+      await analysisJob;
+    });
+  });
+
+  it("limits Compare editing during auto runs to batches before editable_before_batch_index", async () => {
+    const twoBatchDetail: NovelDetail = {
+      ...detail,
+      chapters: [
+        detail.chapters[0],
+        { ...detail.chapters[0], id: "chapter-2", index: 2, title: "第二章", original_text: "第二章原文", rewrite_text: "第二章改写" }
+      ],
+      batches: [
+        { ...detail.batches[0], end_chapter: 1 },
+        { ...detail.batches[1], start_chapter: 2, end_chapter: 2 }
+      ]
+    };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return twoBatchDetail;
+      if (command === "list_ai_log_days") return [{ date: "2026-06-19", count: 0 }];
+      if (command === "list_ai_logs_by_date") return [];
+      if (command === "get_token_usage_stats") return { start_date: "2026-05-21", end_date: "2026-06-19", requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-1",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 2,
+        message: "正在分析第二批",
+        phase: "analysis",
+        batch_index: 2,
+        batch_total: 2,
+        editable_before_batch_index: 1
+      });
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "编辑" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "重写本章（原文）" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("combobox", { name: "章节" }));
+    fireEvent.click(screen.getByRole("option", { name: /2\. 第二章/ }));
+    expect(screen.getByRole("button", { name: "编辑" })).toBeDisabled();
+  });
+
+  it("allows editing completed earlier batches while auto rewrites a later batch", async () => {
+    const twoBatchDetail: NovelDetail = {
+      ...detail,
+      chapters: [
+        detail.chapters[0],
+        { ...detail.chapters[0], id: "chapter-2", index: 2, title: "第二章", original_text: "第二章原文", rewrite_text: "第二章改写" }
+      ],
+      batches: [
+        { ...detail.batches[0], end_chapter: 1 },
+        { ...detail.batches[1], start_chapter: 2, end_chapter: 2 }
+      ]
+    };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "get_novel_detail") return twoBatchDetail;
+      if (command === "list_ai_log_days") return [{ date: "2026-06-19", count: 0 }];
+      if (command === "list_ai_logs_by_date") return [];
+      if (command === "get_token_usage_stats") return { start_date: "2026-05-21", end_date: "2026-06-19", requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-1",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 2,
+        message: "正在改写第二批",
+        phase: "rewrite",
+        batch_index: 2,
+        batch_total: 2,
+        editable_before_batch_index: 1
+      });
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "编辑" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "重写本章（原文）" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("combobox", { name: "章节" }));
+    fireEvent.click(screen.getByRole("option", { name: /2\. 第二章/ }));
+    expect(screen.getByRole("button", { name: "编辑" })).toBeDisabled();
   });
 
   it("starts the full auto workflow from the selected batch through the end", async () => {
@@ -1294,7 +1458,7 @@ describe("App feature behavior", () => {
         status: "running",
         current_chapter: 1,
         total_chapters: 2,
-        message: "已更新合并导出至第 1 批"
+        message: "已完成第 1 批改写"
       });
     });
 
@@ -1374,7 +1538,7 @@ describe("App feature behavior", () => {
         status: "running",
         current_chapter: 1,
         total_chapters: 2,
-        message: "已更新合并导出至第 1 批"
+        message: "已完成第 1 批改写"
       });
     });
 

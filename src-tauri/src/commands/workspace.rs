@@ -1,4 +1,5 @@
 use crate::domain::{AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate};
+use crate::task_control::{AutoRunControl, AutoRunProgressState};
 use crate::{
     chapter_text_chars, estimate_requests_for_chapters, estimate_wait_seconds_for_chapters,
     load_canon_assets, load_chapter_batches, load_chapters, load_recent_model_stats,
@@ -13,31 +14,70 @@ fn chapter_edit_is_allowed(
     conn: &rusqlite::Connection,
     chapter: &Chapter,
 ) -> Result<(), String> {
-    if state.active_tasks.novel_is_active(&chapter.novel_id)? {
-        return Err("当前小说任务正在运行，不能编辑改写稿。".to_string());
-    }
-    let paused = state
+    let auto_run = state
         .auto_runs
         .lock()
         .map_err(to_string)?
         .get(&chapter.novel_id)
         .cloned();
-    if let Some(control) = paused {
-        if control.status != "paused" {
-            return Err("当前一键任务正在处理或等待暂停，不能编辑改写稿。".to_string());
-        }
-        let batch_index = conn
-            .query_row(
-                "SELECT batch_index FROM chapter_batches WHERE novel_id = ?1 AND ?2 BETWEEN start_chapter AND end_chapter LIMIT 1",
-                params![chapter.novel_id, chapter.index],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(to_string)?;
-        if batch_index > control.completed_batches {
-            return Err("暂停任务当前未完成批次及后续批次不能编辑。".to_string());
-        }
+    if let Some(control) = auto_run {
+        let progress = state
+            .auto_run_progress
+            .lock()
+            .map_err(to_string)?
+            .get(&chapter.novel_id)
+            .cloned();
+        return chapter_edit_is_allowed_for_auto_run(conn, chapter, &control, progress.as_ref());
+    }
+
+    if let Some(job_type) = state
+        .active_tasks
+        .novel_active_job_type(&chapter.novel_id)?
+    {
+        return active_task_edit_is_allowed(&job_type);
     }
     Ok(())
+}
+
+fn active_task_edit_is_allowed(job_type: &str) -> Result<(), String> {
+    if job_type == "分析" {
+        Ok(())
+    } else {
+        Err("当前小说任务正在运行，不能编辑改写稿。".to_string())
+    }
+}
+
+fn chapter_edit_is_allowed_for_auto_run(
+    conn: &rusqlite::Connection,
+    chapter: &Chapter,
+    control: &AutoRunControl,
+    _progress: Option<&AutoRunProgressState>,
+) -> Result<(), String> {
+    let batch_index = chapter_batch_index(conn, chapter)?;
+    match control.status.as_str() {
+        "paused" | "running" => {
+            if batch_index > control.completed_batches {
+                let message = if control.status == "paused" {
+                    "暂停任务当前未完成批次及后续批次不能编辑。"
+                } else {
+                    "当前一键任务正在处理当前批次或后续批次，不能编辑改写稿。"
+                };
+                Err(message.to_string())
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err("当前一键任务正在处理或等待暂停，不能编辑改写稿。".to_string()),
+    }
+}
+
+fn chapter_batch_index(conn: &rusqlite::Connection, chapter: &Chapter) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT batch_index FROM chapter_batches WHERE novel_id = ?1 AND ?2 BETWEEN start_chapter AND end_chapter LIMIT 1",
+        params![chapter.novel_id, chapter.index],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(to_string)
 }
 
 fn chapter_title_edit_is_allowed(
@@ -104,7 +144,10 @@ pub(crate) fn save_chapter_rewrite_edit(
     let conn = state.conn.lock().map_err(to_string)?;
     let chapter = load_chapter_by_id(&conn, &chapter_id)?;
     if chapter.rewrite_status != "completed"
-        || chapter.rewrite_text.as_deref().is_none_or(str::is_empty)
+        || chapter
+            .rewrite_text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
     {
         return Err("当前章节尚无可编辑的已完成改写稿。".to_string());
     }
@@ -124,6 +167,14 @@ pub(crate) fn restore_chapter_rewrite_edit(
 ) -> Result<Chapter, String> {
     let conn = state.conn.lock().map_err(to_string)?;
     let chapter = load_chapter_by_id(&conn, &chapter_id)?;
+    if chapter.rewrite_status != "completed"
+        || chapter
+            .rewrite_text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+    {
+        return Err("当前章节尚无可编辑的已完成改写稿。".to_string());
+    }
     chapter_edit_is_allowed(&state, &conn, &chapter)?;
     let restored = conn
         .execute(
@@ -322,6 +373,108 @@ mod tests {
     use super::*;
     use crate::db::init_db;
     use rusqlite::Connection;
+    use std::collections::HashSet;
+
+    fn seed_batches(conn: &Connection) {
+        init_db(conn).expect("initialize schema");
+        conn.execute(
+            "INSERT INTO novels (
+                id, title, source_path, encoding, status, detected_chapters, created_at
+             ) VALUES ('novel-1', '测试', '', 'utf-8', 'ready', 20, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO chapter_batches (
+                id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at
+             ) VALUES ('batch-1', 'novel-1', 1, '第一批', 1, 10, '', 'now')",
+            [],
+        )
+        .expect("insert batch 1");
+        conn.execute(
+            "INSERT INTO chapter_batches (
+                id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at
+             ) VALUES ('batch-2', 'novel-1', 2, '第二批', 11, 20, '', 'now')",
+            [],
+        )
+        .expect("insert batch 2");
+    }
+
+    fn chapter(index: i64) -> Chapter {
+        Chapter {
+            id: format!("chapter-{index}"),
+            novel_id: "novel-1".to_string(),
+            index,
+            title: format!("第{index}章"),
+            original_text: "原文".to_string(),
+            analysis_json: None,
+            rewrite_text: Some("改写".to_string()),
+            rewrite_edited: false,
+            single_rewrite_original_available: false,
+            analysis_status: "completed".to_string(),
+            rewrite_status: "completed".to_string(),
+        }
+    }
+
+    fn auto_control(status: &str, completed_batches: i64) -> AutoRunControl {
+        AutoRunControl {
+            status: status.to_string(),
+            start_batch_index: 0,
+            completed_batches,
+            job_id: Some("job-1".to_string()),
+            profile_ids: HashSet::new(),
+            recoverable: true,
+        }
+    }
+
+    fn auto_progress(phase: &str) -> AutoRunProgressState {
+        AutoRunProgressState {
+            phase: Some(phase.to_string()),
+            ..AutoRunProgressState::default()
+        }
+    }
+
+    #[test]
+    fn active_analysis_task_allows_rewrite_edit_but_rewrite_task_blocks_it() {
+        assert!(active_task_edit_is_allowed("分析").is_ok());
+        assert!(active_task_edit_is_allowed("改写").is_err());
+        assert!(active_task_edit_is_allowed("重新改写本章").is_err());
+    }
+
+    #[test]
+    fn running_auto_allows_completed_prior_batches_across_phases() {
+        let conn = Connection::open_in_memory().expect("open database");
+        seed_batches(&conn);
+        let control = auto_control("running", 1);
+        let progress = auto_progress("analysis");
+
+        chapter_edit_is_allowed_for_auto_run(&conn, &chapter(5), &control, Some(&progress))
+            .expect("completed batch can be edited");
+        assert!(chapter_edit_is_allowed_for_auto_run(
+            &conn,
+            &chapter(15),
+            &control,
+            Some(&progress)
+        )
+        .is_err());
+        let rewrite_progress = auto_progress("rewrite");
+
+        chapter_edit_is_allowed_for_auto_run(&conn, &chapter(5), &control, Some(&rewrite_progress))
+            .expect("completed batch can be edited while later batch rewrites");
+        chapter_edit_is_allowed_for_auto_run(&conn, &chapter(5), &control, None)
+            .expect("completed batch does not depend on progress phase");
+    }
+
+    #[test]
+    fn paused_auto_keeps_completed_batch_edit_rule() {
+        let conn = Connection::open_in_memory().expect("open database");
+        seed_batches(&conn);
+        let control = auto_control("paused", 1);
+
+        chapter_edit_is_allowed_for_auto_run(&conn, &chapter(5), &control, None)
+            .expect("paused completed batch can be edited");
+        assert!(chapter_edit_is_allowed_for_auto_run(&conn, &chapter(15), &control, None).is_err());
+    }
 
     #[test]
     fn restoring_single_chapter_snapshot_restores_exact_initial_state() {

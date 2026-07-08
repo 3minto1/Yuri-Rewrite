@@ -131,21 +131,6 @@ pub(crate) fn set_auto_progress_shard_total(
     emit_auto_runtime_progress(state, novel_id)
 }
 
-pub(crate) fn set_auto_progress_phase(
-    state: &State<'_, AppState>,
-    novel_id: &str,
-    phase: &str,
-) -> Result<(), String> {
-    let mut progress = state.auto_run_progress.lock().map_err(to_string)?;
-    let Some(entry) = progress.get_mut(novel_id) else {
-        return Ok(());
-    };
-    entry.phase = Some(phase.to_string());
-    entry.active_shards.clear();
-    drop(progress);
-    emit_auto_runtime_progress(state, novel_id)
-}
-
 pub(crate) fn report_auto_shard_started(
     state: &State<'_, AppState>,
     novel_id: &str,
@@ -328,6 +313,7 @@ fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Re
         chapter_completed: Some(chapter_completed),
         chapter_total: Some(chapter_total),
         active_shards: Some(progress_state.active_shards.into_values().collect()),
+        editable_before_batch_index: control.map(|control| control.completed_batches),
     };
     let _ = state.app.emit("job-progress", payload);
     Ok(())

@@ -1,10 +1,7 @@
 use crate::domain::{AppState, Chapter, ExportResult};
 use crate::{load_chapters, row_to_novel, sanitize_file_name, to_string};
-use rusqlite::{params, Connection};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use rusqlite::params;
+use std::{fs, path::PathBuf};
 use tauri::State;
 
 #[tauri::command]
@@ -69,70 +66,4 @@ pub(crate) fn build_rewritten_export_body(chapters: &[Chapter]) -> Result<String
         body.push_str("\n\n");
     }
     Ok(body)
-}
-
-pub(crate) fn resolve_rewrite_export_dir(
-    conn: &Connection,
-    data_dir: &Path,
-) -> Result<PathBuf, String> {
-    let configured_export_dir = conn
-        .query_row(
-            "SELECT value FROM app_settings WHERE key = 'export_dir'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    Ok(configured_export_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("exports")))
-}
-
-pub(crate) fn chinese_batch_label(index: i64) -> String {
-    format!("第{}批", chinese_number(index))
-}
-
-pub(crate) fn chinese_number(value: i64) -> String {
-    if value <= 0 {
-        return value.to_string();
-    }
-    if value <= 10 {
-        return chinese_digit(value).to_string();
-    }
-    if value < 20 {
-        return format!(
-            "十{}",
-            if value % 10 == 0 {
-                ""
-            } else {
-                chinese_digit(value % 10)
-            }
-        );
-    }
-    if value < 100 {
-        let ten = value / 10;
-        let one = value % 10;
-        return format!(
-            "{}十{}",
-            chinese_digit(ten),
-            if one == 0 { "" } else { chinese_digit(one) }
-        );
-    }
-    value.to_string()
-}
-
-pub(crate) fn chinese_digit(value: i64) -> &'static str {
-    match value {
-        1 => "一",
-        2 => "二",
-        3 => "三",
-        4 => "四",
-        5 => "五",
-        6 => "六",
-        7 => "七",
-        8 => "八",
-        9 => "九",
-        10 => "十",
-        _ => "",
-    }
 }

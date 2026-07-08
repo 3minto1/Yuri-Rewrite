@@ -196,6 +196,8 @@ pub(crate) struct JobProgress {
     pub(crate) chapter_total: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) active_shards: Option<Vec<ActiveShardProgress>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) editable_before_batch_index: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

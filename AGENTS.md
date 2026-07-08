@@ -158,10 +158,10 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - `job-progress` is shared by analysis, rewrite, auto, and auto-batch jobs. The workspace progress strip is the single overall progress surface for these jobs; do not add per-chapter progress bars to chapter rows.
 - Disable novel/model switching, import, deletion, and relevant settings changes while the active task makes those operations unsafe.
 - Parallel shard failure must cancel and await sibling requests so quota is not consumed in the background.
-- Full one-click runs batches in order: analyze, rewrite, update the cumulative export TXT, then continue. It supports pause, continue, and terminate.
+- Full one-click runs batches in order: analyze, rewrite, then continue. It supports pause, continue, and terminate, and does not automatically generate or update TXT exports.
 - Analysis and rewrite shard outputs are staged per chapter for the active checkpoint. Pause, restart recovery, rate limits, network failures, temporary gateway errors, and recoverable model-format failures must preserve completed shards. Continue processes only unfinished chapters in the current phase.
 - If parallelism changes after pause, repartition only the remaining chapters into contiguous shards. Include completed adjacent chapters as bounded read-only context so resumed shards do not lose continuity.
-- Full one-click may start from the currently selected batch. In that mode, progress and the final combined TXT cover only the selected batch through the end; earlier batches are not included in that combined export.
+- Full one-click may start from the currently selected batch. In that mode, progress covers only the selected batch through the end; earlier batches are not processed by that run.
 
 ### Provider Calls and Logs
 
@@ -189,8 +189,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Allowed concurrency values are `1`, `3`, `6`, `10`, `25`, and `50`, with `10` as the default. Batch sizes 10 and 30 allow at most 10, batch size 50 allows at most 25, and batch size 100 allows at most 50. The backend must enforce these constraints.
 - Changing chapter batch size rebuilds chapter-based batch rows and internal TXT files atomically without changing chapter IDs, source text, analyses, rewrites, manual edits, canon assets, or logs. Reject the change while any active or paused one-click task exists.
 - Export TXT only. Include only chapters with completed rewrite status and non-empty rewrite text. Never fall back to the original text.
-- Full one-click must keep a single cumulative TXT for the selected run range. After each completed batch, rewrite that same file so it contains all completed batches from the run start through the latest completed batch; do not create one TXT per batch.
-- If the cumulative TXT cannot be updated because it is open or otherwise locked, do not fail the one-click task immediately. Show a confirmation dialog asking the user to manually close the reader/editor that occupies the file, wait for confirmation, then retry the same cumulative TXT update. Do not attempt to close external programs automatically.
+- Full one-click must not automatically generate or update cumulative TXT exports. Users export manually from Compare when they need a TXT file.
 - After normal rewrite completion, navigate to Compare. Preserve the selected batch after refreshes.
 
 ### Portable Updates

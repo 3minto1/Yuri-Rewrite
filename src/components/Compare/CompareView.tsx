@@ -21,6 +21,7 @@ type CompareViewProps = {
   onBack: () => void;
   onExport: () => void;
   editingAllowed?: boolean;
+  rewriteActionsAllowed?: boolean;
   editDisabledReason?: string;
   onSaveRewrite?: (chapterId: string, rewriteText: string) => Promise<void>;
   onRestoreRewrite?: (chapterId: string) => Promise<void>;
@@ -565,7 +566,8 @@ const QualityPanel = memo(function QualityPanel(props: QualityPanelProps) {
 export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const {
     chapters, selectedChapter, selectedChapterId, novelSettings, busy, originalRef, rewriteRef,
-    onSelectChapter, onBack, onExport, editingAllowed = false, editDisabledReason,
+    onSelectChapter, onBack, onExport, editingAllowed = false,
+    rewriteActionsAllowed = editingAllowed && busy === "", editDisabledReason,
     onSaveRewrite = async () => undefined, onRestoreRewrite = async () => undefined,
     onRewriteChapter = async () => undefined,
     onTerminateRewrite = async () => undefined,
@@ -989,8 +991,8 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
                 setRewriteSourceMode("original");
                 setRewriteDialogOpen(true);
               })}
-              disabled={!editingAllowed || !rewriteText.trim() || busy !== ""}
-              title={editingAllowed ? "以原文为主要输入重新生成本章" : editDisabledReason}
+              disabled={!rewriteActionsAllowed || !rewriteText.trim() || busy !== ""}
+              title={rewriteActionsAllowed ? "以原文为主要输入重新生成本章" : editDisabledReason}
             >
               <RefreshCw size={17} />重写本章（原文）
             </button>
@@ -1000,7 +1002,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
               aria-label="重写本章选项"
               aria-expanded={rewriteMenuOpen}
               onClick={() => setRewriteMenuOpen((open) => !open)}
-              disabled={!editingAllowed || !rewriteText.trim() || busy !== ""}
+              disabled={!rewriteActionsAllowed || !rewriteText.trim() || busy !== ""}
               title="选择单章重写来源"
             >
               <ChevronDown size={16} />
@@ -1031,14 +1033,14 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
             disabled={
               !selectedChapter?.single_rewrite_original_available
               || !rewriteText.trim()
-              || !editingAllowed
+              || !rewriteActionsAllowed
               || rewriteBusy
               || busy !== ""
             }
             title={
               !selectedChapter?.single_rewrite_original_available
                 ? "当前章节没有可恢复的单章重写初稿"
-                : editingAllowed
+                : rewriteActionsAllowed
                   ? "恢复到第一次单章重新改写前的初稿"
                   : editDisabledReason
             }

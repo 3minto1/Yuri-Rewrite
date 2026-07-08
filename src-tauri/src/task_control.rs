@@ -64,6 +64,11 @@ impl ActiveTaskRegistry {
         Ok(tasks.contains_key(novel_id))
     }
 
+    pub(crate) fn novel_active_job_type(&self, novel_id: &str) -> Result<Option<String>, String> {
+        let tasks = self.tasks.lock().map_err(|error| error.to_string())?;
+        Ok(tasks.get(novel_id).map(|task| task.job_type.clone()))
+    }
+
     pub(crate) fn profile_is_active(&self, profile_id: &str) -> Result<bool, String> {
         let tasks = self.tasks.lock().map_err(|error| error.to_string())?;
         Ok(tasks
@@ -269,11 +274,22 @@ mod tests {
             .expect("first task");
         assert!(registry.acquire("novel-1", ["profile-2"], "改写").is_err());
         assert!(registry.novel_is_active("novel-1").expect("active novel"));
+        assert_eq!(
+            registry
+                .novel_active_job_type("novel-1")
+                .expect("active job type")
+                .as_deref(),
+            Some("分析")
+        );
         assert!(registry
             .profile_is_active("profile-1")
             .expect("active profile"));
         drop(permit);
         assert!(!registry.novel_is_active("novel-1").expect("released novel"));
+        assert!(registry
+            .novel_active_job_type("novel-1")
+            .expect("released job type")
+            .is_none());
     }
 
     #[tokio::test]

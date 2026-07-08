@@ -6189,6 +6189,7 @@ fn emit_job_progress(
         chapter_completed: None,
         chapter_total: None,
         active_shards: None,
+        editable_before_batch_index: None,
     };
     let _ = app.emit("job-progress", progress);
 }
@@ -6447,7 +6448,10 @@ mod legacy_progress_implementation {
             batch_label: progress_state.batch_label,
             shard_completed: Some(shard_completed),
             shard_total: Some(shard_total),
+            chapter_completed: None,
+            chapter_total: None,
             active_shards: Some(progress_state.active_shards.into_values().collect()),
+            editable_before_batch_index: Some(control.completed_batches),
         };
         let _ = state.app.emit("job-progress", payload);
         Ok(())
@@ -7573,15 +7577,6 @@ mod tests {
         assert!(!body.contains("第二章"));
         assert!(!body.contains("不应导出的原文"));
         assert!(!body.contains("未完成改写也不导出"));
-    }
-
-    #[test]
-    fn chinese_batch_label_formats_common_batch_indices() {
-        assert_eq!(chinese_batch_label(1), "第一批");
-        assert_eq!(chinese_batch_label(2), "第二批");
-        assert_eq!(chinese_batch_label(10), "第十批");
-        assert_eq!(chinese_batch_label(12), "第十二批");
-        assert_eq!(chinese_batch_label(30), "第三十批");
     }
 
     #[test]

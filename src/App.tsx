@@ -1910,18 +1910,50 @@ export default function App() {
       (batch) => selectedChapter.index >= batch.start_chapter && selectedChapter.index <= batch.end_chapter
     );
   }, [detail, selectedChapter]);
+  const selectedChapterHasEditableRewrite = Boolean(
+    selectedChapter?.rewrite_status === "completed"
+      && selectedChapter.rewrite_text?.trim()
+  );
+  const pausedAutoRunAllowsCompareEditing = Boolean(
+    autoRunState === "paused"
+      && selectedRecovery
+      && selectedChapterBatchPosition >= 0
+      && selectedChapterBatchPosition < selectedRecovery.next_batch_index
+  );
+  const runningAutoRunAllowsCompareEditing = job
+    ? Boolean(
+      autoRunState === "running"
+        && busy === ""
+        && job.novel_id === detail?.novel.id
+        && ["auto", "auto_batch"].includes(job.job_type)
+        && job.status === "running"
+        && typeof job.editable_before_batch_index === "number"
+        && selectedChapterBatchPosition >= 0
+        && selectedChapterBatchPosition < job.editable_before_batch_index
+    )
+    : false;
   const compareEditingAllowed = Boolean(
-    selectedChapter
-      && busy === ""
-      && autoRunState !== "running"
-      && autoRunState !== "stopping"
+    selectedChapterHasEditableRewrite
       && (
-        autoRunState !== "paused"
-        || (selectedRecovery && selectedChapterBatchPosition >= 0 && selectedChapterBatchPosition < selectedRecovery.next_batch_index)
+        (busy === "" && autoRunState === "idle")
+        || (busy === "analysis" && autoRunState === "idle")
+        || (busy === "" && pausedAutoRunAllowsCompareEditing)
+        || runningAutoRunAllowsCompareEditing
       )
   );
-  const compareEditDisabledReason = autoRunState === "paused"
+  const compareRewriteActionsAllowed = Boolean(
+    selectedChapterHasEditableRewrite
+      && busy === ""
+      && autoRunState === "idle"
+  );
+  const compareEditDisabledReason = !selectedChapterHasEditableRewrite
+    ? "当前章节尚无可编辑的已完成改写稿"
+    : autoRunState === "paused"
     ? "暂停任务当前未完成批次及后续批次不能编辑"
+    : autoRunState === "running"
+      ? "当前一键任务正在处理当前批次或后续批次，不能编辑改写稿"
+    : autoRunState === "stopping"
+      ? "当前一键任务正在等待暂停，不能编辑改写稿"
     : processingTaskActive
       ? "任务运行期间不能编辑改写稿"
       : busy
@@ -2602,6 +2634,7 @@ export default function App() {
             onBack={handleCompareBack}
             onExport={handleCompareExport}
             editingAllowed={compareEditingAllowed}
+            rewriteActionsAllowed={compareRewriteActionsAllowed}
             editDisabledReason={compareEditDisabledReason}
             onSaveRewrite={saveChapterRewriteEdit}
             onRestoreRewrite={restoreChapterRewriteEdit}

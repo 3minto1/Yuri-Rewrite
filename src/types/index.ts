@@ -144,6 +144,7 @@ export type Job = {
   chapter_completed?: number;
   chapter_total?: number;
   active_shards?: ActiveShardProgress[];
+  editable_before_batch_index?: number;
 };
 
 export type ActiveShardProgress = {
