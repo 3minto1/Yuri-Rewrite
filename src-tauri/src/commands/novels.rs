@@ -1,8 +1,8 @@
 use crate::domain::{AppState, Novel, NovelDetail};
+use crate::services::chapter_batch_files::repair_chapter_batches_for_novel;
 use crate::{
-    create_chapter_batches, decode_text, fill_empty_canon_assets_from_analysis, load_canon_assets,
-    load_chapter_batch_size, load_chapter_batches, load_chapters, load_novel_settings,
-    review_warning_file_paths, row_to_novel, to_string,
+    decode_text, fill_empty_canon_assets_from_analysis, load_canon_assets, load_chapter_batches,
+    load_chapters, load_novel_settings, review_warning_file_paths, row_to_novel, to_string,
 };
 use chrono::Utc;
 use rusqlite::params;
@@ -155,7 +155,7 @@ pub(crate) fn get_novel_detail(
     novel_id: String,
     state: State<AppState>,
 ) -> Result<NovelDetail, String> {
-    let conn = state.conn.lock().map_err(to_string)?;
+    let mut conn = state.conn.lock().map_err(to_string)?;
     let novel = conn
         .query_row(
             "SELECT id, title, source_path, encoding, status, created_at FROM novels WHERE id = ?1",
@@ -164,23 +164,7 @@ pub(crate) fn get_novel_detail(
         )
         .map_err(to_string)?;
     let chapters = load_chapters(&conn, &novel.id)?;
-    if !chapters.is_empty() && load_chapter_batches(&conn, &novel.id)?.is_empty() {
-        let detected_chapters = conn
-            .query_row(
-                "SELECT detected_chapters FROM novels WHERE id = ?1",
-                params![novel.id],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(to_string)?;
-        create_chapter_batches(
-            &conn,
-            &state.data_dir,
-            &novel.id,
-            &chapters,
-            detected_chapters,
-            load_chapter_batch_size(&conn)?,
-        )?;
-    }
+    repair_chapter_batches_for_novel(&mut conn, &state.data_dir, &novel.id)?;
     fill_empty_canon_assets_from_analysis(&conn, &novel.id).map_err(to_string)?;
     let canon_assets = load_canon_assets(&conn, &novel.id)?;
     let batches = load_chapter_batches(&conn, &novel.id)?;

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { AppSettings, Chapter, ModelDiagnosis, NovelDetail } from "../types";
+import type {
+  AppSettings,
+  Chapter,
+  ModelDiagnosis,
+  NovelDetail,
+  RewriteAbApplyResult,
+  RewriteAbChapterDetail,
+  RewriteAbEstimate,
+  RewriteAbRunDetail
+} from "../types";
 import { invokeBrowserMock } from "./browserMock";
 
 describe("browser test mode", () => {
@@ -30,5 +39,63 @@ describe("browser test mode", () => {
     }) as ModelDiagnosis;
     expect(diagnosis.status).toBe("ok");
     expect(diagnosis.checks).toHaveLength(3);
+  });
+
+  it("supports the complete multi-model A/B candidate lifecycle without changing formal rewrites before apply", async () => {
+    const before = await invokeBrowserMock("get_novel_detail") as NovelDetail;
+    const beforeRewrite = before.chapters[0].rewrite_text;
+    const estimate = await invokeBrowserMock("estimate_rewrite_ab", {
+      novelId: before.novel.id,
+      batchId: before.batches[0].id,
+      profileIds: ["browser-profile-deepseek", "browser-profile-claude"],
+      reviewEnabled: false
+    }) as RewriteAbEstimate;
+    expect(estimate.model_count).toBe(2);
+    expect(estimate.chapter_count).toBe(10);
+
+    const run = await invokeBrowserMock("start_rewrite_ab", {
+      novelId: before.novel.id,
+      batchId: before.batches[0].id,
+      profileIds: ["browser-profile-deepseek", "browser-profile-claude"],
+      reviewEnabled: true
+    }) as RewriteAbRunDetail;
+    expect(run.status).toBe("ready");
+    expect(run.completed_candidates).toBe(20);
+    expect((await invokeBrowserMock("get_novel_detail") as NovelDetail).chapters[0].rewrite_text).toBe(beforeRewrite);
+    const replacementEstimate = await invokeBrowserMock("estimate_rewrite_ab", {
+      novelId: before.novel.id,
+      batchId: before.batches[0].id,
+      profileIds: ["browser-profile-deepseek", "browser-profile-claude"],
+      reviewEnabled: false
+    }) as RewriteAbEstimate;
+    expect(replacementEstimate.existing_run_id).toBe(run.id);
+
+    const candidateChapter = await invokeBrowserMock("get_rewrite_ab_chapter", {
+      runId: run.id,
+      chapterId: run.chapters[0].chapter_id
+    }) as RewriteAbChapterDetail;
+    expect(candidateChapter.candidates).toHaveLength(2);
+    expect(candidateChapter.candidates[0].review_summary).toMatch(/复检通过/);
+
+    const selected = await invokeBrowserMock("save_rewrite_ab_choices", {
+      runId: run.id,
+      choices: run.chapters.map((chapter) => ({ chapter_id: chapter.chapter_id, slot: "B" })),
+      replaceAll: true
+    }) as RewriteAbRunDetail;
+    expect(selected.selected_chapters).toBe(10);
+
+    const applied = await invokeBrowserMock("apply_rewrite_ab_choices", {
+      runId: run.id,
+      forceOverwrite: false
+    }) as RewriteAbApplyResult;
+    expect(applied.status).toBe("applied");
+    expect((await invokeBrowserMock("get_novel_detail") as NovelDetail).chapters[0].rewrite_text).toMatch(/^B 候选/);
+
+    const restored = await invokeBrowserMock("restore_rewrite_ab_baseline", {
+      runId: run.id,
+      forceOverwrite: false
+    }) as RewriteAbApplyResult;
+    expect(restored.status).toBe("restored");
+    expect((await invokeBrowserMock("get_novel_detail") as NovelDetail).chapters[0].rewrite_text).toBe(beforeRewrite);
   });
 });

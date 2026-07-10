@@ -18,6 +18,7 @@ pub(crate) struct AppState {
     pub(crate) auto_run_progress: Mutex<HashMap<String, AutoRunProgressState>>,
     pub(crate) active_tasks: ActiveTaskRegistry,
     pub(crate) single_rewrite_tasks: CancellableTaskRegistry,
+    pub(crate) rewrite_ab_tasks: CancellableTaskRegistry,
     pub(crate) rate_limits: RateLimitCoordinator,
 }
 
@@ -392,6 +393,108 @@ pub(crate) struct JobEstimate {
     pub(crate) recent_failed_calls: usize,
     pub(crate) average_input_chars: Option<usize>,
     pub(crate) average_output_chars: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbModelSummary {
+    pub(crate) slot: String,
+    pub(crate) profile_id: String,
+    pub(crate) profile_name: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbChapterSummary {
+    pub(crate) chapter_id: String,
+    pub(crate) chapter_index: i64,
+    pub(crate) title: String,
+    pub(crate) selected_slot: Option<String>,
+    pub(crate) candidate_statuses: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbRunSummary {
+    pub(crate) id: String,
+    pub(crate) novel_id: String,
+    pub(crate) batch_id: String,
+    pub(crate) batch_label: String,
+    pub(crate) batch_fingerprint: String,
+    pub(crate) status: String,
+    pub(crate) review_enabled: bool,
+    pub(crate) model_count: usize,
+    pub(crate) chapter_count: usize,
+    pub(crate) completed_candidates: usize,
+    pub(crate) total_candidates: usize,
+    pub(crate) selected_chapters: usize,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbRunDetail {
+    #[serde(flatten)]
+    pub(crate) summary: RewriteAbRunSummary,
+    pub(crate) models: Vec<RewriteAbModelSummary>,
+    pub(crate) chapters: Vec<RewriteAbChapterSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbCandidate {
+    pub(crate) slot: String,
+    pub(crate) profile_id: String,
+    pub(crate) profile_name: String,
+    pub(crate) model: String,
+    pub(crate) status: String,
+    pub(crate) rewrite_text: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) review_summary: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbChapterDetail {
+    pub(crate) run_id: String,
+    pub(crate) chapter_id: String,
+    pub(crate) chapter_index: i64,
+    pub(crate) original_title: String,
+    pub(crate) original_text: String,
+    pub(crate) baseline_title: String,
+    pub(crate) baseline_rewrite_text: Option<String>,
+    pub(crate) selected_slot: Option<String>,
+    pub(crate) candidates: Vec<RewriteAbCandidate>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbEstimate {
+    pub(crate) existing_run_id: Option<String>,
+    pub(crate) chapter_count: usize,
+    pub(crate) model_count: usize,
+    pub(crate) shard_count: usize,
+    pub(crate) estimated_requests: usize,
+    pub(crate) estimated_seconds: Option<f64>,
+    pub(crate) average_call_seconds: Option<f64>,
+    pub(crate) recent_success_calls: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbChoice {
+    pub(crate) chapter_id: String,
+    pub(crate) slot: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RewriteAbStageTarget {
+    pub(crate) run_id: String,
+    pub(crate) slot: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct RewriteAbApplyResult {
+    pub(crate) status: String,
+    pub(crate) conflict_chapter_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chapters: Option<Vec<Chapter>>,
 }
 
 #[derive(Debug, Serialize)]

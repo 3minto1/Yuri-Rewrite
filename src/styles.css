@@ -381,6 +381,21 @@ pre {
   position: relative;
 }
 
+.ab-menu-progress {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+
+.app-menu-item.active .ab-menu-progress,
+.app-menu-item:hover:not(:disabled) .ab-menu-progress {
+  background: rgba(36, 36, 34, 0.12);
+}
+
 .update-dot {
   background: #e23b3b;
   border: 1px solid rgba(255, 255, 255, 0.95);
@@ -3034,6 +3049,311 @@ label {
   max-width: 520px;
 }
 
+.rewrite-ab-start-dialog {
+  max-height: min(760px, calc(100vh - 40px));
+  max-width: 720px;
+  overflow: hidden;
+  width: min(720px, calc(100vw - 40px));
+}
+
+.rewrite-ab-start-dialog .dialog-titlebar p {
+  color: var(--color-text-muted);
+  margin: 4px 0 0;
+}
+
+.rewrite-ab-start-body {
+  display: grid;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.rewrite-ab-cost-warning,
+.rewrite-ab-estimate {
+  background: var(--color-warning-soft, #fff8e8);
+  border: 1px solid #dfc58d;
+  border-radius: var(--radius-control);
+  color: var(--color-text);
+  margin: 0;
+  padding: 11px 12px;
+}
+
+.rewrite-ab-model-fields {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px 12px;
+}
+
+.rewrite-ab-model-fields legend {
+  font-weight: 750;
+  padding: 0 5px;
+}
+
+.rewrite-ab-model-row {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.rewrite-ab-model-row select {
+  flex: 1;
+}
+
+.rewrite-ab-model-row button,
+.rewrite-ab-add-model {
+  flex: 0 0 auto;
+}
+
+.rewrite-ab-add-model {
+  justify-self: start;
+}
+
+.rewrite-ab-review-option {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+
+.rewrite-ab-review-option input {
+  width: auto;
+}
+
+.rewrite-ab-estimate {
+  background: var(--color-surface-muted);
+  border-color: var(--color-border);
+  display: grid;
+  gap: 5px;
+}
+
+.rewrite-ab-estimate span {
+  align-items: center;
+  color: var(--color-text-muted);
+  display: flex;
+  gap: 6px;
+}
+
+.rewrite-ab-recent-runs {
+  display: grid;
+  gap: 6px;
+}
+
+.rewrite-ab-recent-runs > button {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.rewrite-ab-recent-runs small {
+  color: var(--color-text-muted);
+}
+
+.rewrite-task-split {
+  overflow: visible;
+}
+
+.rewrite-ab-page {
+  min-width: 0;
+}
+
+.rewrite-ab-toolbar {
+  flex: 0 0 auto;
+}
+
+.rewrite-ab-toolbar-main {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, .8fr) minmax(260px, 1.4fr) auto;
+}
+
+.rewrite-ab-toolbar-main label,
+.rewrite-ab-side-controls label {
+  min-width: 0;
+}
+
+.rewrite-ab-toolbar-main select {
+  width: 100%;
+}
+
+.rewrite-ab-progress {
+  align-items: flex-end;
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  white-space: nowrap;
+}
+
+.rewrite-ab-progress span {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.rewrite-ab-model-progress-list {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  min-width: 0;
+}
+
+.rewrite-ab-model-progress {
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.rewrite-ab-model-progress-heading,
+.rewrite-ab-model-progress-meta {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.rewrite-ab-model-progress-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rewrite-ab-model-progress-heading span,
+.rewrite-ab-model-progress-meta {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.rewrite-ab-model-progress-heading span,
+.rewrite-ab-model-progress-meta span:last-child {
+  flex: 0 0 auto;
+}
+
+.rewrite-ab-model-progress-track {
+  background: color-mix(in srgb, var(--color-border) 78%, transparent);
+  border-radius: 999px;
+  height: 6px;
+  overflow: hidden;
+}
+
+.rewrite-ab-model-progress-fill {
+  background: var(--color-brand);
+  border-radius: inherit;
+  height: 100%;
+  transition: width 180ms ease;
+}
+
+.rewrite-ab-toolbar-actions,
+.rewrite-ab-side-controls,
+.rewrite-ab-choice-strip {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rewrite-ab-toolbar-actions {
+  border-top: 1px solid var(--color-border);
+  padding-top: 8px;
+}
+
+.rewrite-ab-side-controls {
+  background: var(--color-surface-muted);
+  border-radius: var(--radius-control);
+  padding: 8px 10px;
+}
+
+.rewrite-ab-side-controls > button.active {
+  background: var(--color-brand-soft);
+  border-color: var(--color-brand);
+  color: var(--color-brand-active);
+}
+
+.rewrite-ab-side-controls label {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+}
+
+.rewrite-ab-side-controls select {
+  min-width: 110px;
+  width: auto;
+}
+
+.rewrite-ab-side-controls .compare-word-count {
+  margin-left: auto;
+  min-width: 200px;
+}
+
+.rewrite-ab-choice-strip {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  flex: 0 0 auto;
+  padding: 9px 12px;
+}
+
+.rewrite-ab-choice-strip button.active {
+  background: var(--color-brand-soft);
+  border-color: var(--color-brand);
+  color: var(--color-brand-active);
+}
+
+.rewrite-ab-choice-strip .field-error {
+  margin-left: auto;
+}
+
+.rewrite-ab-loading {
+  align-items: center;
+  color: var(--color-text-muted);
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  justify-content: center;
+}
+
+.rewrite-ab-compare-grid .compare-pane-heading small {
+  color: var(--color-text-muted);
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1180px) {
+  .rewrite-ab-toolbar-main {
+    grid-template-columns: minmax(150px, .8fr) minmax(220px, 1.2fr);
+  }
+
+  .rewrite-ab-progress {
+    align-items: center;
+    grid-column: 1 / -1;
+    grid-template-columns: auto 1fr;
+    justify-items: start;
+  }
+
+  .rewrite-ab-toolbar-actions {
+    align-items: stretch;
+  }
+
+  .rewrite-ab-toolbar-actions button {
+    flex: 1 1 auto;
+  }
+
+  .rewrite-ab-side-controls .compare-word-count {
+    flex-basis: 100%;
+    margin-left: 0;
+    min-width: 0;
+  }
+}
+
 .rewrite-chapter-dialog {
   max-width: 640px;
 }
@@ -3298,12 +3618,16 @@ mark.search-match.active-search-match {
   outline-color: #a9650d;
 }
 
-::highlight(compare-original-removed) {
+::highlight(compare-original-removed),
+::highlight(rewrite-ab-left-original-removed),
+::highlight(rewrite-ab-right-original-removed) {
   background: #fde2df;
   color: #8d3126;
 }
 
-::highlight(compare-rewrite-added) {
+::highlight(compare-rewrite-added),
+::highlight(rewrite-ab-left-rewrite-added),
+::highlight(rewrite-ab-right-rewrite-added) {
   background: #dcf2df;
   color: #256536;
 }
@@ -3927,12 +4251,16 @@ mark.search-match.active-search-match {
   outline-color: #b47a22;
 }
 
-::highlight(compare-original-removed) {
+::highlight(compare-original-removed),
+::highlight(rewrite-ab-left-original-removed),
+::highlight(rewrite-ab-right-original-removed) {
   background: #f6dcdd;
   color: #8a3740;
 }
 
-::highlight(compare-rewrite-added) {
+::highlight(compare-rewrite-added),
+::highlight(rewrite-ab-left-rewrite-added),
+::highlight(rewrite-ab-right-rewrite-added) {
   background: #ddefe7;
   color: #23644d;
 }
@@ -4276,12 +4604,16 @@ mark.search-match.active-search-match {
   outline-color: #d2a355;
 }
 
-:root[data-theme="dark"] ::highlight(compare-original-removed) {
+:root[data-theme="dark"] ::highlight(compare-original-removed),
+:root[data-theme="dark"] ::highlight(rewrite-ab-left-original-removed),
+:root[data-theme="dark"] ::highlight(rewrite-ab-right-original-removed) {
   background: #4b2930;
   color: #f0b3ba;
 }
 
-:root[data-theme="dark"] ::highlight(compare-rewrite-added) {
+:root[data-theme="dark"] ::highlight(compare-rewrite-added),
+:root[data-theme="dark"] ::highlight(rewrite-ab-left-rewrite-added),
+:root[data-theme="dark"] ::highlight(rewrite-ab-right-rewrite-added) {
   background: #1f4638;
   color: #a8e2c8;
 }

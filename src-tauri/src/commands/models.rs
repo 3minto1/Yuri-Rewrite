@@ -1,4 +1,5 @@
 use crate::ai::{generate_text, normalize_thinking_mode};
+use crate::commands::rewrite_ab::model_has_unfinished_rewrite_ab;
 use crate::credentials::{
     combine_rollback_error, delete_api_key_if_present, restore_api_key_snapshot, snapshot_api_key,
     write_api_key, ApiKeySnapshot, ApiKeyStorage,
@@ -162,6 +163,14 @@ pub(crate) fn delete_model_profile(
         .any(|control| control.profile_ids.contains(&profile_id));
     if state.active_tasks.profile_is_active(&profile_id)? || paused_auto_run_uses_profile {
         return Err("当前模型正在被任务使用，请等待任务结束或先终止任务。".to_string());
+    }
+    {
+        let conn = state.conn.lock().map_err(to_string)?;
+        if model_has_unfinished_rewrite_ab(&conn, &profile_id)? {
+            return Err(
+                "当前模型仍被未完成的 A/B 实验使用，请先完成、重试或删除该实验。".to_string(),
+            );
+        }
     }
     let credential_snapshot = snapshot_api_key(&profile_id)
         .map_err(|error| format!("读取系统凭据失败，模型配置未删除：{error}"))?;

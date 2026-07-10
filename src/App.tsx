@@ -7,6 +7,7 @@ import {
   ClipboardList,
   Download,
   FilePlus2,
+  GitCompareArrows,
   Github,
   HelpCircle,
   Loader2,
@@ -25,6 +26,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CompareView } from "./components/Compare/CompareView";
+import { RewriteAbStartDialog } from "./components/Compare/RewriteAbStartDialog";
+import { RewriteAbView } from "./components/Compare/RewriteAbView";
 import { DeleteLocalDataDialog } from "./components/common/DeleteLocalDataDialog";
 import { DeleteNovelDialog } from "./components/common/DeleteNovelDialog";
 import { Modal } from "./components/common/Modal";
@@ -103,7 +106,7 @@ type ModelSuggestionGroup = {
 };
 
 type ThemeMode = "light" | "dark";
-type ActiveView = "workspace" | "compare" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings";
+type ActiveView = "workspace" | "compare" | "rewrite-ab" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings";
 
 
 const emptyProfile: ProfileDraft = {
@@ -301,6 +304,8 @@ const statusText: Record<string, string> = {
   terminating: "终止中",
   terminated: "已终止",
   completed: "完成",
+  ready: "待选稿",
+  partial: "部分完成",
   failed: "失败",
   imported: "已导入",
   pending_split: "待生成章节"
@@ -317,6 +322,7 @@ function batchIdContainingChapter(detail: NovelDetail, chapterId: string): strin
 const jobPhaseText: Record<string, string> = {
   analysis: "分析",
   rewrite: "改写",
+  rewrite_ab: "A/B 改写",
   review: "审查",
   revision: "修复",
   final_review: "终审",
@@ -326,6 +332,7 @@ const jobPhaseText: Record<string, string> = {
 const jobTypeText: Record<string, string> = {
   analysis: "分析",
   rewrite: "改写",
+  rewrite_ab: "A/B 改写",
   auto: "一键分析改写",
   auto_batch: "当前批次一键任务"
 };
@@ -412,12 +419,16 @@ export default function App() {
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
   const [showDeleteLocalDataDialog, setShowDeleteLocalDataDialog] = useState(false);
+  const [showRewriteAbDialog, setShowRewriteAbDialog] = useState(false);
+  const [selectedRewriteAbRunId, setSelectedRewriteAbRunId] = useState("");
+  const [openingRewriteAbRuns, setOpeningRewriteAbRuns] = useState(false);
   const [pendingSplitPrompt, setPendingSplitPrompt] = useState<Novel | null>(null);
   const [autoRunRecoveries, setAutoRunRecoveries] = useState<AutoRunRecovery[]>([]);
   const [autoRunMode, setAutoRunMode] = useState<"range" | "batch" | null>(null);
   const [autoContinueSettingBusy, setAutoContinueSettingBusy] = useState(false);
   const [autoContinueSeconds, setAutoContinueSeconds] = useState<number | null>(null);
   const [autoRunMenuOpen, setAutoRunMenuOpen] = useState(false);
+  const [rewriteMenuOpen, setRewriteMenuOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLDivElement | null>(null);
   const rewriteCompareRef = useRef<HTMLDivElement | null>(null);
@@ -538,6 +549,9 @@ export default function App() {
 
   const jobProgressPercent = useMemo(() => {
     if (!job || job.total_chapters <= 0) return 0;
+    if (job.job_type === "rewrite_ab" && job.candidate_total) {
+      return Math.min(100, Math.max(0, Math.round(((job.candidate_completed ?? 0) / job.candidate_total) * 100)));
+    }
     if (["analysis", "rewrite"].includes(job.job_type) && job.chapter_total) {
       return Math.min(100, Math.max(0, Math.round(((job.chapter_completed ?? 0) / job.chapter_total) * 100)));
     }
@@ -554,6 +568,8 @@ export default function App() {
     }
     return Math.min(100, Math.max(0, Math.round((job.current_chapter / job.total_chapters) * 100)));
   }, [job]);
+  const rewriteAbProgressRunning = job?.job_type === "rewrite_ab" && job.status === "running";
+  const rewriteAbRunning = busy === "rewrite-ab" || rewriteAbProgressRunning;
 
   const detectedModelSuggestions = useMemo(
     () => detectModelSuggestions(profileDraft),
@@ -703,10 +719,10 @@ export default function App() {
   useAutoRunProgress(detail?.novel.id ?? null, (progress: AutoRunProgress) => {
       setJob(progress);
       const isAutoProgress = ["auto", "auto_batch"].includes(progress.job_type);
-      if (!isAutoProgress && ["analysis", "rewrite"].includes(progress.job_type)) {
+      if (!isAutoProgress && ["analysis", "rewrite", "rewrite_ab"].includes(progress.job_type)) {
         if (progress.status === "running") {
-          setBusy(progress.job_type);
-        } else if (busyRef.current === progress.job_type) {
+          setBusy(progress.job_type === "rewrite_ab" ? "rewrite-ab" : progress.job_type);
+        } else if (busyRef.current === (progress.job_type === "rewrite_ab" ? "rewrite-ab" : progress.job_type)) {
           setBusy("");
         }
         return;
@@ -1556,6 +1572,52 @@ export default function App() {
     }
   }
 
+  function openRewriteAbDialog() {
+    if (!detail || !selectedBatch) {
+      showNotice("当前小说没有可处理的批次。");
+      return;
+    }
+    if (!hasCompleteNovelSettings) {
+      showNotice("请先填写设定");
+      requestActiveView("novel-settings");
+      return;
+    }
+    const chapters = detail.chapters.filter(
+      (chapter) => chapter.index >= selectedBatch.start_chapter && chapter.index <= selectedBatch.end_chapter && chapter.original_text.trim()
+    );
+    const pendingCount = chapters.filter((chapter) => chapter.analysis_status !== "completed").length;
+    if (pendingCount > 0) {
+      showNotice(`当前批次还有 ${pendingCount} 章未完成分析，请先完成分析再进行 A/B 改写。`);
+      return;
+    }
+    setShowRewriteAbDialog(true);
+  }
+
+  function openRewriteAbRun(runId: string) {
+    requestActiveView("rewrite-ab", () => {
+      setSelectedRewriteAbRunId(runId);
+      setShowRewriteAbDialog(false);
+    });
+  }
+
+  async function openExistingRewriteAbRun() {
+    if (!detail || selectedNovelPendingSplit || openingRewriteAbRuns) return;
+    setOpeningRewriteAbRuns(true);
+    try {
+      const runs = await invoke("list_rewrite_ab_runs", { novelId: detail.novel.id });
+      const target = runs.find((run) => run.id === selectedRewriteAbRunId) ?? runs[0];
+      if (!target) {
+        showNotice("当前小说还没有 A/B 实验，请从工作台的“改写选项 → A/B 改写当前批次”创建。");
+        return;
+      }
+      openRewriteAbRun(target.id);
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setOpeningRewriteAbRuns(false);
+    }
+  }
+
   async function continueAnalyzeRewrite(options: { automatic?: boolean } = {}) {
     const recovery = selectedRecovery;
     if (recovery?.job?.job_type === "auto_batch") {
@@ -1903,6 +1965,10 @@ export default function App() {
       setAutoRunRecoveries([]);
       setAutoRunMode(null);
       setAutoRunMenuOpen(false);
+      setRewriteMenuOpen(false);
+      setShowRewriteAbDialog(false);
+      setSelectedRewriteAbRunId("");
+      setOpeningRewriteAbRuns(false);
       setTokenStats(null);
       setTokenStatsDeletingProfileId("");
       setWorkspaceSection("main");
@@ -2364,6 +2430,27 @@ export default function App() {
           对比
         </button>
         <button
+          className={activeView === "rewrite-ab" ? "app-menu-item active" : "app-menu-item"}
+          onClick={() => void openExistingRewriteAbRun()}
+          disabled={!detail || selectedNovelPendingSplit || openingRewriteAbRuns}
+          aria-label={rewriteAbProgressRunning && job?.candidate_total
+            ? `A/B 实验，运行中，候选 ${job.candidate_completed ?? 0}/${job.candidate_total}`
+            : rewriteAbRunning
+              ? "A/B 实验，运行中"
+              : "A/B 实验"}
+          title={selectedNovelPendingSplit ? "请先生成章节列表" : "查看当前小说的 A/B 实验"}
+        >
+          {openingRewriteAbRuns || rewriteAbRunning
+            ? <Loader2 className="spin" size={16} aria-hidden="true" />
+            : <GitCompareArrows size={16} aria-hidden="true" />}
+          A/B 实验
+          {rewriteAbProgressRunning && job?.candidate_total ? (
+            <span className="ab-menu-progress" aria-hidden="true">
+              {job.candidate_completed ?? 0}/{job.candidate_total}
+            </span>
+          ) : null}
+        </button>
+        <button
           className={activeView === "novel-settings" ? "app-menu-item active" : "app-menu-item"}
           onClick={openNovelSettings}
           disabled={!detail}
@@ -2427,7 +2514,7 @@ export default function App() {
                   onClick={() => requestActiveView("workspace", () => {
                     void loadNovel(novel.id);
                   })}
-                  disabled={(autoRunState === "running" || autoRunState === "stopping" || ["analysis", "rewrite", "auto-batch"].includes(busy)) && detail?.novel.id !== novel.id}
+                  disabled={(autoRunState === "running" || autoRunState === "stopping" || ["analysis", "rewrite", "rewrite-ab", "auto-batch"].includes(busy)) && detail?.novel.id !== novel.id}
                 >
                   <BookOpen size={16} />
                   <span>{novel.title}</span>
@@ -2512,7 +2599,7 @@ export default function App() {
       </aside>
 
       <section className="workspace">
-        {!["compare", "settings", "token-stats", "logs", "chapter-rules", "novel-settings"].includes(activeView) && (
+        {!["compare", "rewrite-ab", "settings", "token-stats", "logs", "chapter-rules", "novel-settings"].includes(activeView) && (
         <header className="topbar">
           <div>
             <h1>
@@ -2639,13 +2726,40 @@ export default function App() {
                   {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
                   分析
                 </button>
-                <button
-                  onClick={() => runJob("rewrite")}
-                  disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-                >
-                  {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-                  改写
-                </button>
+                <div className="split-button rewrite-task-split">
+                  <button
+                    className="split-button-main"
+                    onClick={() => runJob("rewrite")}
+                    disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+                  >
+                    {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+                    改写
+                  </button>
+                  <button
+                    className="split-button-toggle"
+                    type="button"
+                    aria-label="改写选项"
+                    aria-expanded={rewriteMenuOpen}
+                    onClick={() => setRewriteMenuOpen((open) => !open)}
+                    disabled={!detail || !selectedBatch || busy !== "" || autoRunState !== "idle"}
+                  >
+                    <ChevronDown size={15} />
+                  </button>
+                  {rewriteMenuOpen && (
+                    <div className="split-button-menu" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setRewriteMenuOpen(false);
+                          openRewriteAbDialog();
+                        }}
+                      >
+                        A/B 改写当前批次
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -2723,20 +2837,25 @@ export default function App() {
             </div>
           </div>
         )}
-        {job && activeView === "workspace" && (
+        {job && job.job_type !== "rewrite_ab" && activeView === "workspace" && (
           <div className={`job-strip status-container status-${getStatusTone(job.status)}`}>
             <CheckCircle2 size={17} />
             <div className="job-content">
               <span className="job-summary">
                 <span>{jobTypeText[job.job_type] ?? job.job_type}</span>
                 <StatusBadge status={job.status} label={statusText[job.status] ?? job.status} />
-                <span>{job.current_chapter}/{job.total_chapters} · {job.message}</span>
+                <span>
+                  {job.job_type === "rewrite_ab" && job.candidate_total
+                    ? `候选 ${job.candidate_completed ?? 0}/${job.candidate_total}${job.candidate_slot ? ` · 当前 ${job.candidate_slot}` : ""}`
+                    : `${job.current_chapter}/${job.total_chapters}`}
+                  {` · ${job.message}`}
+                </span>
                 {autoContinuePending ? ` · 将在 ${autoContinueSeconds} 秒后自动继续` : ""}
                 {job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running"
                   ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}`
                   : ""}
               </span>
-              {["analysis", "rewrite", "auto", "auto_batch"].includes(job.job_type) && (
+              {["analysis", "rewrite", "rewrite_ab", "auto", "auto_batch"].includes(job.job_type) && (
                 <>
                   <div className="job-progress-row" aria-label={`任务进度 ${jobProgressPercent}%`}>
                     <div className="job-progress-bar">
@@ -2793,7 +2912,7 @@ export default function App() {
                 </>
               )}
             </div>
-            {["completed", "failed", "paused", "terminated"].includes(job.status) && (
+            {["completed", "failed", "paused", "terminated", "ready", "partial"].includes(job.status) && (
               <button
                 className="icon-button job-strip-close"
                 type="button"
@@ -2913,6 +3032,22 @@ export default function App() {
             onTerminateRewrite={terminateSingleChapterRewrite}
             onRestoreInitialRewrite={restoreSingleChapterRewrite}
             onDirtyChange={setCompareDirty}
+          />
+        )}
+
+        {activeView === "rewrite-ab" && detail && selectedRewriteAbRunId && (
+          <RewriteAbView
+            novelId={detail.novel.id}
+            initialRunId={selectedRewriteAbRunId}
+            onBack={() => requestActiveView("workspace")}
+            onRunChange={setSelectedRewriteAbRunId}
+            onNovelChanged={async () => {
+              await loadNovel(detail.novel.id, {
+                preserveBatchId: selectedBatchId,
+                preserveChapterId: selectedChapterId
+              });
+            }}
+            onNotice={showNotice}
           />
         )}
 
@@ -3076,6 +3211,24 @@ export default function App() {
           onConfirm={(confirmationPhrase) => void deleteLocalData(confirmationPhrase)}
         />
       )}
+      {showRewriteAbDialog && detail && selectedBatch && (
+        <RewriteAbStartDialog
+          novelId={detail.novel.id}
+          batchId={selectedBatch.id}
+          batchLabel={selectedBatch.label}
+          profiles={profiles}
+          defaultProfileId={selectedProfileId}
+          onCancel={() => setShowRewriteAbDialog(false)}
+          onTaskBusyChange={(taskBusy) => setBusy(taskBusy ? "rewrite-ab" : "")}
+          onOpenRun={openRewriteAbRun}
+          onStarted={(run) => {
+            setJob(null);
+            openRewriteAbRun(run.id);
+            showNotice(run.status === "ready" ? "A/B 候选已生成，请逐章选稿。" : "A/B 改写已保留完成候选，可重试失败项。");
+          }}
+          onNotice={showNotice}
+        />
+      )}
       {pendingUpdate && showUpdateInstallDialog && (
         <UpdateInstallDialog
           busy={busy === "download-update"}
@@ -3161,6 +3314,7 @@ export default function App() {
                 <li>先配置模型，填写 Base URL、模型 ID 和 API Key，保存后点击诊断模型。</li>
                 <li>进入设定，填写主角原名、改写后姓名、身材体型、改写模式和额外要求。</li>
                 <li>建议先处理一个批次：点击分析，再点击改写，确认效果稳定后再使用一键分析改写。</li>
+                <li>当前批次可从“改写”选项启动 2–3 个模型的 A/B 改写；候选经确认应用前不会进入正式改写稿或 TXT，返回工作台后可通过顶部“A/B 实验”继续查看候选和进度。</li>
                 <li>改写复检默认开启，会增加请求数、等待时间和 token 消耗；如需优先速度，可在设置中关闭。</li>
                 <li>一键分析改写会按批次连续处理；运行中可暂停、继续或终止，限流、网络中断或模型安全策略拦截后也可调整设置再继续。</li>
                 <li>改写完成后进入对比页面，可搜索、查看差异并导出 TXT；导出只包含已完成改写的章节。</li>

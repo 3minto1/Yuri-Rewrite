@@ -4,7 +4,7 @@ import App from "./App";
 import { clearDiffCache } from "./components/Compare/compareDiffCache";
 import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
-import type { AiLog, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelDetail, UpdateProgress } from "./types";
+import type { AiLog, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelDetail, RewriteAbRunDetail, UpdateProgress } from "./types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -106,6 +106,33 @@ const estimate: JobEstimate = {
   recent_success_calls: 0,
   recent_failed_calls: 0
 };
+const rewriteAbRun: RewriteAbRunDetail = {
+  id: "ab-run-1",
+  novel_id: "novel-1",
+  batch_id: "batch-1",
+  batch_label: "第一批",
+  batch_fingerprint: "chapter-1",
+  status: "ready",
+  review_enabled: false,
+  model_count: 2,
+  chapter_count: 1,
+  completed_candidates: 2,
+  total_candidates: 2,
+  selected_chapters: 0,
+  created_at: "now",
+  updated_at: "now",
+  models: [
+    { slot: "A", profile_id: "profile-1", profile_name: "测试模型", provider: "openai-compatible", model: "test-model" },
+    { slot: "B", profile_id: "profile-2", profile_name: "备用模型", provider: "openai-compatible", model: "second-model" }
+  ],
+  chapters: [{
+    chapter_id: "chapter-1",
+    chapter_index: 1,
+    title: "第一章",
+    selected_slot: null,
+    candidate_statuses: { A: "completed", B: "completed" }
+  }]
+};
 let recoveryRows: AutoRunRecovery[] = [];
 
 function installDefaultCommands() {
@@ -122,6 +149,7 @@ function installDefaultCommands() {
       return { start_date: "2026-05-21", end_date: "2026-06-19", requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
     }
     if (command === "estimate_job_cost") return estimate;
+    if (command === "list_rewrite_ab_runs") return [];
     if (command === "check_for_updates") {
       return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
     }
@@ -186,6 +214,108 @@ describe("App feature behavior", () => {
       expect.stringContaining("模型名：test-model")
     );
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+  });
+
+  it("reopens the latest A/B experiment from the persistent top entry", async () => {
+    const defaultImplementation = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_rewrite_ab_runs") return [structuredClone(rewriteAbRun)];
+      if (command === "get_rewrite_ab_run") return structuredClone(rewriteAbRun);
+      if (command === "get_rewrite_ab_chapter") {
+        return {
+          run_id: "ab-run-1",
+          chapter_id: "chapter-1",
+          chapter_index: 1,
+          original_title: "第一章",
+          original_text: "原文内容",
+          baseline_title: "第一章",
+          baseline_rewrite_text: "旧稿",
+          selected_slot: null,
+          candidates: rewriteAbRun.models.map((model) => ({
+            slot: model.slot,
+            profile_id: model.profile_id,
+            profile_name: model.profile_name,
+            model: model.model,
+            status: "completed",
+            title: "第一章",
+            rewrite_text: `${model.slot} 候选内容`,
+            review_summary: null,
+            error: null
+          }))
+        };
+      }
+      return defaultImplementation(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "A/B 实验" }));
+    expect(await screen.findByText("A 候选内容")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "A/B 实验" })).toHaveClass("active");
+
+    fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
+    expect(await screen.findByRole("heading", { name: "测试小说" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "A/B 实验" }));
+    expect(await screen.findByText("A 候选内容")).toBeInTheDocument();
+    expect(mocks.invoke).toHaveBeenCalledWith("list_rewrite_ab_runs", { novelId: "novel-1" });
+  });
+
+  it("keeps the current page and explains how to create an A/B experiment when none exists", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "A/B 实验" }));
+    expect(await screen.findByText(/还没有 A\/B 实验/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "测试小说" })).toBeInTheDocument();
+  });
+
+  it("moves A/B progress from the workspace strip into the top entry", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    act(() => {
+      mocks.progressCallback?.({
+        id: "ab-job-1",
+        novel_id: "novel-1",
+        job_type: "rewrite_ab",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 4,
+        candidate_completed: 1,
+        candidate_total: 4,
+        message: "正在生成候选"
+      });
+    });
+
+    expect(screen.getByRole("button", { name: "A/B 实验，运行中，候选 1/4" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("任务进度 25%")).not.toBeInTheDocument();
+    expect(screen.queryByText("正在生成候选")).not.toBeInTheDocument();
+  });
+
+  it("opens the 2-model A/B workflow from the rewrite options", async () => {
+    const defaultImplementation = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_model_profiles") return [profile, secondProfile];
+      if (command === "list_rewrite_ab_runs") return [];
+      if (command === "estimate_rewrite_ab") return {
+        chapter_count: 1,
+        model_count: 2,
+        shard_count: 2,
+        estimated_requests: 2,
+        estimated_seconds: 30,
+        average_call_seconds: 15,
+        recent_success_calls: 3
+      };
+      return defaultImplementation(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "改写选项" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "A/B 改写当前批次" }));
+    const dialog = await screen.findByRole("dialog", { name: "A/B 改写当前批次" });
+    expect(within(dialog).getByRole("combobox", { name: "模型 A" })).toHaveValue("profile-1");
+    expect(within(dialog).getByRole("combobox", { name: "模型 B" })).toHaveValue("profile-2");
+    expect(within(dialog).getByText(/候选不会自动覆盖正式改写稿/)).toBeInTheDocument();
   });
 
   it("stores the automatic continue setting independently of running-task settings", async () => {
@@ -682,6 +812,8 @@ describe("App feature behavior", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "快速上手" });
     expect(within(dialog).getByText(/建议先处理一个批次/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/2–3 个模型的 A\/B 改写/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/不会进入正式改写稿或 TXT/)).toBeInTheDocument();
     expect(within(dialog).getByText(/模型安全策略拦截后也可调整设置再继续/)).toBeInTheDocument();
     expect(within(dialog).queryByText(/com\.local\.yurirewrite/)).not.toBeInTheDocument();
   });

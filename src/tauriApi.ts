@@ -20,6 +20,12 @@ import type {
   NovelDetail,
   NovelSettings,
   ProfileDraft,
+  RewriteAbApplyResult,
+  RewriteAbChapterDetail,
+  RewriteAbChoice,
+  RewriteAbEstimate,
+  RewriteAbRunDetail,
+  RewriteAbRunSummary,
   TokenUsageReport,
   StoredChapterRule,
   UpdateCheckResult,
@@ -110,6 +116,35 @@ type CommandMap = {
   };
   start_analysis: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
   start_rewrite: { args: { novelId: string; profileId: string; batchId: string }; result: Job };
+  estimate_rewrite_ab: {
+    args: { novelId: string; batchId: string; profileIds: string[]; reviewEnabled: boolean };
+    result: RewriteAbEstimate;
+  };
+  start_rewrite_ab: {
+    args: { novelId: string; batchId: string; profileIds: string[]; reviewEnabled: boolean; replaceRunId?: string };
+    result: RewriteAbRunDetail;
+  };
+  retry_rewrite_ab: { args: { runId: string }; result: RewriteAbRunDetail };
+  terminate_rewrite_ab: { args: { runId: string }; result: RewriteAbRunDetail };
+  list_rewrite_ab_runs: { args: { novelId: string }; result: RewriteAbRunSummary[] };
+  get_rewrite_ab_run: { args: { runId: string }; result: RewriteAbRunDetail };
+  get_rewrite_ab_chapter: {
+    args: { runId: string; chapterId: string };
+    result: RewriteAbChapterDetail;
+  };
+  save_rewrite_ab_choices: {
+    args: { runId: string; choices: RewriteAbChoice[]; replaceAll?: boolean };
+    result: RewriteAbRunDetail;
+  };
+  apply_rewrite_ab_choices: {
+    args: { runId: string; forceOverwrite: boolean };
+    result: RewriteAbApplyResult;
+  };
+  restore_rewrite_ab_baseline: {
+    args: { runId: string; forceOverwrite: boolean };
+    result: RewriteAbApplyResult;
+  };
+  delete_rewrite_ab_run: { args: { runId: string }; result: void };
   start_analyze_rewrite_batch: {
     args: { novelId: string; profileId: string; batchId: string };
     result: Job;

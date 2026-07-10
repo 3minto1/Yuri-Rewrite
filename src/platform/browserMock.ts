@@ -14,6 +14,12 @@ import type {
   Novel,
   NovelDetail,
   NovelSettings,
+  RewriteAbApplyResult,
+  RewriteAbChapterDetail,
+  RewriteAbChoice,
+  RewriteAbEstimate,
+  RewriteAbRunDetail,
+  RewriteAbSlot,
   StoredChapterRule,
   TokenUsageReport,
   UpdateCheckResult
@@ -56,6 +62,8 @@ let chapters: Chapter[] = chapterTitles.map((title, offset) => {
 });
 
 let localDataDeleted = false;
+let rewriteAbRuns: RewriteAbRunDetail[] = [];
+const rewriteAbChapterDetails = new Map<string, RewriteAbChapterDetail>();
 
 let settings: AppSettings = {
   export_dir: null,
@@ -290,6 +298,74 @@ function updateChapter(chapterId: string, update: Partial<Chapter>): Chapter {
   return { ...chapters[index] };
 }
 
+function createRewriteAbRun(profileIds: string[], reviewEnabled: boolean, batchId: string): RewriteAbRunDetail {
+  const batch = detail().batches.find((item) => item.id === batchId) ?? detail().batches[0];
+  const scopedChapters = chapters.filter((chapter) => chapter.index >= batch.start_chapter && chapter.index <= batch.end_chapter);
+  const models = profileIds.map((profileId, index) => {
+    const profile = profiles.find((item) => item.id === profileId)!;
+    return {
+      slot: String.fromCharCode(65 + index) as RewriteAbSlot,
+      profile_id: profile.id,
+      profile_name: profile.name,
+      provider: profile.provider,
+      model: profile.model
+    };
+  });
+  const runId = `browser-ab-${Date.now()}`;
+  const run: RewriteAbRunDetail = {
+    id: runId,
+    novel_id: novel.id,
+    batch_id: batch.id,
+    batch_label: batch.label,
+    batch_fingerprint: scopedChapters.map((chapter) => chapter.id).join(":"),
+    status: "ready",
+    review_enabled: reviewEnabled,
+    model_count: models.length,
+    chapter_count: scopedChapters.length,
+    completed_candidates: scopedChapters.length * models.length,
+    total_candidates: scopedChapters.length * models.length,
+    selected_chapters: 0,
+    created_at: now,
+    updated_at: now,
+    models,
+    chapters: scopedChapters.map((chapter) => ({
+      chapter_id: chapter.id,
+      chapter_index: chapter.index,
+      title: chapter.title,
+      selected_slot: null,
+      candidate_statuses: Object.fromEntries(models.map((model) => [model.slot, "completed"]))
+    }))
+  };
+  for (const chapter of scopedChapters) {
+    rewriteAbChapterDetails.set(`${runId}:${chapter.id}`, {
+      run_id: runId,
+      chapter_id: chapter.id,
+      chapter_index: chapter.index,
+      original_title: chapter.title,
+      original_text: chapter.original_text,
+      baseline_title: chapter.title,
+      baseline_rewrite_text: chapter.rewrite_text,
+      selected_slot: null,
+      candidates: models.map((model) => ({
+        slot: model.slot,
+        profile_id: model.profile_id,
+        profile_name: model.profile_name,
+        model: model.model,
+        status: "completed",
+        title: chapter.title,
+        rewrite_text: `${model.slot} 候选：这是第${chapter.index}章由${model.profile_name}生成的浏览器测试改写稿。东伯雪璎与余靖秋共同推进剧情。`,
+        review_summary: reviewEnabled ? "浏览器模拟复检通过。" : null,
+        error: null
+      }))
+    });
+  }
+  return run;
+}
+
+function cloneRewriteAbRun(run: RewriteAbRunDetail): RewriteAbRunDetail {
+  return structuredClone(run);
+}
+
 export async function invokeBrowserMock(
   command: string,
   args?: Record<string, unknown>
@@ -365,6 +441,8 @@ export async function invokeBrowserMock(
       };
       canonAssets = [];
       chapterRule = null;
+      rewriteAbRuns = [];
+      rewriteAbChapterDetails.clear();
       return { warnings: [] };
     case "diagnose_model_profile":
       return {
@@ -423,6 +501,111 @@ export async function invokeBrowserMock(
       return { ...novelSettings };
     case "estimate_job_cost":
       return estimate();
+    case "estimate_rewrite_ab": {
+      const modelCount = (args?.profileIds as string[]).length;
+      const batch = detail().batches.find((item) => item.id === args?.batchId) ?? detail().batches[0];
+      const scopedChapters = chapters.filter((chapter) => chapter.index >= batch.start_chapter && chapter.index <= batch.end_chapter);
+      const chapterCount = scopedChapters.length;
+      const fingerprint = scopedChapters.map((chapter) => chapter.id).join(":");
+      const existingRun = rewriteAbRuns.find((run) => run.novel_id === novel.id && run.batch_fingerprint === fingerprint);
+      const parallelism = Math.max(1, settings.rewrite_parallelism ?? 10);
+      const shardCount = Math.min(chapterCount, parallelism);
+      const estimatedRequests = shardCount * modelCount * (args?.reviewEnabled ? 2 : 1);
+      return {
+        chapter_count: chapterCount,
+        model_count: modelCount,
+        shard_count: shardCount,
+        estimated_requests: estimatedRequests,
+        estimated_seconds: Math.ceil(estimatedRequests / parallelism) * 12,
+        average_call_seconds: 12,
+        recent_success_calls: 18,
+        existing_run_id: existingRun?.id ?? null
+      } satisfies RewriteAbEstimate;
+    }
+    case "start_rewrite_ab": {
+      const profileIds = args?.profileIds as string[];
+      const replaceRunId = String(args?.replaceRunId ?? "");
+      if (replaceRunId) {
+        rewriteAbRuns = rewriteAbRuns.filter((run) => run.id !== replaceRunId);
+        for (const key of rewriteAbChapterDetails.keys()) if (key.startsWith(`${replaceRunId}:`)) rewriteAbChapterDetails.delete(key);
+      }
+      const run = createRewriteAbRun(profileIds, Boolean(args?.reviewEnabled), String(args?.batchId));
+      rewriteAbRuns.unshift(run);
+      return cloneRewriteAbRun(run);
+    }
+    case "list_rewrite_ab_runs":
+      return rewriteAbRuns.map(({ models: _models, chapters: _chapters, ...summary }) => ({ ...summary }));
+    case "get_rewrite_ab_run": {
+      const run = rewriteAbRuns.find((item) => item.id === args?.runId);
+      if (!run) throw new Error("A/B 实验不存在。");
+      return cloneRewriteAbRun(run);
+    }
+    case "get_rewrite_ab_chapter": {
+      const value = rewriteAbChapterDetails.get(`${args?.runId}:${args?.chapterId}`);
+      if (!value) throw new Error("A/B 候选章节不存在。");
+      return structuredClone(value);
+    }
+    case "save_rewrite_ab_choices": {
+      const run = rewriteAbRuns.find((item) => item.id === args?.runId);
+      if (!run) throw new Error("A/B 实验不存在。");
+      if (args?.replaceAll) {
+        for (const summary of run.chapters) summary.selected_slot = null;
+        for (const summary of run.chapters) {
+          const chapterDetail = rewriteAbChapterDetails.get(`${run.id}:${summary.chapter_id}`);
+          if (chapterDetail) chapterDetail.selected_slot = null;
+        }
+      }
+      for (const choice of args?.choices as RewriteAbChoice[]) {
+        const summary = run.chapters.find((item) => item.chapter_id === choice.chapter_id);
+        const chapterDetail = rewriteAbChapterDetails.get(`${run.id}:${choice.chapter_id}`);
+        if (summary) summary.selected_slot = choice.slot;
+        if (chapterDetail) chapterDetail.selected_slot = choice.slot;
+      }
+      run.selected_chapters = run.chapters.filter((item) => item.selected_slot).length;
+      run.updated_at = now;
+      return cloneRewriteAbRun(run);
+    }
+    case "retry_rewrite_ab": {
+      const run = rewriteAbRuns.find((item) => item.id === args?.runId);
+      if (!run) throw new Error("A/B 实验不存在。");
+      run.status = "ready";
+      run.completed_candidates = run.total_candidates;
+      return cloneRewriteAbRun(run);
+    }
+    case "terminate_rewrite_ab": {
+      const run = rewriteAbRuns.find((item) => item.id === args?.runId);
+      if (!run) throw new Error("A/B 实验不存在。");
+      run.status = "partial";
+      return cloneRewriteAbRun(run);
+    }
+    case "apply_rewrite_ab_choices": {
+      const run = rewriteAbRuns.find((item) => item.id === args?.runId);
+      if (!run) throw new Error("A/B 实验不存在。");
+      if (run.chapters.some((item) => !item.selected_slot)) throw new Error("请先为每章选择一个候选。");
+      const updated = run.chapters.map((item) => {
+        const detailRow = rewriteAbChapterDetails.get(`${run.id}:${item.chapter_id}`)!;
+        const candidate = detailRow.candidates.find((value) => value.slot === item.selected_slot)!;
+        return updateChapter(item.chapter_id, { title: candidate.title ?? item.title, rewrite_text: candidate.rewrite_text, rewrite_status: "completed", rewrite_edited: false });
+      });
+      run.status = "applied";
+      return { status: "applied", conflict_chapter_ids: [], chapters: updated } satisfies RewriteAbApplyResult;
+    }
+    case "restore_rewrite_ab_baseline": {
+      const run = rewriteAbRuns.find((item) => item.id === args?.runId);
+      if (!run) throw new Error("A/B 实验不存在。");
+      const updated = run.chapters.map((item) => {
+        const detailRow = rewriteAbChapterDetails.get(`${run.id}:${item.chapter_id}`)!;
+        return updateChapter(item.chapter_id, { title: detailRow.baseline_title ?? item.title, rewrite_text: detailRow.baseline_rewrite_text, rewrite_status: detailRow.baseline_rewrite_text ? "completed" : "pending", rewrite_edited: false });
+      });
+      run.status = "ready";
+      return { status: "restored", conflict_chapter_ids: [], chapters: updated } satisfies RewriteAbApplyResult;
+    }
+    case "delete_rewrite_ab_run": {
+      const runId = String(args?.runId);
+      rewriteAbRuns = rewriteAbRuns.filter((run) => run.id !== runId);
+      for (const key of rewriteAbChapterDetails.keys()) if (key.startsWith(`${runId}:`)) rewriteAbChapterDetails.delete(key);
+      return undefined;
+    }
     case "update_canon_assets":
       canonAssets = (args?.assets as Array<{ kind: string; content: string }>).map((asset) => ({
         novel_id: novel.id,

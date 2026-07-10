@@ -72,6 +72,17 @@ pub(crate) struct RecentModelStats {
 }
 
 impl RecentModelStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.success_calls += other.success_calls;
+        self.failed_calls += other.failed_calls;
+        self.total_elapsed_seconds += other.total_elapsed_seconds;
+        self.elapsed_samples += other.elapsed_samples;
+        self.total_input_chars += other.total_input_chars;
+        self.input_samples += other.input_samples;
+        self.total_output_chars += other.total_output_chars;
+        self.output_samples += other.output_samples;
+    }
+
     pub(crate) fn average_call_seconds(&self) -> Option<f64> {
         if self.elapsed_samples == 0 {
             None

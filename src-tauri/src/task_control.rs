@@ -111,7 +111,7 @@ impl CancellableTaskRegistry {
     pub(crate) fn register(&self, novel_id: &str) -> Result<CancellableTaskPermit<'_>, String> {
         let mut tasks = self.tasks.lock().map_err(|error| error.to_string())?;
         if tasks.contains_key(novel_id) {
-            return Err("当前小说已有可终止的单章重写任务。".to_string());
+            return Err("当前小说已有可终止任务正在运行。".to_string());
         }
         let signal = Arc::new(CancellationSignal::default());
         tasks.insert(novel_id.to_string(), signal.clone());

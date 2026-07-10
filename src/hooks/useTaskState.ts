@@ -10,7 +10,7 @@ export function useTaskState() {
   const job = useAppStore((state) => state.job);
   const setJob = useAppStore((state) => state.setJob);
   const processingTaskActive =
-    ["analysis", "rewrite", "auto-batch", "auto"].includes(busy) || autoRunState !== "idle";
+    ["analysis", "rewrite", "rewrite-ab", "auto-batch", "auto"].includes(busy) || autoRunState !== "idle";
 
   return {
     busy,

@@ -57,16 +57,16 @@ describe("useAutoRunProgress", () => {
     expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ id: "job-2", status: "running" }));
   });
 
-  it("accepts a new job after the previous job reaches a terminal state", async () => {
+  it("accepts a same-id retry after the previous attempt reaches a terminal state", async () => {
     const onProgress = vi.fn();
     renderHook(() => useAutoRunProgress("novel-1", onProgress));
     await waitFor(() => expect(progressHandler).toBeDefined());
 
     act(() => progressHandler?.({ payload: progress({ status: "completed" }) }));
+    act(() => progressHandler?.({ payload: progress({ status: "completed" }) }));
     act(() => progressHandler?.({ payload: progress({ status: "running" }) }));
-    act(() => progressHandler?.({ payload: progress({ id: "job-2" }) }));
     expect(onProgress).toHaveBeenCalledTimes(2);
-    expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ id: "job-2" }));
+    expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ id: "job-1", status: "running" }));
   });
 
   it("accepts a resumed job after a paused auto run", async () => {

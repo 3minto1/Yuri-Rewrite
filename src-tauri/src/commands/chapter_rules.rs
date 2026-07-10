@@ -2,9 +2,13 @@ use crate::domain::{
     AppState, Chapter, ChapterRule, ChapterRuleLongChapterPreviewItem, ChapterRulePreview,
     ChapterRulePreviewItem, StoredChapterRule,
 };
+use crate::services::chapter_batch_files::{
+    cleanup_stale_batch_files_for_novel, discard_prepared_generations,
+    prepare_chapter_batch_generation, replace_chapter_batch_rows,
+};
 use crate::{
-    create_chapter_batches, decode_text, load_chapter_batch_size, seed_canon_assets,
-    split_chapters, split_chapters_with_custom_rule, split_long_detected_chapters, to_string,
+    decode_text, load_chapter_batch_size, seed_canon_assets, split_chapters,
+    split_chapters_with_custom_rule, split_long_detected_chapters, to_string,
     LONG_CHAPTER_SPLIT_LIMIT,
 };
 use chrono::Utc;
@@ -52,6 +56,10 @@ pub(crate) fn save_chapter_rule_and_split(
     split_long_chapters: Option<bool>,
     state: State<AppState>,
 ) -> Result<StoredChapterRule, String> {
+    let _active_task =
+        state
+            .active_tasks
+            .acquire(&novel_id, std::iter::empty::<&str>(), "重新分章")?;
     ensure_can_split_novel(&state, &novel_id)?;
     let normalized = normalize_chapter_rule(rule);
     let mut conn = state.conn.lock().map_err(to_string)?;
@@ -73,8 +81,13 @@ pub(crate) fn save_chapter_rule_and_split(
         &novel_id,
         &chapters,
         split.detected_chapters,
-    )?;
-    save_chapter_rule_value(&conn, &novel_id, &normalized)
+        Some(&normalized),
+        |conn| {
+            ensure_can_split_novel(&state, &novel_id)?;
+            ensure_chapter_split_allowed(conn, &novel_id)
+        },
+    )?
+    .ok_or_else(|| "章节规则未能随重新分章一并保存。".to_string())
 }
 
 #[tauri::command]
@@ -83,6 +96,10 @@ pub(crate) fn split_novel_with_builtin_rule(
     split_long_chapters: Option<bool>,
     state: State<AppState>,
 ) -> Result<(), String> {
+    let _active_task =
+        state
+            .active_tasks
+            .acquire(&novel_id, std::iter::empty::<&str>(), "重新分章")?;
     ensure_can_split_novel(&state, &novel_id)?;
     let mut conn = state.conn.lock().map_err(to_string)?;
     ensure_chapter_split_allowed(&conn, &novel_id)?;
@@ -103,7 +120,13 @@ pub(crate) fn split_novel_with_builtin_rule(
         &novel_id,
         &chapters,
         split.detected_chapters,
+        None,
+        |conn| {
+            ensure_can_split_novel(&state, &novel_id)?;
+            ensure_chapter_split_allowed(conn, &novel_id)
+        },
     )
+    .map(|_| ())
 }
 
 fn maybe_split_long_detected_chapters(
@@ -248,9 +271,6 @@ fn load_source_text(conn: &Connection, novel_id: &str) -> Result<String, String>
 }
 
 fn ensure_can_split_novel(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
-    if state.active_tasks.novel_is_active(novel_id)? {
-        return Err("当前小说任务正在运行，不能生成章节列表。".to_string());
-    }
     if state
         .auto_runs
         .lock()
@@ -319,6 +339,8 @@ fn task_history_exists(conn: &Connection, novel_id: &str) -> Result<bool, String
               AND job_type IN ('analysis', 'rewrite', 'auto', 'auto_batch')
         ) OR EXISTS(
             SELECT 1 FROM auto_run_checkpoints WHERE novel_id = ?1
+        ) OR EXISTS(
+            SELECT 1 FROM rewrite_ab_runs WHERE novel_id = ?1
         )",
         params![novel_id],
         |row| row.get(0),
@@ -338,63 +360,83 @@ fn non_empty_canon_asset_exists(conn: &Connection, novel_id: &str) -> Result<boo
     .map_err(to_string)
 }
 
-fn rebuild_pending_novel_chapters(
+fn rebuild_pending_novel_chapters<F>(
     conn: &mut Connection,
     data_dir: &Path,
     novel_id: &str,
     chapters: &[Chapter],
     detected_chapters: bool,
-) -> Result<(), String> {
-    let batch_dir = data_dir.join("chapter_batches").join(novel_id);
-    if batch_dir.exists() {
-        fs::remove_dir_all(&batch_dir).map_err(to_string)?;
-    }
+    chapter_rule: Option<&ChapterRule>,
+    before_commit: F,
+) -> Result<Option<StoredChapterRule>, String>
+where
+    F: FnOnce(&Connection) -> Result<(), String>,
+{
     let batch_size = load_chapter_batch_size(conn)?;
-    let tx = conn.transaction().map_err(to_string)?;
-    tx.execute(
-        "DELETE FROM chapters WHERE novel_id = ?1",
-        params![novel_id],
-    )
-    .map_err(to_string)?;
-    tx.execute(
-        "DELETE FROM chapter_batches WHERE novel_id = ?1",
-        params![novel_id],
-    )
-    .map_err(to_string)?;
-    tx.execute(
-        "DELETE FROM canon_assets WHERE novel_id = ?1",
-        params![novel_id],
-    )
-    .map_err(to_string)?;
-    for chapter in chapters {
-        tx.execute(
-            "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_status, rewrite_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 'pending')",
-            params![
-                chapter.id,
-                chapter.novel_id,
-                chapter.index,
-                chapter.title,
-                chapter.original_text
-            ],
-        )
-        .map_err(to_string)?;
-    }
-    create_chapter_batches(
-        &tx,
+    let mut prepared = prepare_chapter_batch_generation(
         data_dir,
         novel_id,
         chapters,
         detected_chapters,
         batch_size,
     )?;
-    seed_canon_assets(&tx, novel_id).map_err(to_string)?;
-    tx.execute(
-        "UPDATE novels SET status = 'imported', detected_chapters = ?1 WHERE id = ?2",
-        params![detected_chapters, novel_id],
-    )
-    .map_err(to_string)?;
-    tx.commit().map_err(to_string)
+    if let Err(error) = before_commit(conn) {
+        return Err(discard_prepared_generations(
+            std::slice::from_mut(&mut prepared),
+            error,
+        ));
+    }
+    let database_result = (|| {
+        let tx = conn.transaction().map_err(to_string)?;
+        tx.execute(
+            "DELETE FROM chapters WHERE novel_id = ?1",
+            params![novel_id],
+        )
+        .map_err(to_string)?;
+        replace_chapter_batch_rows(&tx, &prepared)?;
+        tx.execute(
+            "DELETE FROM canon_assets WHERE novel_id = ?1",
+            params![novel_id],
+        )
+        .map_err(to_string)?;
+        for chapter in chapters {
+            tx.execute(
+                "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_status, rewrite_status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 'pending')",
+                params![
+                    chapter.id,
+                    chapter.novel_id,
+                    chapter.index,
+                    chapter.title,
+                    chapter.original_text
+                ],
+            )
+            .map_err(to_string)?;
+        }
+        seed_canon_assets(&tx, novel_id).map_err(to_string)?;
+        tx.execute(
+            "UPDATE novels SET status = 'imported', detected_chapters = ?1 WHERE id = ?2",
+            params![detected_chapters, novel_id],
+        )
+        .map_err(to_string)?;
+        let stored_rule = chapter_rule
+            .map(|rule| save_chapter_rule_value(&tx, novel_id, rule))
+            .transpose()?;
+        tx.commit().map_err(to_string)?;
+        Ok(stored_rule)
+    })();
+    let stored_rule = match database_result {
+        Ok(stored_rule) => stored_rule,
+        Err(error) => {
+            return Err(discard_prepared_generations(
+                std::slice::from_mut(&mut prepared),
+                error,
+            ));
+        }
+    };
+    prepared.retain_after_commit();
+    let _ = cleanup_stale_batch_files_for_novel(conn, data_dir, novel_id);
+    Ok(stored_rule)
 }
 
 #[cfg(test)]
@@ -649,6 +691,8 @@ mod tests {
             "novel-1",
             &split.chapters,
             split.detected_chapters,
+            None,
+            |_| Ok(()),
         )
         .expect("rebuild chapters");
 
@@ -685,6 +729,93 @@ mod tests {
             .expect("count non-empty assets");
         assert_eq!(non_empty_asset_count, 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rule_save_failure_keeps_old_chapters_rows_and_batch_files() {
+        let mut conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        let dir = std::env::temp_dir().join(format!("yuri-rule-atomic-{}", uuid::Uuid::new_v4()));
+        let batch_dir = dir.join("chapter_batches").join("novel-1");
+        fs::create_dir_all(&batch_dir).expect("create old batch directory");
+        let old_batch = batch_dir.join("batch-001.txt");
+        fs::write(&old_batch, "旧批次").expect("write old batch");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', '', 'UTF-8', 'imported', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO chapters (id, novel_id, chapter_index, title, original_text, analysis_status, rewrite_status)
+             VALUES ('old-chapter', 'novel-1', 1, '旧章节', '旧正文', 'pending', 'pending')",
+            [],
+        )
+        .expect("insert old chapter");
+        conn.execute(
+            "INSERT INTO chapter_batches (id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at)
+             VALUES ('old-batch', 'novel-1', 1, '1-1章', 1, 1, ?1, 'now')",
+            params![old_batch.to_string_lossy().to_string()],
+        )
+        .expect("insert old batch row");
+        conn.execute_batch(
+            "CREATE TRIGGER reject_rule_save BEFORE INSERT ON chapter_rules
+             BEGIN SELECT RAISE(FAIL, 'rule save stopped'); END;",
+        )
+        .expect("create failure trigger");
+
+        let new_chapters = vec![Chapter {
+            id: "new-chapter".to_string(),
+            novel_id: "novel-1".to_string(),
+            index: 1,
+            title: "第一章".to_string(),
+            original_text: "新正文".to_string(),
+            analysis_json: None,
+            rewrite_text: None,
+            rewrite_edited: false,
+            single_rewrite_original_available: false,
+            analysis_status: "pending".to_string(),
+            rewrite_status: "pending".to_string(),
+        }];
+        let error = rebuild_pending_novel_chapters(
+            &mut conn,
+            &dir,
+            "novel-1",
+            &new_chapters,
+            true,
+            Some(&test_rule()),
+            |_| Ok(()),
+        )
+        .expect_err("rule failure should roll back the complete rebuild");
+        assert!(error.contains("rule save stopped"));
+        let chapter_id: String = conn
+            .query_row("SELECT id FROM chapters", [], |row| row.get(0))
+            .expect("load old chapter");
+        assert_eq!(chapter_id, "old-chapter");
+        let batch_id: String = conn
+            .query_row("SELECT id FROM chapter_batches", [], |row| row.get(0))
+            .expect("load old batch");
+        assert_eq!(batch_id, "old-batch");
+        assert_eq!(
+            fs::read_to_string(&old_batch).expect("read old batch"),
+            "旧批次"
+        );
+        let generation_count = fs::read_dir(&batch_dir)
+            .expect("list batch directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("generation-")
+            })
+            .count();
+        assert_eq!(generation_count, 0);
+        let rule_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chapter_rules", [], |row| row.get(0))
+            .expect("count rules");
+        assert_eq!(rule_count, 0);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -760,6 +891,32 @@ mod tests {
         .expect("insert job");
         let error =
             ensure_chapter_split_allowed(&conn, "novel-1").expect_err("job history should reject");
+        assert!(error.contains("已开始分析或改写"));
+    }
+
+    #[test]
+    fn imported_novel_with_ab_experiment_cannot_be_resplit() {
+        let conn = Connection::open_in_memory().expect("open db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, detected_chapters, created_at)
+             VALUES ('novel-1', '测试', '', 'UTF-8', 'imported', 1, 'now')",
+            [],
+        )
+        .expect("insert novel");
+        conn.execute(
+            "INSERT INTO rewrite_ab_runs (
+                id, novel_id, batch_id, batch_label, batch_fingerprint,
+                input_snapshot_json, status, review_enabled, created_at, updated_at
+             ) VALUES (
+                'run-1', 'novel-1', 'batch-1', '1-1章', 'fingerprint',
+                '{}', 'ready', 0, 'now', 'now'
+             )",
+            [],
+        )
+        .expect("insert A/B experiment");
+        let error = ensure_chapter_split_allowed(&conn, "novel-1")
+            .expect_err("A/B experiment should reject resplit");
         assert!(error.contains("已开始分析或改写"));
     }
 

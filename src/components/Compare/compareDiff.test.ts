@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { calculateDiff, tokenizeMixed } from "./compareDiff";
 import { clearDiffCache, getCachedDiff, getDiffCacheSize, setCachedDiff } from "./compareDiffCache";
-import { buildTextSegments } from "./HighlightedText";
+import { buildTextSegments, getHighlightNames } from "./HighlightedText";
 
 describe("compare diff", () => {
   it("tokenizes Chinese by character and English by word", () => {
@@ -111,6 +111,16 @@ describe("compare diff", () => {
       [{ id: "m1", chapter_id: "c1", side: "original", start: 0, end: 2 }]
     );
     expect(segments[0]).toMatchObject({ diffKind: "removed", searchMatch: { id: "m1" } });
+  });
+
+  it("uses independent CSS highlight names for both A/B panes", () => {
+    const left = getHighlightNames("rewrite-ab-left", "rewrite");
+    const right = getHighlightNames("rewrite-ab-right", "rewrite");
+    const regular = getHighlightNames("default", "rewrite");
+
+    expect(left.diff).not.toBe(right.diff);
+    expect(left.diff).not.toBe(regular.diff);
+    expect(right.diff).not.toBe(regular.diff);
   });
 });
 

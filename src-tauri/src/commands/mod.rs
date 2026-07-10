@@ -9,6 +9,7 @@ pub(crate) mod logs;
 pub(crate) mod models;
 pub(crate) mod novels;
 pub(crate) mod rewrite;
+pub(crate) mod rewrite_ab;
 pub(crate) mod settings;
 pub(crate) mod updates;
 pub(crate) mod workspace;

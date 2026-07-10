@@ -1,4 +1,5 @@
 pub(crate) mod analysis;
+pub(crate) mod chapter_batch_files;
 pub(crate) mod estimation;
 pub(crate) mod progress;
 pub(crate) mod repair;

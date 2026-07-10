@@ -145,6 +145,97 @@ export type Job = {
   chapter_total?: number;
   active_shards?: ActiveShardProgress[];
   editable_before_batch_index?: number;
+  candidate_completed?: number;
+  candidate_total?: number;
+  candidate_slot?: RewriteAbSlot;
+};
+
+export type RewriteAbSlot = "A" | "B" | "C";
+export type RewriteAbRunStatus = "running" | "partial" | "ready" | "applied";
+export type RewriteAbCandidateStatus = "pending" | "running" | "completed" | "failed";
+
+export type RewriteAbModel = {
+  slot: RewriteAbSlot;
+  profile_id: string;
+  profile_name: string;
+  provider: string;
+  model: string;
+};
+
+export type RewriteAbChapterSummary = {
+  chapter_id: string;
+  chapter_index: number;
+  title: string;
+  selected_slot?: RewriteAbSlot | null;
+  candidate_statuses: Partial<Record<RewriteAbSlot, RewriteAbCandidateStatus>>;
+};
+
+export type RewriteAbRunSummary = {
+  id: string;
+  novel_id: string;
+  batch_id: string;
+  batch_label: string;
+  batch_fingerprint: string;
+  status: RewriteAbRunStatus;
+  review_enabled: boolean;
+  model_count: number;
+  chapter_count: number;
+  completed_candidates: number;
+  total_candidates: number;
+  selected_chapters: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RewriteAbRunDetail = RewriteAbRunSummary & {
+  models: RewriteAbModel[];
+  chapters: RewriteAbChapterSummary[];
+};
+
+export type RewriteAbCandidate = {
+  slot: RewriteAbSlot;
+  profile_id: string;
+  profile_name: string;
+  model: string;
+  status: RewriteAbCandidateStatus;
+  title?: string | null;
+  rewrite_text?: string | null;
+  review_summary?: string | null;
+  error?: string | null;
+};
+
+export type RewriteAbChapterDetail = {
+  run_id: string;
+  chapter_id: string;
+  chapter_index: number;
+  original_title: string;
+  original_text: string;
+  baseline_title?: string | null;
+  baseline_rewrite_text?: string | null;
+  selected_slot?: RewriteAbSlot | null;
+  candidates: RewriteAbCandidate[];
+};
+
+export type RewriteAbEstimate = {
+  chapter_count: number;
+  model_count: number;
+  shard_count: number;
+  estimated_requests: number;
+  estimated_seconds?: number | null;
+  average_call_seconds?: number | null;
+  recent_success_calls: number;
+  existing_run_id: string | null;
+};
+
+export type RewriteAbChoice = {
+  chapter_id: string;
+  slot: RewriteAbSlot;
+};
+
+export type RewriteAbApplyResult = {
+  status: "applied" | "restored" | "conflict";
+  conflict_chapter_ids: string[];
+  chapters?: Chapter[];
 };
 
 export type ActiveShardProgress = {

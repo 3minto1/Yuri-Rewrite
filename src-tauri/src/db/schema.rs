@@ -142,6 +142,69 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS rewrite_ab_runs (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            batch_label TEXT NOT NULL,
+            batch_fingerprint TEXT NOT NULL,
+            input_snapshot_json TEXT NOT NULL,
+            job_id TEXT,
+            status TEXT NOT NULL,
+            review_enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(novel_id) REFERENCES novels(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS rewrite_ab_models (
+            run_id TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            profile_snapshot_json TEXT NOT NULL,
+            PRIMARY KEY(run_id, slot),
+            FOREIGN KEY(run_id) REFERENCES rewrite_ab_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS rewrite_ab_chapters (
+            run_id TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            chapter_index INTEGER NOT NULL,
+            original_title TEXT NOT NULL,
+            original_text TEXT NOT NULL,
+            analysis_json TEXT,
+            analysis_status TEXT NOT NULL,
+            baseline_title TEXT NOT NULL,
+            baseline_rewrite_text TEXT,
+            baseline_ai_rewrite_text TEXT,
+            baseline_rewrite_edited_at TEXT,
+            baseline_rewrite_status TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            selected_slot TEXT,
+            applied_slot TEXT,
+            applied_fingerprint TEXT,
+            PRIMARY KEY(run_id, chapter_id),
+            FOREIGN KEY(run_id) REFERENCES rewrite_ab_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS rewrite_ab_candidates (
+            run_id TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            status TEXT NOT NULL,
+            title TEXT,
+            content TEXT,
+            review_summary TEXT,
+            error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(run_id, chapter_id, slot),
+            FOREIGN KEY(run_id, chapter_id)
+                REFERENCES rewrite_ab_chapters(run_id, chapter_id) ON DELETE CASCADE,
+            FOREIGN KEY(run_id, slot)
+                REFERENCES rewrite_ab_models(run_id, slot) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS auto_run_checkpoints (
             novel_id TEXT PRIMARY KEY,
             start_batch_index INTEGER NOT NULL,
@@ -181,6 +244,12 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_token_usage_profile_created
             ON token_usage_records(profile_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_chapter_batches_novel ON chapter_batches(novel_id, batch_index);
+        CREATE INDEX IF NOT EXISTS idx_rewrite_ab_runs_novel
+            ON rewrite_ab_runs(novel_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_rewrite_ab_runs_scope
+            ON rewrite_ab_runs(novel_id, batch_fingerprint, created_at);
+        CREATE INDEX IF NOT EXISTS idx_rewrite_ab_candidates_status
+            ON rewrite_ab_candidates(run_id, slot, status);
         CREATE INDEX IF NOT EXISTS idx_auto_run_shard_outputs_phase
             ON auto_run_shard_outputs(novel_id, batch_index, phase, chapter_index);
         "#,
@@ -208,6 +277,8 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     backfill_token_usage_records(conn)?;
     migrations::ensure_column(conn, "chapters", "ai_rewrite_text", "TEXT")?;
     migrations::ensure_column(conn, "chapters", "rewrite_edited_at", "TEXT")?;
+    migrations::ensure_column(conn, "rewrite_ab_chapters", "applied_slot", "TEXT")?;
+    migrations::ensure_column(conn, "rewrite_ab_chapters", "applied_fingerprint", "TEXT")?;
     migrations::ensure_column(
         conn,
         "novels",

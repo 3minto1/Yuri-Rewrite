@@ -40,7 +40,11 @@ impl StagedLocalData {
 
         let trash_dir = trash_root.join(format!("local-data-reset-{}", Uuid::new_v4()));
         validate_new_child(data_dir, &trash_dir)?;
-        let mut candidates = vec![data_dir.join("chapter_batches"), data_dir.join("updates")];
+        let mut candidates = vec![
+            data_dir.join("chapter_batches"),
+            data_dir.join("chapter-batches-rebuild"),
+            data_dir.join("updates"),
+        ];
         candidates.extend(
             additional_files
                 .iter()
@@ -178,6 +182,10 @@ fn clear_local_database(conn: &mut Connection) -> Result<(), String> {
         r#"
         DELETE FROM auto_run_shard_outputs;
         DELETE FROM auto_run_checkpoints;
+        DELETE FROM rewrite_ab_candidates;
+        DELETE FROM rewrite_ab_chapters;
+        DELETE FROM rewrite_ab_models;
+        DELETE FROM rewrite_ab_runs;
         DELETE FROM chapter_rewrite_snapshots;
         DELETE FROM chapter_batches;
         DELETE FROM chapter_rules;
@@ -232,7 +240,7 @@ pub(crate) fn delete_local_data(
     validate_deletion_request(
         &confirmation_phrase,
         state.active_tasks.any_active()?,
-        state.single_rewrite_tasks.any_active()?,
+        state.single_rewrite_tasks.any_active()? || state.rewrite_ab_tasks.any_active()?,
         !state.auto_runs.lock().map_err(to_string)?.is_empty(),
     )?;
 
@@ -458,6 +466,19 @@ mod tests {
             INSERT INTO chapter_rewrite_snapshots (
                 chapter_id, title, rewrite_text, created_at
             ) VALUES ('c1', '第一章', '改写', 'now');
+            INSERT INTO rewrite_ab_runs (
+                id, novel_id, batch_id, batch_label, batch_fingerprint,
+                input_snapshot_json, job_id, status, created_at, updated_at
+            ) VALUES ('ab1', 'n1', 'b1', '第1批', 'hash', '{}', 'j1', 'partial', 'now', 'now');
+            INSERT INTO rewrite_ab_models (run_id, slot, profile_id, profile_snapshot_json)
+            VALUES ('ab1', 'A', 'p1', '{}');
+            INSERT INTO rewrite_ab_chapters (
+                run_id, chapter_id, chapter_index, original_title, original_text,
+                analysis_status, baseline_title, baseline_rewrite_status, source_fingerprint
+            ) VALUES ('ab1', 'c1', 1, '第一章', '原文', 'completed', '第一章', 'completed', 'hash');
+            INSERT INTO rewrite_ab_candidates (
+                run_id, chapter_id, slot, status, title, content, updated_at
+            ) VALUES ('ab1', 'c1', 'A', 'completed', '第一章', '改写', 'now');
             INSERT INTO auto_run_checkpoints (
                 novel_id, start_batch_index, next_batch_index, job_id, status,
                 pause_reason, phase, batch_index, profile_ids, created_at, updated_at
@@ -474,6 +495,10 @@ mod tests {
         for table in [
             "auto_run_shard_outputs",
             "auto_run_checkpoints",
+            "rewrite_ab_candidates",
+            "rewrite_ab_chapters",
+            "rewrite_ab_models",
+            "rewrite_ab_runs",
             "chapter_rewrite_snapshots",
             "chapter_batches",
             "chapter_rules",

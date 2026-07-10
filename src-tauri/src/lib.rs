@@ -14,8 +14,8 @@ use ai::*;
 use chrono::Utc;
 use commands::{
     analysis::*, auto_run::*, chapter_rules::*, export::*, frontend_errors::*, jobs::*,
-    local_data::*, logs::*, models::*, novels::*, rewrite::*, settings::*, updates::*,
-    workspace::*,
+    local_data::*, logs::*, models::*, novels::*, rewrite::*, rewrite_ab::*, settings::*,
+    updates::*, workspace::*,
 };
 use credentials::{classify_api_key_storage, read_api_key, write_api_key, ApiKeyStorage};
 use db::init_db;
@@ -32,6 +32,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
+use services::chapter_batch_files::maintain_chapter_batch_files;
 use services::progress::*;
 use services::{estimation::*, shard_context::*};
 use std::{
@@ -49,6 +50,7 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
 };
 use text::*;
+#[cfg(test)]
 use uuid::Uuid;
 
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/3minto1/Yuri-Rewrite";
@@ -84,11 +86,13 @@ pub fn run() {
             restore_main_window_state(app, &data_dir);
             install_main_window_state_listener(app, data_dir.clone());
             cleanup_deletion_trash(&data_dir);
-            let conn = Connection::open(data_dir.join("yuri-rewrite.sqlite3"))?;
+            let mut conn = Connection::open(data_dir.join("yuri-rewrite.sqlite3"))?;
             init_db(&conn)?;
+            maintain_chapter_batch_files(&mut conn, &data_dir).map_err(std::io::Error::other)?;
             cleanup_old_ai_logs(&conn).map_err(std::io::Error::other)?;
             let restored_auto_runs = restore_auto_run_controls(&conn)?;
             restore_orphaned_standalone_task_state(&conn)?;
+            restore_orphaned_rewrite_ab_state(&conn).map_err(std::io::Error::other)?;
             let client = Client::builder()
                 .connect_timeout(Duration::from_secs(20))
                 .timeout(Duration::from_secs(20 * 60))
@@ -103,6 +107,7 @@ pub fn run() {
                 auto_run_progress: Mutex::new(HashMap::new()),
                 active_tasks: ActiveTaskRegistry::default(),
                 single_rewrite_tasks: CancellableTaskRegistry::default(),
+                rewrite_ab_tasks: CancellableTaskRegistry::default(),
                 rate_limits: RateLimitCoordinator::default(),
             });
             Ok(())
@@ -140,6 +145,17 @@ pub fn run() {
             update_chapter_title,
             start_analysis,
             start_rewrite,
+            estimate_rewrite_ab,
+            start_rewrite_ab,
+            retry_rewrite_ab,
+            terminate_rewrite_ab,
+            list_rewrite_ab_runs,
+            get_rewrite_ab_run,
+            get_rewrite_ab_chapter,
+            save_rewrite_ab_choices,
+            apply_rewrite_ab_choices,
+            restore_rewrite_ab_baseline,
+            delete_rewrite_ab_run,
             rewrite_single_chapter,
             terminate_single_chapter_rewrite,
             start_analyze_rewrite_batch,
@@ -5108,57 +5124,6 @@ fn seed_canon_assets(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> 
             "INSERT OR IGNORE INTO canon_assets (novel_id, kind, content, updated_at) VALUES (?1, ?2, '', ?3)",
             params![novel_id, kind, now],
         )?;
-    }
-    Ok(())
-}
-
-fn create_chapter_batches(
-    conn: &Connection,
-    data_dir: &Path,
-    novel_id: &str,
-    chapters: &[Chapter],
-    detected_chapters: bool,
-    chapter_batch_size: usize,
-) -> Result<(), String> {
-    let batch_size = if detected_chapters {
-        normalize_chapter_batch_size(chapter_batch_size)
-    } else {
-        1
-    };
-    let batch_dir = data_dir.join("chapter_batches").join(novel_id);
-    fs::create_dir_all(&batch_dir).map_err(to_string)?;
-    let now = Utc::now().to_rfc3339();
-
-    for (idx, chunk) in chapters.chunks(batch_size).enumerate() {
-        let first = chunk.first().ok_or_else(|| "批次内容为空。".to_string())?;
-        let last = chunk.last().ok_or_else(|| "批次内容为空。".to_string())?;
-        let batch_index = (idx + 1) as i64;
-        let label = if detected_chapters {
-            format!("{}-{}章", first.index, last.index)
-        } else {
-            format!("第{}批（约10万字）", batch_index)
-        };
-        let file_path = batch_dir.join(format!("batch-{batch_index:03}.txt"));
-        let body = chunk
-            .iter()
-            .map(|chapter| format!("{}\n\n{}", chapter.title, chapter.original_text))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        fs::write(&file_path, body).map_err(to_string)?;
-        conn.execute(
-            "INSERT INTO chapter_batches (id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                Uuid::new_v4().to_string(),
-                novel_id,
-                batch_index,
-                label,
-                first.index,
-                last.index,
-                file_path.to_string_lossy().to_string(),
-                now
-            ],
-        )
-        .map_err(to_string)?;
     }
     Ok(())
 }

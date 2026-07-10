@@ -9,7 +9,10 @@ type HighlightedTextProps = {
   diffRanges: DiffRange[];
   searchMatches: SearchMatch[];
   activeMatchId?: string;
+  highlightNamespace?: HighlightNamespace;
 };
+
+export type HighlightNamespace = "default" | "rewrite-ab-left" | "rewrite-ab-right";
 
 type Segment = {
   start: number;
@@ -19,17 +22,47 @@ type Segment = {
 };
 
 const HIGHLIGHT_NAMES = {
-  original: {
-    diff: "compare-original-removed",
-    search: "compare-original-search",
-    active: "compare-original-active"
+  default: {
+    original: {
+      diff: "compare-original-removed",
+      search: "compare-original-search",
+      active: "compare-original-active"
+    },
+    rewrite: {
+      diff: "compare-rewrite-added",
+      search: "compare-rewrite-search",
+      active: "compare-rewrite-active"
+    }
   },
-  rewrite: {
-    diff: "compare-rewrite-added",
-    search: "compare-rewrite-search",
-    active: "compare-rewrite-active"
+  "rewrite-ab-left": {
+    original: {
+      diff: "rewrite-ab-left-original-removed",
+      search: "rewrite-ab-left-original-search",
+      active: "rewrite-ab-left-original-active"
+    },
+    rewrite: {
+      diff: "rewrite-ab-left-rewrite-added",
+      search: "rewrite-ab-left-rewrite-search",
+      active: "rewrite-ab-left-rewrite-active"
+    }
+  },
+  "rewrite-ab-right": {
+    original: {
+      diff: "rewrite-ab-right-original-removed",
+      search: "rewrite-ab-right-original-search",
+      active: "rewrite-ab-right-original-active"
+    },
+    rewrite: {
+      diff: "rewrite-ab-right-rewrite-added",
+      search: "rewrite-ab-right-rewrite-search",
+      active: "rewrite-ab-right-rewrite-active"
+    }
   }
 } as const;
+
+export function getHighlightNames(namespace: HighlightNamespace, side: DiffSide) {
+  return HIGHLIGHT_NAMES[namespace][side];
+}
 
 export function supportsCssCustomHighlights() {
   return typeof CSS !== "undefined" && "highlights" in CSS && typeof Highlight !== "undefined";
@@ -90,7 +123,15 @@ function setHighlight(name: string, ranges: Range[], priority: number) {
 }
 
 export const HighlightedText = memo(function HighlightedText(props: HighlightedTextProps) {
-  const { text, side, containerRef, diffRanges, searchMatches, activeMatchId } = props;
+  const {
+    text,
+    side,
+    containerRef,
+    diffRanges,
+    searchMatches,
+    activeMatchId,
+    highlightNamespace = "default"
+  } = props;
   const sourceRef = useRef<HTMLSpanElement | null>(null);
   const fallbackActiveRef = useRef<HTMLElement | null>(null);
   const customHighlightsSupported = supportsCssCustomHighlights();
@@ -105,7 +146,7 @@ export const HighlightedText = memo(function HighlightedText(props: HighlightedT
       return () => window.cancelAnimationFrame(frame);
     }
 
-    const names = HIGHLIGHT_NAMES[side];
+    const names = getHighlightNames(highlightNamespace, side);
     const textNode = sourceRef.current?.firstChild;
     if (!(textNode instanceof Text)) return undefined;
     const sideDiffs = diffRanges.filter((range) => range.side === side);
@@ -136,7 +177,7 @@ export const HighlightedText = memo(function HighlightedText(props: HighlightedT
       CSS.highlights.delete(names.search);
       CSS.highlights.delete(names.active);
     };
-  }, [activeMatchId, containerRef, customHighlightsSupported, diffRanges, searchMatches, side, text]);
+  }, [activeMatchId, containerRef, customHighlightsSupported, diffRanges, highlightNamespace, searchMatches, side, text]);
 
   if (customHighlightsSupported) return <span ref={sourceRef}>{text}</span>;
 

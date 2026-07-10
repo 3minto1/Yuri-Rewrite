@@ -1,4 +1,8 @@
-use crate::domain::{AppSettings, AppState, ChapterBatch, NovelSettings};
+use crate::domain::{AppSettings, AppState, NovelSettings};
+use crate::services::chapter_batch_files::{
+    cleanup_stale_batch_files_for_novel, discard_prepared_generations,
+    prepare_chapter_batch_generation, replace_chapter_batch_rows,
+};
 use crate::task_control::{auto_runs_are_only_paused, auto_runs_have_non_paused};
 use crate::{
     load_chapters, load_novel_settings, normalize_additional_feminize_names,
@@ -6,11 +10,11 @@ use crate::{
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::{fs, path::Path};
 use tauri::State;
+#[cfg(test)]
 use uuid::Uuid;
 
 #[tauri::command]
@@ -102,6 +106,30 @@ pub(crate) fn save_app_settings(
         rewrite_parallelism,
         auto_continue_enabled: settings.auto_continue_enabled,
     };
+    let _batch_rebuild_tasks = if chapter_batch_size != current_batch_size {
+        let novel_ids = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM novels WHERE detected_chapters = 1 ORDER BY created_at")
+                .map_err(to_string)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(to_string)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(to_string)?;
+            rows
+        };
+        let mut permits = Vec::with_capacity(novel_ids.len());
+        for novel_id in novel_ids {
+            permits.push(state.active_tasks.acquire(
+                &novel_id,
+                std::iter::empty::<&str>(),
+                "重建章节批次",
+            )?);
+        }
+        Some(permits)
+    } else {
+        None
+    };
     if chapter_batch_size != current_batch_size {
         rebuild_detected_chapter_batches_and_save(&mut conn, &state.data_dir, &normalized)?;
     } else {
@@ -153,165 +181,55 @@ fn save_app_settings_values(conn: &Connection, settings: &AppSettings) -> Result
     save_core_prompt(conn, &settings.core_prompt)
 }
 
-struct PreparedNovelBatches {
-    prepared_dir: PathBuf,
-    final_dir: PathBuf,
-    backup_dir: PathBuf,
-    batches: Vec<ChapterBatch>,
-    had_existing_dir: bool,
-}
-
 fn rebuild_detected_chapter_batches_and_save(
     conn: &mut Connection,
     data_dir: &Path,
     settings: &AppSettings,
 ) -> Result<(), String> {
-    let rebuild_root = data_dir
-        .join("chapter-batches-rebuild")
-        .join(Uuid::new_v4().to_string());
-    let prepared_root = rebuild_root.join("prepared");
-    let backup_root = rebuild_root.join("backup");
-    fs::create_dir_all(&prepared_root).map_err(to_string)?;
-    fs::create_dir_all(&backup_root).map_err(to_string)?;
-
-    let result = (|| {
-        let novel_ids = {
-            let mut stmt = conn
-                .prepare("SELECT id FROM novels WHERE detected_chapters = 1 ORDER BY created_at")
-                .map_err(to_string)?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(to_string)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(to_string)?;
-            rows
-        };
-        let mut prepared = Vec::with_capacity(novel_ids.len());
-        for novel_id in novel_ids {
-            let chapters = load_chapters(conn, &novel_id)?;
-            let prepared_dir = prepared_root.join(&novel_id);
-            let final_dir = data_dir.join("chapter_batches").join(&novel_id);
-            let backup_dir = backup_root.join(&novel_id);
-            fs::create_dir_all(&prepared_dir).map_err(to_string)?;
-            let batches = write_chapter_batch_files(
-                &prepared_dir,
-                &final_dir,
-                &novel_id,
-                &chapters,
-                settings.chapter_batch_size,
-            )?;
-            prepared.push(PreparedNovelBatches {
-                prepared_dir,
-                final_dir: final_dir.clone(),
-                backup_dir,
-                batches,
-                had_existing_dir: final_dir.exists(),
-            });
-        }
-
-        fs::create_dir_all(data_dir.join("chapter_batches")).map_err(to_string)?;
-        for (swapped, item) in prepared.iter().enumerate() {
-            if item.had_existing_dir {
-                if let Err(error) = fs::rename(&item.final_dir, &item.backup_dir) {
-                    restore_swapped_batch_dirs(&prepared[..swapped]);
-                    return Err(to_string(error));
-                }
-            }
-            if let Err(error) = fs::rename(&item.prepared_dir, &item.final_dir) {
-                if item.had_existing_dir {
-                    let _ = fs::rename(&item.backup_dir, &item.final_dir);
-                }
-                restore_swapped_batch_dirs(&prepared[..swapped]);
-                return Err(to_string(error));
-            }
-        }
-
-        let database_result = (|| {
-            let tx = conn.transaction().map_err(to_string)?;
-            tx.execute(
-                "DELETE FROM chapter_batches WHERE novel_id IN (
-                    SELECT id FROM novels WHERE detected_chapters = 1
-                )",
-                [],
-            )
+    let novel_ids = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM novels WHERE detected_chapters = 1 ORDER BY created_at")
             .map_err(to_string)?;
-            for item in &prepared {
-                for batch in &item.batches {
-                    tx.execute(
-                        "INSERT INTO chapter_batches (id, novel_id, batch_index, label, start_chapter, end_chapter, file_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![
-                            batch.id,
-                            batch.novel_id,
-                            batch.batch_index,
-                            batch.label,
-                            batch.start_chapter,
-                            batch.end_chapter,
-                            batch.file_path,
-                            batch.created_at
-                        ],
-                    )
-                    .map_err(to_string)?;
-                }
-            }
-            save_app_settings_values(&tx, settings)?;
-            tx.commit().map_err(to_string)
-        })();
-        if let Err(error) = database_result {
-            restore_swapped_batch_dirs(&prepared);
-            return Err(error);
-        }
-        Ok(())
-    })();
-
-    let _ = fs::remove_dir_all(&rebuild_root);
-    result
-}
-
-fn restore_swapped_batch_dirs(items: &[PreparedNovelBatches]) {
-    for item in items.iter().rev() {
-        if item.final_dir.exists() {
-            let _ = fs::remove_dir_all(&item.final_dir);
-        }
-        if item.had_existing_dir && item.backup_dir.exists() {
-            let _ = fs::rename(&item.backup_dir, &item.final_dir);
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+        rows
+    };
+    let mut prepared = Vec::with_capacity(novel_ids.len());
+    for novel_id in novel_ids {
+        let chapters = load_chapters(conn, &novel_id)?;
+        match prepare_chapter_batch_generation(
+            data_dir,
+            &novel_id,
+            &chapters,
+            true,
+            settings.chapter_batch_size,
+        ) {
+            Ok(generation) => prepared.push(generation),
+            Err(error) => return Err(discard_prepared_generations(&mut prepared, error)),
         }
     }
-}
 
-fn write_chapter_batch_files(
-    output_dir: &Path,
-    final_dir: &Path,
-    novel_id: &str,
-    chapters: &[crate::domain::Chapter],
-    batch_size: usize,
-) -> Result<Vec<ChapterBatch>, String> {
-    let now = Utc::now().to_rfc3339();
-    chapters
-        .chunks(batch_size)
-        .enumerate()
-        .map(|(idx, chunk)| {
-            let first = chunk.first().ok_or_else(|| "批次内容为空。".to_string())?;
-            let last = chunk.last().ok_or_else(|| "批次内容为空。".to_string())?;
-            let batch_index = (idx + 1) as i64;
-            let file_name = format!("batch-{batch_index:03}.txt");
-            let body = chunk
-                .iter()
-                .map(|chapter| format!("{}\n\n{}", chapter.title, chapter.original_text))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            fs::write(output_dir.join(&file_name), body).map_err(to_string)?;
-            Ok(ChapterBatch {
-                id: Uuid::new_v4().to_string(),
-                novel_id: novel_id.to_string(),
-                batch_index,
-                label: format!("{}-{}章", first.index, last.index),
-                start_chapter: first.index,
-                end_chapter: last.index,
-                file_path: final_dir.join(file_name).to_string_lossy().to_string(),
-                created_at: now.clone(),
-            })
-        })
-        .collect()
+    let database_result = (|| {
+        let tx = conn.transaction().map_err(to_string)?;
+        for generation in &prepared {
+            replace_chapter_batch_rows(&tx, generation)?;
+        }
+        save_app_settings_values(&tx, settings)?;
+        tx.commit().map_err(to_string)
+    })();
+    if let Err(error) = database_result {
+        return Err(discard_prepared_generations(&mut prepared, error));
+    }
+    for generation in &mut prepared {
+        generation.retain_after_commit();
+    }
+    for generation in &prepared {
+        let _ = cleanup_stale_batch_files_for_novel(conn, data_dir, generation.novel_id());
+    }
+    Ok(())
 }
 
 pub(crate) fn load_core_prompt(conn: &Connection) -> Result<String, String> {
@@ -870,11 +788,15 @@ mod tests {
             )
             .expect("load chapter after rebuild");
         assert_eq!(after, before);
-        assert!(data_dir
-            .join("chapter_batches")
-            .join("novel-1")
-            .join("batch-002.txt")
-            .exists());
+        let second_batch_path: String = conn
+            .query_row(
+                "SELECT file_path FROM chapter_batches WHERE novel_id = 'novel-1' AND batch_index = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load second batch path");
+        assert!(Path::new(&second_batch_path).is_file());
+        assert!(second_batch_path.contains("generation-"));
         let _ = fs::remove_dir_all(data_dir);
     }
 
@@ -942,6 +864,17 @@ mod tests {
         )
         .expect("old file restored");
         assert_eq!(old_contents, "旧批次");
+        let generation_count = fs::read_dir(data_dir.join("chapter_batches").join("novel-1"))
+            .expect("list batch directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("generation-")
+            })
+            .count();
+        assert_eq!(generation_count, 0);
         let _ = fs::remove_dir_all(data_dir);
     }
 }

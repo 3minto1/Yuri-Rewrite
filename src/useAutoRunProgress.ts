@@ -4,8 +4,8 @@ import type { Job } from "./types";
 
 export type AutoRunProgress = Job;
 
-const supportedJobTypes = ["analysis", "rewrite", "auto", "auto_batch"];
-const terminalStatuses = ["completed", "failed", "terminated", "paused"];
+const supportedJobTypes = ["analysis", "rewrite", "rewrite_ab", "auto", "auto_batch"];
+const terminalStatuses = ["completed", "failed", "terminated", "paused", "ready", "partial"];
 const replacementStatuses = ["running", "paused"];
 
 export function useAutoRunProgress(
@@ -35,7 +35,13 @@ export function useAutoRunProgress(
         || !supportedJobTypes.includes(progress.job_type)
         || progress.novel_id !== novelId
       ) return;
-      if (terminalJobIdRef.current === progress.id) return;
+      if (terminalJobIdRef.current === progress.id) {
+        if (progress.status === "running") {
+          terminalJobIdRef.current = "";
+        } else {
+          return;
+        }
+      }
       if (
         activeJobIdRef.current
         && activeJobIdRef.current !== progress.id
