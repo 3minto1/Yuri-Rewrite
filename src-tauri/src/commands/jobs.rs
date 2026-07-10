@@ -12,6 +12,7 @@ struct AutoRunCheckpointRow {
     next_batch_index: i64,
     status: String,
     pause_reason: String,
+    pause_kind: String,
     phase: Option<String>,
     batch_index: Option<i64>,
     profile_ids: Vec<String>,
@@ -30,12 +31,12 @@ pub(crate) fn list_auto_run_recoveries(
     let conn = state.conn.lock().map_err(to_string)?;
     let mut stmt = conn
         .prepare(
-            "SELECT novel_id, start_batch_index, next_batch_index, status, pause_reason, phase, batch_index, profile_ids, job_id FROM auto_run_checkpoints ORDER BY updated_at DESC",
+            "SELECT novel_id, start_batch_index, next_batch_index, status, pause_reason, pause_kind, phase, batch_index, profile_ids, job_id FROM auto_run_checkpoints ORDER BY updated_at DESC",
         )
         .map_err(to_string)?;
     let rows = stmt
         .query_map([], |row| {
-            let profile_json: String = row.get(7)?;
+            let profile_json: String = row.get(8)?;
             let profile_ids = serde_json::from_str(&profile_json).unwrap_or_default();
             Ok(AutoRunCheckpointRow {
                 novel_id: row.get(0)?,
@@ -43,10 +44,11 @@ pub(crate) fn list_auto_run_recoveries(
                 next_batch_index: row.get(2)?,
                 status: row.get(3)?,
                 pause_reason: row.get(4)?,
-                phase: row.get(5)?,
-                batch_index: row.get(6)?,
+                pause_kind: row.get(5)?,
+                phase: row.get(6)?,
+                batch_index: row.get(7)?,
                 profile_ids,
-                job_id: row.get(8)?,
+                job_id: row.get(9)?,
             })
         })
         .map_err(to_string)?
@@ -77,6 +79,7 @@ pub(crate) fn list_auto_run_recoveries(
                 next_batch_index: row.next_batch_index,
                 status: row.status,
                 pause_reason: row.pause_reason,
+                pause_kind: row.pause_kind,
                 phase: row.phase,
                 batch_index: row.batch_index,
                 profile_ids: row.profile_ids,

@@ -135,6 +135,10 @@ function installDefaultCommands() {
       return { id: "job-auto-batch", novel_id: "novel-1", job_type: "auto_batch", status: "completed", current_chapter: 1, total_chapters: 1, message: "当前批次完成" };
     }
     if (command === "save_model_profile") return profile;
+    if (command === "delete_local_data") return { warnings: [] };
+    if (command === "set_auto_continue_enabled") {
+      return { ...settings, auto_continue_enabled: Boolean((args as { enabled?: boolean })?.enabled) };
+    }
     if (command === "save_selected_profile_id") return settings;
     if (command === "update_chapter_title") {
       const payload = args as { chapterId: string; title: string } | undefined;
@@ -182,6 +186,70 @@ describe("App feature behavior", () => {
       expect.stringContaining("模型名：test-model")
     );
     expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+  });
+
+  it("stores the automatic continue setting independently of running-task settings", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    act(() => {
+      mocks.progressCallback?.({
+        id: "job-running",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 0,
+        total_chapters: 2,
+        message: "运行中"
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+
+    const taskSection = screen.getByRole("heading", { name: "任务执行" }).closest("section") as HTMLElement;
+    const toggle = within(taskSection).getByRole("button", { name: "关闭" });
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("set_auto_continue_enabled", {
+      enabled: true
+    }));
+    expect(within(taskSection).getByRole("button", { name: "开启" })).toHaveAttribute("aria-pressed", "true");
+    expect(taskSection).toHaveTextContent("用户主动暂停和软件重启后恢复出的任务不会自动继续");
+  });
+
+  it("does not recommend deleting the AppData directory in quick start", async () => {
+    window.localStorage.removeItem("yuri-rewrite.quick-start-seen");
+    render(<App />);
+
+    const dialog = await screen.findByRole("dialog", { name: "快速上手" });
+    expect(dialog).not.toHaveTextContent("AppData");
+    expect(dialog).not.toHaveTextContent("删除本地全部数据");
+  });
+
+  it("deletes local work data only after the typed confirmation and clears runtime state", async () => {
+    window.localStorage.setItem("yuri-rewrite.qualityIgnored.v1.novel-1", "[\"issue\"]");
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    const deleteButton = await screen.findByRole("button", { name: "删除本地数据" });
+    fireEvent.click(deleteButton);
+
+    const dialog = screen.getByRole("dialog", { name: "永久删除本地数据" });
+    const permanentDelete = within(dialog).getByRole("button", { name: "永久删除本地数据" });
+    expect(permanentDelete).toBeDisabled();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "输入删除本地数据确认短语" }), {
+      target: { value: "删除全部本地数据" }
+    });
+    fireEvent.click(permanentDelete);
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("delete_local_data", {
+      confirmationPhrase: "删除全部本地数据"
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "永久删除本地数据" })).not.toBeInTheDocument());
+    expect(window.localStorage.getItem("yuri-rewrite.qualityIgnored.v1.novel-1")).toBeNull();
+    expect(window.localStorage.getItem("yuri-rewrite.quick-start-seen")).toBe("true");
+    expect(useAppStore.getState().novels).toEqual([]);
+    expect(useAppStore.getState().profiles).toEqual([]);
   });
 
   it("toggles and stores the local theme preference", async () => {
@@ -436,6 +504,7 @@ describe("App feature behavior", () => {
       next_batch_index: 1,
       status: "paused",
       pause_reason: "软件意外关闭。",
+      pause_kind: "interrupted",
       phase: "rewrite",
       batch_index: 1,
       profile_ids: ["profile-1"],
@@ -469,6 +538,94 @@ describe("App feature behavior", () => {
     expect(screen.getByText("未完成")).toBeInTheDocument();
   });
 
+  it("does not auto-resume startup recovery but continuously resumes runtime automatic pauses", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fallback = mocks.invoke.getMockImplementation();
+    const baseRecovery: AutoRunRecovery = {
+      novel_id: "novel-1",
+      start_batch_index: 0,
+      next_batch_index: 0,
+      status: "paused",
+      pause_reason: "软件意外关闭。",
+      pause_kind: "interrupted",
+      phase: "rewrite",
+      batch_index: 1,
+      profile_ids: ["profile-1"],
+      summary: {
+        phase: "rewrite",
+        batch_index: 1,
+        batch_id: "batch-1",
+        batch_label: "第一批",
+        total_chapters: 1,
+        staged_chapters: 0,
+        pending_chapters: 1,
+        pending_ranges: ["第1章"],
+        pending_ranges_truncated: false
+      },
+      job: {
+        id: "job-recovery",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "paused",
+        current_chapter: 0,
+        total_chapters: 2,
+        message: "启动恢复"
+      }
+    };
+    recoveryRows = [baseRecovery];
+    let starts = 0;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_app_settings") return { ...settings, auto_continue_enabled: true };
+      if (command === "list_auto_run_recoveries") return recoveryRows;
+      if (command === "start_analyze_rewrite_all") {
+        starts += 1;
+        const job: Job = {
+          id: `job-auto-${starts}`,
+          novel_id: "novel-1",
+          job_type: "auto",
+          status: "paused",
+          current_chapter: 0,
+          total_chapters: 2,
+          message: "网络连接异常，任务已暂停。"
+        };
+        recoveryRows = [{
+          ...baseRecovery,
+          pause_reason: "网络连接异常。",
+          pause_kind: "network",
+          job
+        }];
+        return job;
+      }
+      if (command === "pause_analyze_rewrite_all") {
+        const job = { ...recoveryRows[0].job!, status: "paused", message: "已由用户保持暂停。" };
+        recoveryRows = [{ ...recoveryRows[0], pause_kind: "user", pause_reason: job.message, job }];
+        return job;
+      }
+      return fallback?.(command, args);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "继续" })).toBeEnabled();
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(starts).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() => expect(starts).toBe(1));
+    expect(await screen.findByRole("button", { name: /保持暂停 \(10s\)/ })).toBeEnabled();
+
+    act(() => vi.advanceTimersByTime(10_000));
+    await waitFor(() => expect(starts).toBe(2));
+    const holdButton = await screen.findByRole("button", { name: /保持暂停/ });
+    fireEvent.click(holdButton);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pause_analyze_rewrite_all", {
+      novelId: "novel-1"
+    }));
+
+    act(() => vi.advanceTimersByTime(10 * 60_000));
+    expect(starts).toBe(2);
+    expect(screen.getByRole("button", { name: "继续" })).toBeEnabled();
+  });
+
   it("continues a paused current-batch auto task from the recovered batch", async () => {
     recoveryRows = [{
       novel_id: "novel-1",
@@ -476,6 +633,7 @@ describe("App feature behavior", () => {
       next_batch_index: 1,
       status: "paused",
       pause_reason: "模型输出格式无法解析。",
+      pause_kind: "model_format",
       phase: "analysis",
       batch_index: 2,
       profile_ids: ["profile-1"],
@@ -524,8 +682,8 @@ describe("App feature behavior", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "快速上手" });
     expect(within(dialog).getByText(/建议先处理一个批次/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/限流\/网络中断后也可调整设置再继续/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/com\.local\.yurirewrite/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/模型安全策略拦截后也可调整设置再继续/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/com\.local\.yurirewrite/)).not.toBeInTheDocument();
   });
 
   it("restores the last selected rewrite model from app settings", async () => {

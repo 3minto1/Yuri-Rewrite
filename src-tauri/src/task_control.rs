@@ -172,6 +172,7 @@ impl Drop for CancellableTaskPermit<'_> {
 #[derive(Debug, Clone)]
 pub(crate) struct AutoRunControl {
     pub(crate) status: String,
+    pub(crate) pause_kind: String,
     pub(crate) start_batch_index: i64,
     pub(crate) completed_batches: i64,
     pub(crate) job_id: Option<String>,
@@ -248,6 +249,10 @@ pub(crate) fn should_terminate_paused_run(current_status: &str, requested_status
     current_status == "paused" && requested_status == "terminate_requested"
 }
 
+pub(crate) fn should_hold_paused_run(current_status: &str, requested_status: &str) -> bool {
+    current_status == "paused" && requested_status == "pause_requested"
+}
+
 pub(crate) fn auto_runs_have_non_paused(
     runs: &Mutex<HashMap<String, AutoRunControl>>,
 ) -> Result<bool, String> {
@@ -310,6 +315,7 @@ mod tests {
             "novel-1".to_string(),
             AutoRunControl {
                 status: "running".to_string(),
+                pause_kind: String::new(),
                 start_batch_index: 0,
                 completed_batches: 0,
                 job_id: None,
@@ -345,6 +351,7 @@ mod tests {
             "novel-1".to_string(),
             AutoRunControl {
                 status: "paused".to_string(),
+                pause_kind: "user".to_string(),
                 start_batch_index: 0,
                 completed_batches: 1,
                 job_id: None,
@@ -376,6 +383,9 @@ mod tests {
             "terminate_requested"
         ));
         assert!(!should_terminate_paused_run("paused", "pause_requested"));
+        assert!(should_hold_paused_run("paused", "pause_requested"));
+        assert!(!should_hold_paused_run("running", "pause_requested"));
+        assert!(!should_hold_paused_run("paused", "terminate_requested"));
     }
 
     #[test]
@@ -384,6 +394,7 @@ mod tests {
             "novel-1".to_string(),
             AutoRunControl {
                 status: "paused".to_string(),
+                pause_kind: "user".to_string(),
                 start_batch_index: 0,
                 completed_batches: 1,
                 job_id: None,
@@ -398,6 +409,7 @@ mod tests {
             "novel-2".to_string(),
             AutoRunControl {
                 status: "running".to_string(),
+                pause_kind: String::new(),
                 start_batch_index: 0,
                 completed_batches: 0,
                 job_id: None,

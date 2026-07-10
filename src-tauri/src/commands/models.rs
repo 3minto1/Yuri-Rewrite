@@ -1,5 +1,8 @@
 use crate::ai::{generate_text, normalize_thinking_mode};
-use crate::credentials::{delete_api_key_if_present, read_api_key, write_api_key, ApiKeyStorage};
+use crate::credentials::{
+    combine_rollback_error, delete_api_key_if_present, restore_api_key_snapshot, snapshot_api_key,
+    write_api_key, ApiKeySnapshot, ApiKeyStorage,
+};
 use crate::domain::{AppState, ModelDiagnosis, ModelProfile, ModelProfileInput, ModelTestResult};
 use crate::{
     api_key_storage, api_key_storage_from_values, append_ai_log, append_diagnosis_log,
@@ -37,12 +40,44 @@ pub(crate) fn save_model_profile(
         .filter(|value| !value.is_empty() && *value != "********")
         .map(str::to_string);
     let mut db_api_key_fallback = None;
+    let mut system_credential_snapshot = None;
     if let Some(value) = &api_key {
-        if write_api_key(&id, value).is_err() {
-            db_api_key_fallback = Some(value.clone());
+        match snapshot_api_key(&id) {
+            Ok(snapshot) => match write_api_key(&id, value) {
+                Ok(()) => system_credential_snapshot = Some(snapshot),
+                Err(write_error) => {
+                    let restore_result = restore_api_key_snapshot(&id, &snapshot);
+                    if matches!(snapshot, ApiKeySnapshot::Present(_)) || restore_result.is_err() {
+                        return Err(combine_rollback_error(
+                            format!("系统凭据写入失败，模型配置未保存：{write_error}"),
+                            restore_result,
+                            "恢复原系统凭据",
+                        ));
+                    }
+                    db_api_key_fallback = Some(value.clone());
+                }
+            },
+            Err(_) => {
+                // Credential Manager may be unavailable. Keep the documented database fallback
+                // without mutating an unknown system-credential state.
+                db_api_key_fallback = Some(value.clone());
+            }
         }
     }
-    let conn = state.conn.lock().map_err(to_string)?;
+    let conn = match state.conn.lock() {
+        Ok(conn) => conn,
+        Err(error) => {
+            let database_error = to_string(error);
+            return Err(match system_credential_snapshot.as_ref() {
+                Some(snapshot) => combine_rollback_error(
+                    database_error,
+                    restore_api_key_snapshot(&id, snapshot),
+                    "恢复原系统凭据",
+                ),
+                None => database_error,
+            });
+        }
+    };
     let profile = ModelProfile {
         id: id.clone(),
         name: input.name,
@@ -58,7 +93,7 @@ pub(crate) fn save_model_profile(
         updated_at,
     };
 
-    conn.execute(
+    let save_result = conn.execute(
         r#"
         INSERT INTO model_profiles (
             id, name, provider, base_url, model, temperature, top_p, thinking_mode,
@@ -95,8 +130,18 @@ pub(crate) fn save_model_profile(
             db_api_key_fallback,
             api_key
         ],
-    )
-    .map_err(to_string)?;
+    );
+    if let Err(error) = save_result {
+        let database_error = to_string(error);
+        return Err(match system_credential_snapshot.as_ref() {
+            Some(snapshot) => combine_rollback_error(
+                database_error,
+                restore_api_key_snapshot(&id, snapshot),
+                "恢复原系统凭据",
+            ),
+            None => database_error,
+        });
+    }
     let storage = api_key_storage(&conn, &id);
     let mut profile = profile;
     profile.has_api_key = storage != ApiKeyStorage::None;
@@ -118,17 +163,28 @@ pub(crate) fn delete_model_profile(
     if state.active_tasks.profile_is_active(&profile_id)? || paused_auto_run_uses_profile {
         return Err("当前模型正在被任务使用，请等待任务结束或先终止任务。".to_string());
     }
-    let existing_key = read_api_key(&profile_id).ok();
+    let credential_snapshot = snapshot_api_key(&profile_id)
+        .map_err(|error| format!("读取系统凭据失败，模型配置未删除：{error}"))?;
     delete_api_key_if_present(&profile_id)
         .map_err(|error| format!("删除系统凭据失败，模型配置未删除：{}", to_string(error)))?;
-    let mut conn = state.conn.lock().map_err(to_string)?;
+    let mut conn = match state.conn.lock() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return Err(combine_rollback_error(
+                to_string(error),
+                restore_api_key_snapshot(&profile_id, &credential_snapshot),
+                "恢复系统凭据",
+            ));
+        }
+    };
     let tx = match conn.transaction() {
         Ok(tx) => tx,
         Err(error) => {
-            if let Some(api_key) = existing_key {
-                let _ = write_api_key(&profile_id, &api_key);
-            }
-            return Err(to_string(error));
+            return Err(combine_rollback_error(
+                to_string(error),
+                restore_api_key_snapshot(&profile_id, &credential_snapshot),
+                "恢复系统凭据",
+            ));
         }
     };
     let delete_result = (|| -> Result<(), String> {
@@ -153,10 +209,11 @@ pub(crate) fn delete_model_profile(
         Ok(())
     })();
     if let Err(error) = delete_result {
-        if let Some(api_key) = existing_key {
-            let _ = write_api_key(&profile_id, &api_key);
-        }
-        return Err(error);
+        return Err(combine_rollback_error(
+            error,
+            restore_api_key_snapshot(&profile_id, &credential_snapshot),
+            "恢复系统凭据",
+        ));
     }
     Ok(())
 }

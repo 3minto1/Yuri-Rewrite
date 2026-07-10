@@ -14,6 +14,10 @@ describe("browser test mode", () => {
     }) as AppSettings;
     expect(savedSettings.review_enabled).toBe(false);
     expect(savedSettings.rewrite_parallelism).toBe(6);
+    const autoContinueSettings = await invokeBrowserMock("set_auto_continue_enabled", {
+      enabled: true
+    }) as AppSettings;
+    expect(autoContinueSettings.auto_continue_enabled).toBe(true);
 
     const renamed = await invokeBrowserMock("update_chapter_title", {
       chapterId: detail.chapters[0].id,

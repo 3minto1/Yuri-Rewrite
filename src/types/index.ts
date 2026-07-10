@@ -161,12 +161,24 @@ export type AutoRunRecovery = {
   next_batch_index: number;
   status: string;
   pause_reason: string;
+  pause_kind: AutoRunPauseKind;
   phase?: string | null;
   batch_index?: number | null;
   profile_ids: string[];
   job?: Job | null;
   summary?: AutoRunRecoverySummary | null;
 };
+
+export type AutoRunPauseKind =
+  | "user"
+  | "rate_limit"
+  | "network"
+  | "temporary_gateway"
+  | "model_format"
+  | "content_filter"
+  | "interrupted"
+  | "unknown"
+  | "";
 
 export type AutoRunRecoverySummary = {
   phase: string;
@@ -208,6 +220,7 @@ export type AppSettings = {
   selected_profile_id?: string | null;
   chapter_batch_size?: 10 | 30 | 50 | 100;
   rewrite_parallelism?: 1 | 3 | 6 | 10 | 25 | 50;
+  auto_continue_enabled?: boolean;
 };
 
 export type TokenUsageDay = {
@@ -302,6 +315,10 @@ export type ModelDiagnosis = {
     status: DiagnosisStatus;
     message: string;
   }>;
+};
+
+export type LocalDataDeletionResult = {
+  warnings: string[];
 };
 
 export type NovelSettingsDraft = {

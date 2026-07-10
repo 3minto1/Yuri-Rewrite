@@ -1,5 +1,7 @@
 use crate::domain::{AppState, Chapter, Job};
-use crate::services::progress::{begin_job_progress, clear_job_progress};
+use crate::services::progress::{
+    begin_job_progress, clear_job_progress, finalize_standalone_job_failure,
+};
 use crate::services::rewrite::{rewrite_and_save, RewriteRunContext};
 use crate::{
     append_ai_log, build_relevant_canon_text, build_single_chapter_rewrite_from_draft_prompt,
@@ -7,11 +9,10 @@ use crate::{
     format_model_log_content, generate_text, load_canon_assets, load_chapter_batches,
     load_chapters, load_chapters_for_batch, load_core_prompt, load_job, load_model_profile,
     load_review_enabled, load_review_profile_for_run, load_review_profile_id,
-    load_rewrite_parallelism, mark_chapters_rewrite_failed, mark_empty_source_chapters_skipped,
-    parse_rewrite_model_output, read_stored_api_key, require_novel_settings,
-    restore_orphaned_rewrite_status_for_chapter, rewrite_batch_with_parallelism,
-    set_chapter_status, to_string, truncate_text, truncate_text_tail, update_job,
-    SYSTEM_REWRITE_EXPERT,
+    load_rewrite_parallelism, mark_empty_source_chapters_skipped, parse_rewrite_model_output,
+    read_stored_api_key, require_novel_settings, restore_orphaned_rewrite_status_for_chapter,
+    rewrite_batch_with_parallelism, set_chapter_status, to_string, truncate_text,
+    truncate_text_tail, update_job, SYSTEM_REWRITE_EXPERT,
 };
 use chrono::Utc;
 use rusqlite::params;
@@ -78,77 +79,79 @@ pub(crate) async fn start_rewrite(
         .active_tasks
         .acquire(&novel_id, active_profile_ids, "改写")?;
     let total = all_chapters.len() as i64;
-    let mut job = create_job(&state, &novel_id, "rewrite", total)?;
-    mark_empty_source_chapters_skipped(&state, &all_chapters)?;
-    if chapters.is_empty() {
+    let job = create_job(&state, &novel_id, "rewrite", total)?;
+    let operation = async {
+        mark_empty_source_chapters_skipped(&state, &all_chapters)?;
+        if chapters.is_empty() {
+            update_job(
+                &state,
+                &job.id,
+                "completed",
+                total,
+                "当前批次仅包含空正文伪章节，已清除旧占位改写并跳过模型调用",
+            )?;
+            return load_job(&state, &job.id);
+        }
+        ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
+        let canon_assets = {
+            let conn = state.conn.lock().map_err(to_string)?;
+            load_canon_assets(&conn, &novel_id)?
+        };
+        let canon_text = build_relevant_canon_text(&canon_assets, &chapters, &settings);
+        let batch_label = format_batch_label(&chapters);
+
+        for chapter in &chapters {
+            set_chapter_status(&state, &chapter.id, "rewrite_status", "running")?;
+        }
+
+        update_job(
+            &state,
+            &job.id,
+            "running",
+            0,
+            &format!("正在批次改写 {}", batch_label),
+        )?;
+        begin_job_progress(&state, &novel_id, &job.id, "rewrite", &batch_label)?;
+        rewrite_and_save(
+            &state,
+            RewriteRunContext {
+                novel_id: &novel_id,
+                profile: &profile,
+                api_key: &api_key,
+                chapters: &chapters,
+                canon_text: &canon_text,
+                settings: &settings,
+                core_prompt: &core_prompt,
+                review_enabled,
+                review_profile: review_profile.as_ref(),
+                review_api_key: review_api_key.as_deref(),
+                parallelism: rewrite_parallelism,
+                checkpoint_batch_index: None,
+            },
+        )
+        .await?;
+
         update_job(
             &state,
             &job.id,
             "completed",
             total,
-            "当前批次仅包含空正文伪章节，已清除旧占位改写并跳过模型调用",
+            if review_enabled {
+                "改写与复检完成"
+            } else {
+                "改写完成"
+            },
         )?;
-        return load_job(&state, &job.id);
-    }
-    ensure_name_mapping_asset(&state, &novel_id, &profile, &api_key, &settings).await?;
-    let canon_assets = {
-        let conn = state.conn.lock().map_err(to_string)?;
-        load_canon_assets(&conn, &novel_id)?
-    };
-    let canon_text = build_relevant_canon_text(&canon_assets, &chapters, &settings);
-    let batch_label = format_batch_label(&chapters);
-
-    for chapter in &chapters {
-        set_chapter_status(&state, &chapter.id, "rewrite_status", "running")?;
-    }
-
-    update_job(
-        &state,
-        &job.id,
-        "running",
-        0,
-        &format!("正在批次改写 {}", batch_label),
-    )?;
-    begin_job_progress(&state, &novel_id, &job.id, "rewrite", &batch_label)?;
-    if let Err(error) = rewrite_and_save(
-        &state,
-        RewriteRunContext {
-            novel_id: &novel_id,
-            profile: &profile,
-            api_key: &api_key,
-            chapters: &chapters,
-            canon_text: &canon_text,
-            settings: &settings,
-            core_prompt: &core_prompt,
-            review_enabled,
-            review_profile: review_profile.as_ref(),
-            review_api_key: review_api_key.as_deref(),
-            parallelism: rewrite_parallelism,
-            checkpoint_batch_index: None,
-        },
-    )
-    .await
-    {
-        mark_chapters_rewrite_failed(&state, &chapters)?;
-        update_job(&state, &job.id, "failed", 0, &error)?;
         clear_job_progress(&state, &novel_id, &job.id)?;
-        job = load_job(&state, &job.id)?;
-        return Ok(job);
+        load_job(&state, &job.id)
     }
-
-    update_job(
-        &state,
-        &job.id,
-        "completed",
-        total,
-        if review_enabled {
-            "改写与复检完成"
-        } else {
-            "改写完成"
-        },
-    )?;
-    clear_job_progress(&state, &novel_id, &job.id)?;
-    load_job(&state, &job.id)
+    .await;
+    match operation {
+        Ok(completed_job) => Ok(completed_job),
+        Err(error) => {
+            finalize_standalone_job_failure(&state, &novel_id, &job, &chapters, "rewrite", &error)
+        }
+    }
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-import { ArrowLeft, FolderOpen, HelpCircle } from "lucide-react";
+import { ArrowLeft, FolderOpen, HelpCircle, Trash2 } from "lucide-react";
 import { modelProfileDisplayName, modelProfileTitle } from "../../config/modelProfileDisplay";
 import type { AppSettings, ModelProfile } from "../../types";
 
@@ -7,6 +7,7 @@ type AppSettingsViewProps = {
   profiles: ModelProfile[];
   busy: string;
   processing: boolean;
+  autoContinueSettingBusy: boolean;
   allowPausedTaskAdjustments?: boolean;
   onBack: () => void;
   onChooseExportDir: () => void;
@@ -16,10 +17,12 @@ type AppSettingsViewProps = {
   onAnalysisProfileChange: (profileId: string) => void;
   onBatchSizeChange: (value: 10 | 30 | 50 | 100) => void;
   onParallelismChange: (value: 1 | 3 | 6 | 10 | 25 | 50) => void;
+  onToggleAutoContinue: () => void;
+  onDeleteLocalData: () => void;
 };
 
 export function AppSettingsView(props: AppSettingsViewProps) {
-  const { settings, profiles, busy, processing, allowPausedTaskAdjustments = false, onBack, onChooseExportDir, onClearExportDir, onToggleReview, onReviewProfileChange, onAnalysisProfileChange, onBatchSizeChange, onParallelismChange } = props;
+  const { settings, profiles, busy, processing, autoContinueSettingBusy, allowPausedTaskAdjustments = false, onBack, onChooseExportDir, onClearExportDir, onToggleReview, onReviewProfileChange, onAnalysisProfileChange, onBatchSizeChange, onParallelismChange, onToggleAutoContinue, onDeleteLocalData } = props;
   const adjustmentDisabled = processing && !allowPausedTaskAdjustments;
   const batchSize = settings.chapter_batch_size ?? 30;
   const maxParallelism = batchSize === 100 ? 50 : batchSize === 50 ? 25 : 10;
@@ -32,6 +35,24 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <input readOnly value={settings.export_dir || "默认应用数据目录"} />
           <button onClick={onChooseExportDir} disabled={busy === "choose-export-dir" || processing}><FolderOpen size={16} />选择目录</button>
           <button onClick={onClearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir" || processing}>恢复默认</button>
+        </div>
+      </section>
+      <section className="settings-section">
+        <div className="settings-section-heading">
+          <h3>任务执行</h3>
+          <span className="setting-help" tabIndex={0} aria-label="自动继续说明"><HelpCircle size={16} /><span className="setting-help-tooltip" role="tooltip">开启后，本次软件运行期间的一键任务如果因限流、网络、临时网关、模型格式或安全策略拦截而自动暂停，会在等待后继续处理未完成分片。安全拦截和格式错误也会持续重试并可能重复消耗 Token。用户主动暂停和软件重启后恢复出的任务不会自动继续。</span></span>
+        </div>
+        <div className="setting-toggle-row">
+          <button
+            className={settings.auto_continue_enabled ? "setting-switch active" : "setting-switch"}
+            type="button"
+            aria-pressed={Boolean(settings.auto_continue_enabled)}
+            onClick={onToggleAutoContinue}
+            disabled={autoContinueSettingBusy}
+          >
+            {settings.auto_continue_enabled ? "开启" : "关闭"}
+          </button>
+          <span>自动暂停后按原因逐步延长等待时间并继续；可随时关闭，或在倒计时期间选择保持暂停。</span>
         </div>
       </section>
       <section className="settings-section">
@@ -97,6 +118,22 @@ export function AppSettingsView(props: AppSettingsViewProps) {
             })}
           </div>
           <span>默认 10。并发 25 需要每批至少 50 章；并发 50 需要每批 100 章。</span>
+        </div>
+      </section>
+      <section className="settings-section settings-danger-zone">
+        <div className="settings-section-heading">
+          <h3>本地数据</h3>
+        </div>
+        <div className="setting-toggle-row">
+          <button
+            className="dialog-danger"
+            type="button"
+            onClick={onDeleteLocalData}
+            disabled={Boolean(busy) || processing}
+          >
+            <Trash2 size={16} />删除本地数据
+          </button>
+          <span>{processing ? "请先终止运行中或暂停的一键任务。" : "永久清空应用工作数据和保存的 API Key；原始 TXT 与导出 TXT 会保留。"}</span>
         </div>
       </section>
     </div>

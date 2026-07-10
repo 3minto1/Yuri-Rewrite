@@ -578,7 +578,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [searchScope, setSearchScope] = useState<SearchScope>("both");
-  const [activeMatchIndex, setActiveMatchIndex] = useState<number | null>(null);
+  const [activeMatchId, setActiveMatchId] = useState<string | null>(null);
   const [wrapped, setWrapped] = useState(false);
   const [diffEnabled, setDiffEnabled] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -603,12 +603,17 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const qualityScanVersionRef = useRef(0);
   const deferredQuery = useDeferredValue(query);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchDefinitionRef = useRef("");
   const navigationTargetRef = useRef<string | null>(null);
   const previousChapterRef = useRef(selectedChapterId);
   const globalMatches = useMemo(
     () => buildSearchMatches(chapters, deferredQuery, caseSensitive, searchScope),
     [caseSensitive, chapters, deferredQuery, searchScope]
   );
+  const resolvedActiveMatchIndex = activeMatchId === null
+    ? -1
+    : globalMatches.findIndex((match) => match.id === activeMatchId);
+  const activeMatchIndex = resolvedActiveMatchIndex >= 0 ? resolvedActiveMatchIndex : null;
   const activeMatch = activeMatchIndex === null ? undefined : globalMatches[activeMatchIndex];
   const originalText = selectedChapter?.original_text ?? "";
   const rewriteText = selectedChapter?.rewrite_text ?? "";
@@ -774,10 +779,15 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     action?.();
   }
 
+  function cancelPendingNavigation() {
+    pendingNavigationRef.current = null;
+    setPendingNavigation(false);
+  }
+
   function closeSearch() {
     setSearchOpen(false);
     setQuery("");
-    setActiveMatchIndex(null);
+    setActiveMatchId(null);
     setWrapped(false);
   }
 
@@ -790,7 +800,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     setWrapped(false);
     const nextMatches = buildSearchMatches(chapters, issue.query, false, "rewrite");
     const nextIndex = nextMatches.findIndex((match) => match.chapter_id === issue.chapterId);
-    setActiveMatchIndex(nextIndex >= 0 ? nextIndex : null);
+    setActiveMatchId(nextIndex >= 0 ? nextMatches[nextIndex].id : null);
   }
 
   function focusQualityIssue(issue: QualityIssue) {
@@ -860,10 +870,10 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   }
 
   function selectSearchMatch(index: number | null, didWrap = false) {
-    setActiveMatchIndex(index);
+    const match = index === null ? undefined : globalMatches[index];
+    setActiveMatchId(match?.id ?? null);
     setWrapped(didWrap);
-    if (index === null) return;
-    const match = globalMatches[index];
+    if (!match) return;
     if (match.chapter_id !== selectedChapterId) {
       runOrConfirmNavigation(() => {
         navigationTargetRef.current = match.chapter_id;
@@ -874,7 +884,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
 
   function navigateSearch(direction: 1 | -1) {
     if (globalMatches.length === 0) {
-      setActiveMatchIndex(null);
+      setActiveMatchId(null);
       return;
     }
     if (activeMatchIndex === null) {
@@ -888,7 +898,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   function handleManualChapterSelect(chapterId: string) {
     if (chapterId === selectedChapterId) return;
     navigationTargetRef.current = null;
-    setActiveMatchIndex(null);
+    setActiveMatchId(null);
     setWrapped(false);
     runOrConfirmNavigation(() => onSelectChapter(chapterId));
   }
@@ -918,20 +928,28 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   }, [searchOpen]);
 
   useEffect(() => {
+    const searchDefinition = `${caseSensitive ? "case" : "nocase"}|${searchScope}|${deferredQuery}`;
     if (!deferredQuery) {
-      setActiveMatchIndex(null);
+      searchDefinitionRef.current = searchDefinition;
+      setActiveMatchId(null);
       setWrapped(false);
       return;
     }
-    const index = initialSearchIndex(globalMatches, selectedChapterId, 1);
-    selectSearchMatch(index);
-  }, [caseSensitive, deferredQuery, searchScope]);
+    if (searchDefinitionRef.current !== searchDefinition) {
+      searchDefinitionRef.current = searchDefinition;
+      const index = initialSearchIndex(globalMatches, selectedChapterId, 1);
+      selectSearchMatch(index);
+    } else if (activeMatchId !== null && !globalMatches.some((match) => match.id === activeMatchId)) {
+      setActiveMatchId(null);
+      setWrapped(false);
+    }
+  }, [activeMatchId, caseSensitive, deferredQuery, globalMatches, searchScope]);
 
   useEffect(() => {
     if (previousChapterRef.current === selectedChapterId) return;
     if (navigationTargetRef.current === selectedChapterId) navigationTargetRef.current = null;
     else {
-      setActiveMatchIndex(null);
+      setActiveMatchId(null);
       setWrapped(false);
     }
     previousChapterRef.current = selectedChapterId;
@@ -1200,7 +1218,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
         </div>
       ) : <p className="muted">请选择章节。</p>}
       {pendingNavigation && (
-        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="compare-unsaved-title">
+        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="compare-unsaved-title" onRequestClose={editBusy ? undefined : cancelPendingNavigation}>
           <header className="dialog-titlebar">
             <h2 id="compare-unsaved-title">改写稿尚未保存</h2>
           </header>
@@ -1208,7 +1226,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
             <p>当前章节有未保存的人工修改。保存后继续，还是放弃修改？</p>
           </div>
           <footer className="dialog-actions">
-            <button type="button" onClick={() => { pendingNavigationRef.current = null; setPendingNavigation(false); }} disabled={editBusy}>取消</button>
+            <button type="button" onClick={cancelPendingNavigation} disabled={editBusy}>取消</button>
             <button type="button" onClick={finishPendingNavigation} disabled={editBusy}>放弃修改</button>
             <button
               className="dialog-primary"
@@ -1222,7 +1240,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
         </Modal>
       )}
       {rewriteDialogOpen && selectedChapter && (
-        <Modal className="settings-dialog rewrite-chapter-dialog" labelledBy="rewrite-chapter-title">
+        <Modal className="settings-dialog rewrite-chapter-dialog" labelledBy="rewrite-chapter-title" onRequestClose={rewriteBusy ? undefined : () => setRewriteDialogOpen(false)}>
           <header className="dialog-titlebar">
             <h2 id="rewrite-chapter-title">
               {rewriteSourceMode === "original" ? "根据原文重新改写" : "基于改写稿继续修改"}《{selectedChapter.title}》

@@ -55,6 +55,8 @@ let chapters: Chapter[] = chapterTitles.map((title, offset) => {
   };
 });
 
+let localDataDeleted = false;
+
 let settings: AppSettings = {
   export_dir: null,
   core_prompt: "保持人物关系、世界观和剧情连续性。",
@@ -63,7 +65,8 @@ let settings: AppSettings = {
   analysis_profile_id: "browser-profile-deepseek",
   selected_profile_id: "browser-profile-deepseek",
   chapter_batch_size: 10,
-  rewrite_parallelism: 10
+  rewrite_parallelism: 10,
+  auto_continue_enabled: false
 };
 
 let profiles: ModelProfile[] = [
@@ -293,8 +296,9 @@ export async function invokeBrowserMock(
 ): Promise<unknown> {
   switch (command) {
     case "list_novels":
-      return [{ ...novel }];
+      return localDataDeleted ? [] : [{ ...novel }];
     case "get_novel_detail":
+      if (localDataDeleted) throw new Error("浏览器测试数据已删除。");
       return detail();
     case "get_chapter_rule":
       return chapterRule ? { ...chapterRule, rule: { ...chapterRule.rule } } : null;
@@ -317,6 +321,9 @@ export async function invokeBrowserMock(
     case "save_app_settings":
       settings = { ...settings, ...(args?.settings as AppSettings) };
       return { ...settings };
+    case "set_auto_continue_enabled":
+      settings = { ...settings, auto_continue_enabled: Boolean(args?.enabled) };
+      return { ...settings };
     case "save_selected_profile_id":
       settings = { ...settings, selected_profile_id: (args?.profileId as string | null) ?? null };
       return { ...settings };
@@ -337,6 +344,28 @@ export async function invokeBrowserMock(
     case "delete_model_profile":
       profiles = profiles.filter((profile) => profile.id !== args?.profileId);
       return undefined;
+    case "delete_local_data":
+      if (String(args?.confirmationPhrase ?? "").trim() !== "删除全部本地数据") {
+        throw new Error("确认短语不正确，本地数据未删除。");
+      }
+      localDataDeleted = true;
+      chapters = [];
+      profiles = [];
+      logs = [];
+      settings = {
+        export_dir: null,
+        core_prompt: "",
+        review_enabled: true,
+        review_profile_id: null,
+        analysis_profile_id: null,
+        selected_profile_id: null,
+        chapter_batch_size: 30,
+        rewrite_parallelism: 10,
+        auto_continue_enabled: false
+      };
+      canonAssets = [];
+      chapterRule = null;
+      return { warnings: [] };
     case "diagnose_model_profile":
       return {
         status: "ok",
@@ -443,6 +472,7 @@ export async function invokeBrowserMock(
     case "export_novel":
       return { path: "C:\\BrowserMock\\浏览器测试小说-改写稿.txt" };
     case "import_txt":
+      localDataDeleted = false;
       novel.status = "pending_split";
       chapters = [];
       canonAssets = [];

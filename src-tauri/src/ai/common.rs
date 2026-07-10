@@ -495,6 +495,15 @@ pub(crate) fn is_temporary_gateway_error(message: &str) -> bool {
     })
 }
 
+pub(crate) fn is_content_filter_error(message: &str) -> bool {
+    let trimmed = message.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    trimmed.contains("模型内容安全策略拦截")
+        || trimmed.contains("模型安全策略拦截")
+        || lower.contains("content_filter")
+        || lower.contains("content filter")
+}
+
 pub(crate) fn is_recoverable_model_format_error(message: &str) -> bool {
     let trimmed = message.trim();
     if trimmed.is_empty()

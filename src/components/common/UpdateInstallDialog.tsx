@@ -19,7 +19,7 @@ export function UpdateInstallDialog({
 }: UpdateInstallDialogProps) {
   const blocked = busy || processingTaskActive;
   return (
-    <Modal className="settings-dialog update-install-dialog" labelledBy="update-install-dialog-title">
+    <Modal className="settings-dialog update-install-dialog" labelledBy="update-install-dialog-title" onRequestClose={busy ? undefined : onCancel}>
       <header className="dialog-titlebar">
         <h2 id="update-install-dialog-title">安装 Yuri Rewrite v{update.latest_version}</h2>
         <button

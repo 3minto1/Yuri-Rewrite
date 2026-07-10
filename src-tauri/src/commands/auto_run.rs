@@ -6,15 +6,16 @@ use crate::{
     emit_job_progress, finish_stopped_auto_run, load_analysis_profile_for_run,
     load_analysis_profile_id, load_chapter_batches, load_chapters_for_batch, load_job,
     load_model_profile, load_review_enabled, load_review_profile_for_run, load_review_profile_id,
-    pause_auto_run_after_model_format_error, pause_auto_run_after_network_error,
-    pause_auto_run_after_rate_limit, pause_auto_run_after_temporary_gateway_error,
-    prepare_auto_run, read_stored_api_key, register_auto_run_job, request_auto_run_stop,
-    requested_auto_run_stop, require_novel_settings, rewrite_chapters_for_auto, row_to_novel,
-    set_auto_run_completed, to_string, update_auto_run_checkpoint_phase, update_job,
-    AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
+    pause_auto_run_after_content_filter, pause_auto_run_after_model_format_error,
+    pause_auto_run_after_network_error, pause_auto_run_after_rate_limit,
+    pause_auto_run_after_temporary_gateway_error, prepare_auto_run, read_stored_api_key,
+    register_auto_run_job, request_auto_run_stop, requested_auto_run_stop, require_novel_settings,
+    rewrite_chapters_for_auto, row_to_novel, set_auto_run_completed, to_string,
+    update_auto_run_checkpoint_phase, update_job, AUTO_RUN_PAUSED, AUTO_RUN_TERMINATED,
 };
 use crate::{
-    is_recoverable_model_format_error, is_recoverable_network_error, is_temporary_gateway_error,
+    is_content_filter_error, is_recoverable_model_format_error, is_recoverable_network_error,
+    is_temporary_gateway_error,
 };
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashSet;
@@ -22,6 +23,7 @@ use tauri::{AppHandle, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecoverableAutoRunFailure {
+    ContentFilter,
     RateLimit,
     TemporaryGateway,
     Network,
@@ -76,6 +78,14 @@ fn pause_auto_run_after_recoverable_failure(
     error: &str,
 ) -> Result<Job, String> {
     match kind {
+        RecoverableAutoRunFailure::ContentFilter => pause_auto_run_after_content_filter(
+            state,
+            app,
+            job,
+            completed_batches,
+            start_batch_index,
+            error,
+        ),
         RecoverableAutoRunFailure::RateLimit => pause_auto_run_after_rate_limit(
             state,
             app,
@@ -298,7 +308,9 @@ pub(crate) async fn start_analyze_rewrite_batch(
 }
 
 fn classify_recoverable_auto_run_failure(error: &str) -> Option<RecoverableAutoRunFailure> {
-    if is_rate_limit_retry_exhausted(error) {
+    if is_content_filter_error(error) {
+        Some(RecoverableAutoRunFailure::ContentFilter)
+    } else if is_rate_limit_retry_exhausted(error) {
         Some(RecoverableAutoRunFailure::RateLimit)
     } else if is_temporary_gateway_error(error) {
         Some(RecoverableAutoRunFailure::TemporaryGateway)
@@ -471,44 +483,15 @@ pub(crate) async fn start_analyze_rewrite_all(
                 );
             }
             if let Some(kind) = classify_recoverable_auto_run_failure(&error) {
-                return match kind {
-                    RecoverableAutoRunFailure::RateLimit => pause_auto_run_after_rate_limit(
-                        &state,
-                        &app,
-                        job,
-                        completed,
-                        start_batch_index,
-                        &error,
-                    ),
-                    RecoverableAutoRunFailure::TemporaryGateway => {
-                        pause_auto_run_after_temporary_gateway_error(
-                            &state,
-                            &app,
-                            job,
-                            completed,
-                            start_batch_index,
-                            &error,
-                        )
-                    }
-                    RecoverableAutoRunFailure::Network => pause_auto_run_after_network_error(
-                        &state,
-                        &app,
-                        job,
-                        completed,
-                        start_batch_index,
-                        &error,
-                    ),
-                    RecoverableAutoRunFailure::ModelFormat => {
-                        pause_auto_run_after_model_format_error(
-                            &state,
-                            &app,
-                            job,
-                            completed,
-                            start_batch_index,
-                            &error,
-                        )
-                    }
-                };
+                return pause_auto_run_after_recoverable_failure(
+                    kind,
+                    &state,
+                    &app,
+                    job,
+                    completed,
+                    start_batch_index,
+                    &error,
+                );
             }
             update_job(&state, &job.id, "failed", completed, &error)?;
             emit_job_progress(&app, &job, "failed", completed, &error);
@@ -566,44 +549,15 @@ pub(crate) async fn start_analyze_rewrite_all(
                 );
             }
             if let Some(kind) = classify_recoverable_auto_run_failure(&error) {
-                return match kind {
-                    RecoverableAutoRunFailure::RateLimit => pause_auto_run_after_rate_limit(
-                        &state,
-                        &app,
-                        job,
-                        completed,
-                        start_batch_index,
-                        &error,
-                    ),
-                    RecoverableAutoRunFailure::TemporaryGateway => {
-                        pause_auto_run_after_temporary_gateway_error(
-                            &state,
-                            &app,
-                            job,
-                            completed,
-                            start_batch_index,
-                            &error,
-                        )
-                    }
-                    RecoverableAutoRunFailure::Network => pause_auto_run_after_network_error(
-                        &state,
-                        &app,
-                        job,
-                        completed,
-                        start_batch_index,
-                        &error,
-                    ),
-                    RecoverableAutoRunFailure::ModelFormat => {
-                        pause_auto_run_after_model_format_error(
-                            &state,
-                            &app,
-                            job,
-                            completed,
-                            start_batch_index,
-                            &error,
-                        )
-                    }
-                };
+                return pause_auto_run_after_recoverable_failure(
+                    kind,
+                    &state,
+                    &app,
+                    job,
+                    completed,
+                    start_batch_index,
+                    &error,
+                );
             }
             update_job(&state, &job.id, "failed", completed, &error)?;
             emit_job_progress(&app, &job, "failed", completed, &error);
@@ -632,20 +586,8 @@ pub(crate) async fn start_analyze_rewrite_all(
     }
 
     let finished_message = "一键分析改写完成，可在对比页面手动导出 TXT";
-    update_job(
-        &state,
-        &job.id,
-        "completed",
-        range_total,
-        finished_message,
-    )?;
-    emit_job_progress(
-        &app,
-        &job,
-        "completed",
-        range_total,
-        finished_message,
-    );
+    update_job(&state, &job.id, "completed", range_total, finished_message)?;
+    emit_job_progress(&app, &job, "completed", range_total, finished_message);
     clear_auto_run(&state, &novel_id)?;
     load_job(&state, &job.id)
 }
@@ -738,5 +680,19 @@ mod tests {
             classify_recoverable_auto_run_failure("HTTP 401: unauthorized"),
             None
         );
+    }
+
+    #[test]
+    fn content_filter_failures_pause_before_format_recovery() {
+        for error in [
+            "模型内容安全策略拦截，未返回可解析文本。",
+            "review request failed: content_filter",
+            "分析输出格式修复重试调用失败：Content Filter",
+        ] {
+            assert_eq!(
+                classify_recoverable_auto_run_failure(error),
+                Some(RecoverableAutoRunFailure::ContentFilter)
+            );
+        }
     }
 }

@@ -11,7 +11,7 @@ type DeleteNovelDialogProps = {
 
 export function DeleteNovelDialog({ busy, novel, onCancel, onConfirm }: DeleteNovelDialogProps) {
   return (
-    <Modal className="settings-dialog delete-novel-dialog" labelledBy="delete-novel-dialog-title">
+    <Modal className="settings-dialog delete-novel-dialog" labelledBy="delete-novel-dialog-title" onRequestClose={busy ? undefined : onCancel}>
       <header className="dialog-titlebar">
         <h2 id="delete-novel-dialog-title">确认删除小说</h2>
         <button

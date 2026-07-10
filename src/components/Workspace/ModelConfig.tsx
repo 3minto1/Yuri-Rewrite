@@ -134,7 +134,7 @@ export function ModelConfig(props: ModelConfigProps) {
             </span>
             <input aria-label="Top P" type="number" min="0" max="1" step="0.05" value={draft.top_p} onChange={(event) => setDraft({ ...draft, top_p: Number(event.target.value) })} />
           </label>
-          <label className="mode-field thinking-mode-field form-full">
+          <div className="mode-field thinking-mode-field form-full">
             <span className="model-parameter-heading">
               思考模式
               <span className="setting-help" tabIndex={0} aria-label="思考模式说明">
@@ -157,7 +157,7 @@ export function ModelConfig(props: ModelConfigProps) {
                 >{mode === "auto" ? "自动" : mode === "off" ? "关闭" : "开启"}</button>
               ))}
             </div>
-          </label>
+          </div>
           <div className="mode-field prompt-obfuscation-field form-full">
             <span className="model-parameter-heading">
               提示词模糊

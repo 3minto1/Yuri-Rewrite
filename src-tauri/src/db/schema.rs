@@ -149,6 +149,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             job_id TEXT,
             status TEXT NOT NULL,
             pause_reason TEXT NOT NULL DEFAULT '',
+            pause_kind TEXT NOT NULL DEFAULT 'unknown',
             phase TEXT,
             batch_index INTEGER,
             profile_ids TEXT NOT NULL DEFAULT '[]',
@@ -255,6 +256,12 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "rewrite_mode",
         "TEXT NOT NULL DEFAULT 'strict'",
     )?;
+    migrations::ensure_column(
+        conn,
+        "auto_run_checkpoints",
+        "pause_kind",
+        "TEXT NOT NULL DEFAULT 'unknown'",
+    )?;
     migrations::migrate_api_keys_to_keyring(conn)?;
     Ok(())
 }
@@ -321,6 +328,43 @@ fn backfill_token_usage_records(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_marks_existing_checkpoint_pause_kind_unknown() {
+        let conn = Connection::open_in_memory().expect("open database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE auto_run_checkpoints (
+                novel_id TEXT PRIMARY KEY,
+                start_batch_index INTEGER NOT NULL,
+                next_batch_index INTEGER NOT NULL,
+                job_id TEXT,
+                status TEXT NOT NULL,
+                pause_reason TEXT NOT NULL DEFAULT '',
+                phase TEXT,
+                batch_index INTEGER,
+                profile_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO auto_run_checkpoints VALUES (
+                'novel-1', 0, 0, NULL, 'paused', '旧版暂停', 'rewrite', 1, '[]', 'now', 'now'
+            );
+            "#,
+        )
+        .expect("seed previous checkpoint schema");
+
+        init_db(&conn).expect("migrate schema");
+
+        let pause_kind: String = conn
+            .query_row(
+                "SELECT pause_kind FROM auto_run_checkpoints WHERE novel_id = 'novel-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load pause kind");
+        assert_eq!(pause_kind, "unknown");
+    }
 
     #[test]
     fn migration_adds_default_top_p_to_existing_profiles() {

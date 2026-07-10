@@ -128,6 +128,27 @@ describe("CompareView", () => {
     expect(screen.getByLabelText("改写稿内容").textContent).toContain("alpha");
   });
 
+  it("clears a removed active match instead of reusing its stale index", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "全局搜索" }), {
+      target: { value: "目标" }
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 / 4"));
+    fireEvent.click(screen.getByRole("button", { name: "向下搜索" }));
+    expect(screen.getByRole("status")).toHaveTextContent("2 / 4");
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑改写稿正文" }), {
+      target: { value: "不再包含搜索词" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("— / 3"));
+    fireEvent.click(screen.getByRole("button", { name: "向下搜索" }));
+    expect(screen.getByRole("status")).toHaveTextContent("1 / 3");
+  });
+
   it("saves an edited rewrite and recalculates visible text", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: "编辑" }));

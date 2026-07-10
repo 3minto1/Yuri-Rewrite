@@ -4,6 +4,7 @@ pub(crate) mod chapter_rules;
 pub(crate) mod export;
 pub(crate) mod frontend_errors;
 pub(crate) mod jobs;
+pub(crate) mod local_data;
 pub(crate) mod logs;
 pub(crate) mod models;
 pub(crate) mod novels;

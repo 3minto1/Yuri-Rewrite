@@ -456,7 +456,7 @@ export function ChapterRulesPage({
       </section>
 
       {longChapterPrompt && (
-        <Modal labelledBy="long-chapter-split-dialog-title">
+        <Modal labelledBy="long-chapter-split-dialog-title" onRequestClose={previewing ? undefined : dismissLongSplitPrompt}>
           <header className="dialog-titlebar">
             <h2 id="long-chapter-split-dialog-title">检测到长章节</h2>
           </header>

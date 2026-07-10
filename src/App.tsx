@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CompareView } from "./components/Compare/CompareView";
+import { DeleteLocalDataDialog } from "./components/common/DeleteLocalDataDialog";
 import { DeleteNovelDialog } from "./components/common/DeleteNovelDialog";
 import { Modal } from "./components/common/Modal";
 import { getStatusTone, StatusBadge } from "./components/common/StatusBadge";
@@ -82,6 +83,12 @@ import type {
   UpdateProgress
 } from "./types";
 import { type AutoRunProgress, useAutoRunProgress } from "./useAutoRunProgress";
+import {
+  autoContinueDelaySeconds,
+  autoContinuePauseKey,
+  autoContinueProgressFingerprint,
+  isAutomaticPauseKind
+} from "./autoContinue";
 
 type ModelSuggestion = {
   label: string;
@@ -126,6 +133,18 @@ const emptyNovelSettings: NovelSettingsDraft = {
 const savedApiKeyMask = "********";
 const quickStartSeenKey = "yuri-rewrite.quick-start-seen";
 const themePreferenceKey = "yuri-rewrite.theme";
+const qualityIgnoreKeyPrefix = "yuri-rewrite.qualityIgnored.v1.";
+const resetAppSettings: AppSettings = {
+  export_dir: null,
+  core_prompt: "",
+  review_enabled: true,
+  review_profile_id: null,
+  analysis_profile_id: null,
+  selected_profile_id: null,
+  chapter_batch_size: 30,
+  rewrite_parallelism: 10,
+  auto_continue_enabled: false
+};
 const modelSuggestionGroups: ModelSuggestionGroup[] = [
   {
     id: "deepseek",
@@ -392,9 +411,12 @@ export default function App() {
   const [showUpdateInstallDialog, setShowUpdateInstallDialog] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
+  const [showDeleteLocalDataDialog, setShowDeleteLocalDataDialog] = useState(false);
   const [pendingSplitPrompt, setPendingSplitPrompt] = useState<Novel | null>(null);
   const [autoRunRecoveries, setAutoRunRecoveries] = useState<AutoRunRecovery[]>([]);
   const [autoRunMode, setAutoRunMode] = useState<"range" | "batch" | null>(null);
+  const [autoContinueSettingBusy, setAutoContinueSettingBusy] = useState(false);
+  const [autoContinueSeconds, setAutoContinueSeconds] = useState<number | null>(null);
   const [autoRunMenuOpen, setAutoRunMenuOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const originalCompareRef = useRef<HTMLDivElement | null>(null);
@@ -416,6 +438,30 @@ export default function App() {
   const tokenStatsLoadingRef = useRef(false);
   const pendingActiveViewActionRef = useRef<(() => void) | null>(null);
   const pendingNovelSettingsActiveViewActionRef = useRef<(() => void) | null>(null);
+  const autoContinueEligibleNovelIdsRef = useRef(new Set<string>());
+  const autoContinueAttemptRef = useRef(new Map<string, { fingerprint: string; attemptIndex: number }>());
+  const autoContinuePauseDelayRef = useRef(new Map<string, { pauseKey: string; delaySeconds: number }>());
+  const autoContinueTimeoutRef = useRef<number | null>(null);
+  const autoContinueIntervalRef = useRef<number | null>(null);
+  const autoContinueInFlightRef = useRef(false);
+  const continueAutoRunRef = useRef<() => Promise<void>>(async () => undefined);
+
+  const clearAutoContinueTimers = useCallback(() => {
+    if (autoContinueTimeoutRef.current !== null) {
+      window.clearTimeout(autoContinueTimeoutRef.current);
+      autoContinueTimeoutRef.current = null;
+    }
+    if (autoContinueIntervalRef.current !== null) {
+      window.clearInterval(autoContinueIntervalRef.current);
+      autoContinueIntervalRef.current = null;
+    }
+    setAutoContinueSeconds(null);
+  }, []);
+
+  const resetAutoContinueTracking = useCallback((novelId: string) => {
+    autoContinueAttemptRef.current.delete(novelId);
+    autoContinuePauseDelayRef.current.delete(novelId);
+  }, []);
 
   const commitActiveView = useCallback((nextView: ActiveView) => {
     if (nextView !== "compare") {
@@ -681,6 +727,9 @@ export default function App() {
         setAutoRunState("idle");
         setAutoRunMode(null);
         lastAutoExportedBatchRef.current = 0;
+        autoContinueEligibleNovelIdsRef.current.delete(progress.novel_id);
+        resetAutoContinueTracking(progress.novel_id);
+        clearAutoContinueTimers();
       }
       if (["completed", "paused", "failed"].includes(progress.status)) {
         void refreshJobEstimate();
@@ -1429,7 +1478,7 @@ export default function App() {
     }
   }
 
-  async function runAnalyzeRewriteCurrentBatch(options: { batchId?: string; resume?: boolean } = {}) {
+  async function runAnalyzeRewriteCurrentBatch(options: { batchId?: string; resume?: boolean; automaticResume?: boolean } = {}) {
     if (!detail || !selectedProfileId) {
       showNotice("请先导入小说并选择模型配置。");
       return;
@@ -1453,6 +1502,9 @@ export default function App() {
         (chapter) => chapter.index >= targetBatch.start_chapter && chapter.index <= targetBatch.end_chapter
       )
     )) return;
+    clearAutoContinueTimers();
+    autoContinueEligibleNovelIdsRef.current.add(novelId);
+    if (!options.automaticResume) resetAutoContinueTracking(novelId);
     setBusy("auto-batch");
     setAutoRunState("running");
     setAutoRunMode("batch");
@@ -1464,41 +1516,63 @@ export default function App() {
         batchId
       });
       setJob(result);
-      await loadNovel(novelId, { preserveBatchId: batchId, preserveChapterId: selectedChapterId });
+      const recoveryRows = result.status === "paused"
+        ? await invoke("list_auto_run_recoveries")
+        : undefined;
+      if (recoveryRows) setAutoRunRecoveries(recoveryRows);
+      await loadNovel(novelId, {
+        preserveBatchId: batchId,
+        preserveChapterId: selectedChapterId,
+        recoveries: recoveryRows
+      });
       await refreshLogs(novelId);
       if (result.status === "completed") {
+        autoContinueEligibleNovelIdsRef.current.delete(novelId);
+        resetAutoContinueTracking(novelId);
         setAutoRunState("idle");
         setAutoRunMode(null);
         setActiveView("compare");
       } else if (result.status === "paused") {
         setAutoRunState("paused");
       } else if (result.status === "terminated" || result.status === "failed") {
+        autoContinueEligibleNovelIdsRef.current.delete(novelId);
+        resetAutoContinueTracking(novelId);
         setAutoRunState("idle");
         setAutoRunMode(null);
       }
       showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
-      setAutoRunState("idle");
-      setAutoRunMode(null);
+      autoContinueEligibleNovelIdsRef.current.delete(novelId);
+      if (options.resume) {
+        setAutoRunState("paused");
+        void invoke("list_auto_run_recoveries").then(setAutoRunRecoveries);
+      } else {
+        setAutoRunState("idle");
+        setAutoRunMode(null);
+      }
       showNotice(String(error));
     } finally {
       setBusy("");
     }
   }
 
-  async function continueAnalyzeRewrite() {
+  async function continueAnalyzeRewrite(options: { automatic?: boolean } = {}) {
     const recovery = selectedRecovery;
     if (recovery?.job?.job_type === "auto_batch") {
       await runAnalyzeRewriteCurrentBatch({
         batchId: recovery.summary?.batch_id ?? selectedBatch?.id,
-        resume: true
+        resume: true,
+        automaticResume: options.automatic
       });
       return;
     }
-    await runAnalyzeRewriteAll();
+    await runAnalyzeRewriteAll(null, { resume: true, automaticResume: options.automatic });
   }
 
-  async function runAnalyzeRewriteAll(startBatchId: string | null = null) {
+  async function runAnalyzeRewriteAll(
+    startBatchId: string | null = null,
+    options: { resume?: boolean; automaticResume?: boolean } = {}
+  ) {
     if (!detail || !selectedProfileId) {
       showNotice("请先导入小说并选择模型配置。");
       return;
@@ -1515,7 +1589,13 @@ export default function App() {
         ? Math.max(0, detail.batches.findIndex((batch) => batch.id === startBatchId))
         : 0;
     const firstIncludedChapter = detail.batches[startPosition]?.start_chapter ?? Number.MAX_SAFE_INTEGER;
-    if (!confirmRewriteOverwrite(detail.chapters.filter((chapter) => chapter.index >= firstIncludedChapter))) return;
+    if (!options.resume && !confirmRewriteOverwrite(
+      detail.chapters.filter((chapter) => chapter.index >= firstIncludedChapter)
+    )) return;
+    const novelId = detail.novel.id;
+    clearAutoContinueTimers();
+    autoContinueEligibleNovelIdsRef.current.add(novelId);
+    if (!options.automaticResume) resetAutoContinueTracking(novelId);
     setBusy("auto");
     setAutoRunState("running");
     setAutoRunMode("range");
@@ -1523,30 +1603,45 @@ export default function App() {
     setNotice("");
     try {
       const result = await invoke("start_analyze_rewrite_all", {
-        novelId: detail.novel.id,
+        novelId,
         profileId: selectedProfileId,
         startBatchId
       });
       setJob(result);
-      await loadNovel(detail.novel.id, {
+      const recoveryRows = result.status === "paused"
+        ? await invoke("list_auto_run_recoveries")
+        : undefined;
+      if (recoveryRows) setAutoRunRecoveries(recoveryRows);
+      await loadNovel(novelId, {
         preserveBatchId: startBatchId ?? selectedBatchId,
-        preserveChapterId: selectedChapterId
+        preserveChapterId: selectedChapterId,
+        recoveries: recoveryRows
       });
-      await refreshLogs(detail.novel.id);
+      await refreshLogs(novelId);
       if (result.status === "completed") {
+        autoContinueEligibleNovelIdsRef.current.delete(novelId);
+        resetAutoContinueTracking(novelId);
         setAutoRunState("idle");
         setAutoRunMode(null);
         setActiveView("compare");
       } else if (result.status === "paused") {
         setAutoRunState("paused");
       } else if (result.status === "terminated" || result.status === "failed") {
+        autoContinueEligibleNovelIdsRef.current.delete(novelId);
+        resetAutoContinueTracking(novelId);
         setAutoRunState("idle");
         setAutoRunMode(null);
       }
       showNotice(result.status === "completed" ? result.message : `${result.status}：${result.message}`);
     } catch (error) {
-      setAutoRunState("idle");
-      setAutoRunMode(null);
+      autoContinueEligibleNovelIdsRef.current.delete(novelId);
+      if (options.resume) {
+        setAutoRunState("paused");
+        void invoke("list_auto_run_recoveries").then(setAutoRunRecoveries);
+      } else {
+        setAutoRunState("idle");
+        setAutoRunMode(null);
+      }
       showNotice(String(error));
     } finally {
       setBusy("");
@@ -1554,12 +1649,19 @@ export default function App() {
   }
 
   async function pauseAnalyzeRewriteAll() {
-    if (!detail || autoRunState !== "running") return;
+    if (!detail || !["running", "paused"].includes(autoRunState)) return;
+    const novelId = detail.novel.id;
+    autoContinueEligibleNovelIdsRef.current.delete(novelId);
+    resetAutoContinueTracking(novelId);
+    clearAutoContinueTimers();
     setAutoControlBusy(true);
     try {
-      const result = await invoke("pause_analyze_rewrite_all", { novelId: detail.novel.id });
+      const result = await invoke("pause_analyze_rewrite_all", { novelId });
       setJob(result);
-      setAutoRunState("stopping");
+      setAutoRunState(result.status === "paused" ? "paused" : "stopping");
+      if (result.status === "paused") {
+        void invoke("list_auto_run_recoveries").then(setAutoRunRecoveries);
+      }
       showNotice(result.message);
     } catch (error) {
       showNotice(String(error));
@@ -1570,9 +1672,13 @@ export default function App() {
 
   async function terminateAnalyzeRewriteAll() {
     if (!detail || autoRunState === "idle") return;
+    const novelId = detail.novel.id;
+    autoContinueEligibleNovelIdsRef.current.delete(novelId);
+    resetAutoContinueTracking(novelId);
+    clearAutoContinueTimers();
     setAutoControlBusy(true);
     try {
-      const result = await invoke("terminate_analyze_rewrite_all", { novelId: detail.novel.id });
+      const result = await invoke("terminate_analyze_rewrite_all", { novelId });
       setJob(result);
       setAutoRunState("idle");
       setAutoRunMode(null);
@@ -1613,8 +1719,28 @@ export default function App() {
       selected_profile_id: selectedProfileId || null,
       chapter_batch_size: settings.chapter_batch_size ?? 30,
       rewrite_parallelism: settings.rewrite_parallelism ?? 10,
+      auto_continue_enabled: settings.auto_continue_enabled ?? false,
       ...overrides
     };
+  }
+
+  async function toggleAutoContinue() {
+    const enabled = !(settings.auto_continue_enabled ?? false);
+    setAutoContinueSettingBusy(true);
+    try {
+      const saved = await invoke("set_auto_continue_enabled", { enabled });
+      setSettings(saved);
+      if (!enabled) clearAutoContinueTimers();
+      showNotice(
+        enabled
+          ? "已开启自动继续；本次运行中的非用户暂停会在等待后自动恢复。"
+          : "已关闭自动继续；当前倒计时已取消，任务将保持暂停。"
+      );
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setAutoContinueSettingBusy(false);
+    }
   }
 
   async function chooseExportDir() {
@@ -1736,6 +1862,65 @@ export default function App() {
       showNotice(value ? "已设置审查专家模型。" : "已恢复使用当前改写模型审查。");
     } catch (error) {
       showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function clearPerNovelQualityPreferences() {
+    try {
+      for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+        const key = window.localStorage.key(index);
+        if (key?.startsWith(qualityIgnoreKeyPrefix)) window.localStorage.removeItem(key);
+      }
+    } catch {
+      // The backend deletion is complete even when WebView localStorage is unavailable.
+    }
+  }
+
+  async function deleteLocalData(confirmationPhrase: string) {
+    setBusy("delete-local-data");
+    setNotice("");
+    try {
+      const result = await invoke("delete_local_data", { confirmationPhrase });
+      setShowDeleteLocalDataDialog(false);
+      clearAutoContinueTimers();
+      autoContinueEligibleNovelIdsRef.current.clear();
+      autoContinueAttemptRef.current.clear();
+      autoContinuePauseDelayRef.current.clear();
+      useAppStore.getState().reset();
+      setNovelSettingsDraft(emptyNovelSettings);
+      setSavedNovelSettingsDraft(emptyNovelSettings);
+      setProfileDraft(defaultProfile);
+      setLogs([]);
+      setLogDays([]);
+      setSelectedLogDate("");
+      setLogCache({});
+      setSettings(resetAppSettings);
+      setCorePromptDraft("");
+      setJobEstimate(null);
+      setModelDiagnosis(null);
+      setAutoRunRecoveries([]);
+      setAutoRunMode(null);
+      setAutoRunMenuOpen(false);
+      setTokenStats(null);
+      setTokenStatsDeletingProfileId("");
+      setWorkspaceSection("main");
+      setCompareDirty(false);
+      compareDirtyRef.current = false;
+      pendingActiveViewActionRef.current = null;
+      pendingNovelSettingsActiveViewActionRef.current = null;
+      setPendingActiveView(null);
+      setPendingNovelSettingsActiveView(null);
+      setPendingSplitPrompt(null);
+      setActiveView("workspace");
+      clearPerNovelQualityPreferences();
+      const warningText = result.warnings.length > 0
+        ? `本地工作数据已删除，但有以下清理提示：${result.warnings.join("；")}`
+        : "本地工作数据已删除；原始 TXT 和已导出 TXT 均已保留。";
+      showNotice(warningText, result.warnings.length > 0 ? 15000 : 5000);
+    } catch (error) {
+      showNotice(String(error), 10000);
     } finally {
       setBusy("");
     }
@@ -1903,6 +2088,74 @@ export default function App() {
     () => autoRunRecoveries.find((recovery) => recovery.novel_id === detail?.novel.id),
     [autoRunRecoveries, detail?.novel.id]
   );
+  continueAutoRunRef.current = () => continueAnalyzeRewrite({ automatic: true });
+  const selectedAutoContinuePauseKey = selectedRecovery
+    ? `${selectedRecovery.novel_id}:${autoContinuePauseKey(selectedRecovery)}`
+    : "";
+  const autoContinuePending = autoContinueSeconds !== null && autoRunState === "paused";
+
+  useEffect(() => {
+    clearAutoContinueTimers();
+    const novelId = detail?.novel.id;
+    if (
+      !novelId
+      || !(settings.auto_continue_enabled ?? false)
+      || autoRunState !== "paused"
+      || !selectedRecovery
+      || !isAutomaticPauseKind(selectedRecovery.pause_kind)
+      || !autoContinueEligibleNovelIdsRef.current.has(novelId)
+    ) {
+      return undefined;
+    }
+
+    const previousDelay = autoContinuePauseDelayRef.current.get(novelId);
+    let delaySeconds = previousDelay?.pauseKey === selectedAutoContinuePauseKey
+      ? previousDelay.delaySeconds
+      : undefined;
+    if (delaySeconds === undefined) {
+      const fingerprint = autoContinueProgressFingerprint(selectedRecovery);
+      const previous = autoContinueAttemptRef.current.get(novelId);
+      const attemptIndex = previous?.fingerprint === fingerprint
+        ? previous.attemptIndex + 1
+        : 0;
+      autoContinueAttemptRef.current.set(novelId, { fingerprint, attemptIndex });
+      delaySeconds = autoContinueDelaySeconds(selectedRecovery.pause_kind, attemptIndex);
+      autoContinuePauseDelayRef.current.set(novelId, {
+        pauseKey: selectedAutoContinuePauseKey,
+        delaySeconds
+      });
+    }
+
+    const deadline = Date.now() + delaySeconds * 1000;
+    setAutoContinueSeconds(delaySeconds);
+    autoContinueIntervalRef.current = window.setInterval(() => {
+      setAutoContinueSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    }, 250);
+    autoContinueTimeoutRef.current = window.setTimeout(() => {
+      if (autoContinueIntervalRef.current !== null) {
+        window.clearInterval(autoContinueIntervalRef.current);
+        autoContinueIntervalRef.current = null;
+      }
+      autoContinueTimeoutRef.current = null;
+      setAutoContinueSeconds(null);
+      if (autoContinueInFlightRef.current) return;
+      autoContinueInFlightRef.current = true;
+      autoContinueEligibleNovelIdsRef.current.delete(novelId);
+      void continueAutoRunRef.current().finally(() => {
+        autoContinueInFlightRef.current = false;
+      });
+    }, delaySeconds * 1000);
+
+    return clearAutoContinueTimers;
+  }, [
+    autoRunState,
+    clearAutoContinueTimers,
+    detail?.novel.id,
+    selectedAutoContinuePauseKey,
+    selectedRecovery,
+    settings.auto_continue_enabled
+  ]);
+
   const selectedRecoverySummary = formatRecoverySummary(selectedRecovery);
   const selectedChapterBatchPosition = useMemo(() => {
     if (!detail || !selectedChapter) return -1;
@@ -2305,18 +2558,32 @@ export default function App() {
                 <>
                   <button
                     className="task-control-warning"
-                    onClick={autoRunState === "paused" ? () => void continueAnalyzeRewrite() : pauseAnalyzeRewriteAll}
+                    onClick={autoContinuePending
+                      ? pauseAnalyzeRewriteAll
+                      : autoRunState === "paused"
+                        ? () => void continueAnalyzeRewrite()
+                        : pauseAnalyzeRewriteAll}
                     disabled={autoControlBusy || autoRunState === "stopping"}
-                    title={autoRunState === "paused" ? "继续一键分析改写" : "暂停一键分析改写"}
+                    title={autoContinuePending
+                      ? "取消本次自动继续并保持暂停"
+                      : autoRunState === "paused"
+                        ? "继续一键分析改写"
+                        : "暂停一键分析改写"}
                   >
                     {autoControlBusy || autoRunState === "stopping" ? (
                       <Loader2 className="spin" size={17} />
+                    ) : autoContinuePending ? (
+                      <Pause size={17} />
                     ) : autoRunState === "paused" ? (
                       <Play size={17} />
                     ) : (
                       <Pause size={17} />
                     )}
-                    {autoRunState === "paused" ? "继续" : "暂停"}
+                    {autoContinuePending
+                      ? `保持暂停 (${autoContinueSeconds}s)`
+                      : autoRunState === "paused"
+                        ? "继续"
+                        : "暂停"}
                   </button>
                   <button className="task-control-danger" onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy} title="终止一键分析改写">
                     {autoControlBusy ? <Loader2 className="spin" size={17} /> : <Square size={17} />}
@@ -2464,6 +2731,7 @@ export default function App() {
                 <span>{jobTypeText[job.job_type] ?? job.job_type}</span>
                 <StatusBadge status={job.status} label={statusText[job.status] ?? job.status} />
                 <span>{job.current_chapter}/{job.total_chapters} · {job.message}</span>
+                {autoContinuePending ? ` · 将在 ${autoContinueSeconds} 秒后自动继续` : ""}
                 {job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running"
                   ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}`
                   : ""}
@@ -2610,6 +2878,7 @@ export default function App() {
             busy={busy}
             processing={processingTaskActive}
             pausedAutoRun={pausedAutoRun}
+            autoContinueSettingBusy={autoContinueSettingBusy}
             onBack={() => requestActiveView("workspace")}
             onChooseExportDir={chooseExportDir}
             onClearExportDir={clearExportDir}
@@ -2618,6 +2887,8 @@ export default function App() {
             onAnalysisProfileChange={setAnalysisProfileId}
             onBatchSizeChange={setChapterBatchSize}
             onParallelismChange={setRewriteParallelism}
+            onToggleAutoContinue={() => void toggleAutoContinue()}
+            onDeleteLocalData={() => setShowDeleteLocalDataDialog(true)}
           />
         )}
 
@@ -2749,7 +3020,7 @@ export default function App() {
         )}
       </section>
       {pendingSplitPrompt && (
-        <Modal labelledBy="pending-split-dialog-title">
+        <Modal labelledBy="pending-split-dialog-title" onRequestClose={() => setPendingSplitPrompt(null)}>
           <header className="dialog-titlebar">
             <h2 id="pending-split-dialog-title">是否设置章节规则？</h2>
             <button
@@ -2798,6 +3069,13 @@ export default function App() {
           onConfirm={confirmDeleteNovel}
         />
       )}
+      {showDeleteLocalDataDialog && (
+        <DeleteLocalDataDialog
+          busy={busy === "delete-local-data"}
+          onCancel={() => setShowDeleteLocalDataDialog(false)}
+          onConfirm={(confirmationPhrase) => void deleteLocalData(confirmationPhrase)}
+        />
+      )}
       {pendingUpdate && showUpdateInstallDialog && (
         <UpdateInstallDialog
           busy={busy === "download-update"}
@@ -2808,7 +3086,7 @@ export default function App() {
         />
       )}
       {pendingActiveView && (
-        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="app-compare-unsaved-title">
+        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="app-compare-unsaved-title" onRequestClose={cancelPendingActiveView}>
           <header className="dialog-titlebar">
             <h2 id="app-compare-unsaved-title">改写稿尚未保存</h2>
             <button
@@ -2839,7 +3117,7 @@ export default function App() {
         </Modal>
       )}
       {pendingNovelSettingsActiveView && (
-        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="novel-settings-unsaved-title">
+        <Modal className="settings-dialog compare-unsaved-dialog" labelledBy="novel-settings-unsaved-title" onRequestClose={busy === "novel-settings" ? undefined : cancelPendingNovelSettingsActiveView}>
           <header className="dialog-titlebar">
             <h2 id="novel-settings-unsaved-title">基本设定尚未保存</h2>
             <button
@@ -2875,7 +3153,7 @@ export default function App() {
         </Modal>
       )}
       {showQuickStart && (
-        <Modal className="quickstart-dialog" labelledBy="quickstart-title">
+        <Modal className="quickstart-dialog" labelledBy="quickstart-title" onRequestClose={closeQuickStart}>
             <div className="quickstart-content">
               <h2 id="quickstart-title">快速上手</h2>
               <ol>
@@ -2884,14 +3162,9 @@ export default function App() {
                 <li>进入设定，填写主角原名、改写后姓名、身材体型、改写模式和额外要求。</li>
                 <li>建议先处理一个批次：点击分析，再点击改写，确认效果稳定后再使用一键分析改写。</li>
                 <li>改写复检默认开启，会增加请求数、等待时间和 token 消耗；如需优先速度，可在设置中关闭。</li>
-                <li>一键分析改写会按批次连续处理；运行中可暂停、继续或终止，限流/网络中断后也可调整设置再继续。</li>
+                <li>一键分析改写会按批次连续处理；运行中可暂停、继续或终止，限流、网络中断或模型安全策略拦截后也可调整设置再继续。</li>
                 <li>改写完成后进入对比页面，可搜索、查看差异并导出 TXT；导出只包含已完成改写的章节。</li>
               </ol>
-              <p className="quickstart-tip">
-                温馨提示：如果发现 API 调用异常缓慢，可以尝试删除{" "}
-                <code>C:\Users\你的用户名\AppData\Roaming\com.local.yurirewrite</code>{" "}
-                文件夹后重试。
-              </p>
               <button className="dialog-primary quickstart-confirm" onClick={closeQuickStart}>
                 确定
               </button>

@@ -30,6 +30,7 @@ pub(crate) fn get_app_settings(state: State<AppState>) -> Result<AppSettings, St
     let selected_profile_id = load_selected_profile_id(&conn)?;
     let chapter_batch_size = load_chapter_batch_size(&conn)?;
     let rewrite_parallelism = load_rewrite_parallelism(&conn)?;
+    let auto_continue_enabled = load_auto_continue_enabled(&conn)?;
     let core_prompt = load_core_prompt(&conn)?;
     Ok(AppSettings {
         export_dir,
@@ -40,7 +41,18 @@ pub(crate) fn get_app_settings(state: State<AppState>) -> Result<AppSettings, St
         selected_profile_id,
         chapter_batch_size,
         rewrite_parallelism,
+        auto_continue_enabled,
     })
+}
+
+#[tauri::command]
+pub(crate) fn set_auto_continue_enabled(
+    enabled: bool,
+    state: State<AppState>,
+) -> Result<AppSettings, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    save_auto_continue_enabled(&conn, enabled)?;
+    load_app_settings(&conn)
 }
 
 #[tauri::command]
@@ -88,6 +100,7 @@ pub(crate) fn save_app_settings(
         selected_profile_id: normalize_profile_id(settings.selected_profile_id.as_deref()),
         chapter_batch_size,
         rewrite_parallelism,
+        auto_continue_enabled: settings.auto_continue_enabled,
     };
     if chapter_batch_size != current_batch_size {
         rebuild_detected_chapter_batches_and_save(&mut conn, &state.data_dir, &normalized)?;
@@ -115,6 +128,7 @@ fn load_app_settings(conn: &Connection) -> Result<AppSettings, String> {
         selected_profile_id: load_selected_profile_id(conn)?,
         chapter_batch_size: load_chapter_batch_size(conn)?,
         rewrite_parallelism: load_rewrite_parallelism(conn)?,
+        auto_continue_enabled: load_auto_continue_enabled(conn)?,
     })
 }
 
@@ -132,6 +146,7 @@ fn save_app_settings_values(conn: &Connection, settings: &AppSettings) -> Result
     save_review_enabled(conn, settings.review_enabled)?;
     save_chapter_batch_size(conn, settings.chapter_batch_size)?;
     save_rewrite_parallelism(conn, settings.rewrite_parallelism)?;
+    save_auto_continue_enabled(conn, settings.auto_continue_enabled)?;
     save_review_profile_id(conn, settings.review_profile_id.as_deref())?;
     save_analysis_profile_id(conn, settings.analysis_profile_id.as_deref())?;
     save_selected_profile_id_value(conn, settings.selected_profile_id.as_deref())?;
@@ -345,6 +360,30 @@ pub(crate) fn load_review_enabled(conn: &Connection) -> Result<bool, String> {
 pub(crate) fn save_review_enabled(conn: &Connection, enabled: bool) -> Result<(), String> {
     conn.execute(
         "INSERT INTO app_settings (key, value) VALUES ('review_enabled', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![if enabled { "true" } else { "false" }],
+    )
+    .map_err(to_string)?;
+    Ok(())
+}
+
+pub(crate) fn load_auto_continue_enabled(conn: &Connection) -> Result<bool, String> {
+    let value = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'auto_continue_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_string)?;
+    Ok(value
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| matches!(value, "true" | "1" | "yes")))
+}
+
+pub(crate) fn save_auto_continue_enabled(conn: &Connection, enabled: bool) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('auto_continue_enabled', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![if enabled { "true" } else { "false" }],
     )
     .map_err(to_string)?;
@@ -697,6 +736,7 @@ mod tests {
             selected_profile_id: None,
             chapter_batch_size: batch_size,
             rewrite_parallelism: parallelism,
+            auto_continue_enabled: false,
         }
     }
 

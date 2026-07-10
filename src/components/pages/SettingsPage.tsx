@@ -6,6 +6,7 @@ type SettingsPageProps = {
   profiles: ModelProfile[];
   busy: string;
   processing: boolean;
+  autoContinueSettingBusy: boolean;
   pausedAutoRun: boolean;
   onBack: () => void;
   onChooseExportDir: () => void;
@@ -15,6 +16,8 @@ type SettingsPageProps = {
   onAnalysisProfileChange: (profileId: string) => void;
   onBatchSizeChange: (value: 10 | 30 | 50 | 100) => void;
   onParallelismChange: (value: 1 | 3 | 6 | 10 | 25 | 50) => void;
+  onToggleAutoContinue: () => void;
+  onDeleteLocalData: () => void;
 };
 
 export function SettingsPage(props: SettingsPageProps) {
@@ -24,6 +27,7 @@ export function SettingsPage(props: SettingsPageProps) {
       profiles={props.profiles}
       busy={props.busy}
       processing={props.processing}
+      autoContinueSettingBusy={props.autoContinueSettingBusy}
       allowPausedTaskAdjustments={props.pausedAutoRun}
       onBack={props.onBack}
       onChooseExportDir={props.onChooseExportDir}
@@ -33,6 +37,8 @@ export function SettingsPage(props: SettingsPageProps) {
       onAnalysisProfileChange={props.onAnalysisProfileChange}
       onBatchSizeChange={props.onBatchSizeChange}
       onParallelismChange={props.onParallelismChange}
+      onToggleAutoContinue={props.onToggleAutoContinue}
+      onDeleteLocalData={props.onDeleteLocalData}
     />
   );
 }

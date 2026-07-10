@@ -207,6 +207,7 @@ pub(crate) struct AutoRunRecovery {
     pub(crate) next_batch_index: i64,
     pub(crate) status: String,
     pub(crate) pause_reason: String,
+    pub(crate) pause_kind: String,
     pub(crate) phase: Option<String>,
     pub(crate) batch_index: Option<i64>,
     pub(crate) profile_ids: Vec<String>,
@@ -294,6 +295,8 @@ pub(crate) struct AppSettings {
     pub(crate) chapter_batch_size: usize,
     #[serde(default = "crate::default_rewrite_parallelism")]
     pub(crate) rewrite_parallelism: usize,
+    #[serde(default)]
+    pub(crate) auto_continue_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

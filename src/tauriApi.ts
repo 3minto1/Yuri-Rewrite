@@ -12,6 +12,7 @@ import type {
   ExportResult,
   Job,
   JobEstimate,
+  LocalDataDeletionResult,
   ModelDiagnosis,
   ModelProfile,
   ModelProfileInput,
@@ -39,6 +40,7 @@ type CommandMap = {
   list_model_profiles: { args?: undefined; result: ModelProfile[] };
   save_model_profile: { args: { input: ModelProfileInput }; result: ModelProfile };
   delete_model_profile: { args: { profileId: string }; result: void };
+  delete_local_data: { args: { confirmationPhrase: string }; result: LocalDataDeletionResult };
   diagnose_model_profile: { args: { profileId: string }; result: ModelDiagnosis };
   list_ai_log_days: { args: { novelId: string | null }; result: AiLogDaySummary[] };
   list_ai_logs_by_date: { args: { novelId: string | null; date: string }; result: AiLog[] };
@@ -54,6 +56,7 @@ type CommandMap = {
   };
   get_app_settings: { args?: undefined; result: AppSettings };
   save_app_settings: { args: { settings: AppSettings }; result: AppSettings };
+  set_auto_continue_enabled: { args: { enabled: boolean }; result: AppSettings };
   save_selected_profile_id: { args: { profileId: string | null }; result: AppSettings };
   save_novel_settings: {
     args: {

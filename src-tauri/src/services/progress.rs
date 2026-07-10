@@ -1,6 +1,6 @@
-use crate::domain::{ActiveShardProgress, AppState, Chapter, JobProgress};
+use crate::domain::{ActiveShardProgress, AppState, Chapter, Job, JobProgress};
 use crate::task_control::AutoRunProgressState;
-use crate::{row_to_job, to_string, update_job};
+use crate::{load_job, row_to_job, to_string, update_job};
 use rusqlite::params;
 use std::collections::HashSet;
 use tauri::{Emitter, State};
@@ -88,6 +88,58 @@ pub(crate) fn clear_job_progress(
         progress.remove(novel_id);
     }
     Ok(())
+}
+
+pub(crate) fn finalize_standalone_job_failure(
+    state: &State<'_, AppState>,
+    novel_id: &str,
+    job: &Job,
+    chapters: &[Chapter],
+    phase: &str,
+    error: &str,
+) -> Result<Job, String> {
+    let status_column = match phase {
+        "analysis" => "analysis_status",
+        "rewrite" => "rewrite_status",
+        _ => return Err(format!("不支持的独立任务阶段：{phase}")),
+    };
+    let mut finalization_errors = Vec::new();
+    match state.conn.lock() {
+        Ok(mut conn) => match conn.transaction() {
+            Ok(tx) => {
+                for chapter in chapters {
+                    let sql = format!(
+                        "UPDATE chapters SET {status_column} = 'failed' WHERE id = ?1 AND {status_column} = 'running'"
+                    );
+                    if let Err(chapter_error) = tx.execute(&sql, params![chapter.id]) {
+                        finalization_errors.push(to_string(chapter_error));
+                        break;
+                    }
+                }
+                if finalization_errors.is_empty() {
+                    if let Err(commit_error) = tx.commit() {
+                        finalization_errors.push(to_string(commit_error));
+                    }
+                }
+            }
+            Err(transaction_error) => finalization_errors.push(to_string(transaction_error)),
+        },
+        Err(lock_error) => finalization_errors.push(to_string(lock_error)),
+    }
+    if let Err(job_error) = update_job(state, &job.id, "failed", 0, error) {
+        finalization_errors.push(job_error);
+    }
+    if let Err(progress_error) = clear_job_progress(state, novel_id, &job.id) {
+        finalization_errors.push(progress_error);
+    }
+    if finalization_errors.is_empty() {
+        load_job(state, &job.id)
+    } else {
+        Err(format!(
+            "{error}；任务失败收尾不完整：{}",
+            finalization_errors.join("；")
+        ))
+    }
 }
 
 pub(crate) fn set_auto_progress_shard_total(

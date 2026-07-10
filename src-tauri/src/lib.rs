@@ -13,8 +13,9 @@ mod text;
 use ai::*;
 use chrono::Utc;
 use commands::{
-    analysis::*, auto_run::*, chapter_rules::*, export::*, frontend_errors::*, jobs::*, logs::*,
-    models::*, novels::*, rewrite::*, settings::*, updates::*, workspace::*,
+    analysis::*, auto_run::*, chapter_rules::*, export::*, frontend_errors::*, jobs::*,
+    local_data::*, logs::*, models::*, novels::*, rewrite::*, settings::*, updates::*,
+    workspace::*,
 };
 use credentials::{classify_api_key_storage, read_api_key, write_api_key, ApiKeyStorage};
 use db::init_db;
@@ -41,7 +42,8 @@ use std::{
     time::Duration,
 };
 use task_control::{
-    should_terminate_paused_run, ActiveTaskRegistry, AutoRunControl, CancellableTaskRegistry,
+    should_hold_paused_run, should_terminate_paused_run, ActiveTaskRegistry, AutoRunControl,
+    CancellableTaskRegistry,
 };
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
@@ -86,7 +88,7 @@ pub fn run() {
             init_db(&conn)?;
             cleanup_old_ai_logs(&conn).map_err(std::io::Error::other)?;
             let restored_auto_runs = restore_auto_run_controls(&conn)?;
-            restore_orphaned_rewrite_statuses(&conn)?;
+            restore_orphaned_standalone_task_state(&conn)?;
             let client = Client::builder()
                 .connect_timeout(Duration::from_secs(20))
                 .timeout(Duration::from_secs(20 * 60))
@@ -116,6 +118,7 @@ pub fn run() {
             delete_novel,
             save_model_profile,
             delete_model_profile,
+            delete_local_data,
             list_model_profiles,
             test_model_profile,
             diagnose_model_profile,
@@ -128,6 +131,7 @@ pub fn run() {
             delete_token_usage_for_model,
             get_app_settings,
             save_app_settings,
+            set_auto_continue_enabled,
             save_selected_profile_id,
             get_novel_settings,
             save_novel_settings,
@@ -285,7 +289,7 @@ fn restore_auto_run_controls(
 ) -> Result<HashMap<String, AutoRunControl>, Box<dyn std::error::Error>> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE auto_run_checkpoints SET status = 'paused', pause_reason = CASE WHEN trim(pause_reason) = '' THEN '检测到软件上次运行时任务未正常结束。' ELSE pause_reason END, updated_at = ?1 WHERE status IN ('running', 'pausing', 'pause_requested', 'terminating', 'terminate_requested')",
+        "UPDATE auto_run_checkpoints SET status = 'paused', pause_kind = CASE WHEN status = 'pause_requested' THEN 'user' ELSE 'interrupted' END, pause_reason = CASE WHEN trim(pause_reason) = '' THEN '检测到软件上次运行时任务未正常结束。' ELSE pause_reason END, updated_at = ?1 WHERE status IN ('running', 'pausing', 'pause_requested', 'terminating', 'terminate_requested')",
         params![now],
     )?;
     conn.execute(
@@ -298,7 +302,7 @@ fn restore_auto_run_controls(
     )?;
 
     let mut stmt = conn.prepare(
-        "SELECT novel_id, start_batch_index, next_batch_index, job_id, status, profile_ids FROM auto_run_checkpoints",
+        "SELECT novel_id, start_batch_index, next_batch_index, job_id, status, profile_ids, pause_kind FROM auto_run_checkpoints",
     )?;
     let rows = stmt.query_map([], |row| {
         let profile_json: String = row.get(5)?;
@@ -313,6 +317,7 @@ fn restore_auto_run_controls(
                 completed_batches: row.get(2)?,
                 job_id: row.get(3)?,
                 status: row.get(4)?,
+                pause_kind: row.get(6)?,
                 profile_ids,
                 recoverable: true,
             },
@@ -333,6 +338,32 @@ fn restore_orphaned_rewrite_statuses(conn: &Connection) -> Result<(), Box<dyn st
                SELECT novel_id FROM auto_run_checkpoints WHERE status = 'paused'
            )",
         [],
+    )?;
+    Ok(())
+}
+
+fn restore_orphaned_standalone_task_state(
+    conn: &Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE chapters
+         SET analysis_status = 'failed'
+         WHERE analysis_status = 'running'
+           AND novel_id NOT IN (
+               SELECT novel_id FROM auto_run_checkpoints WHERE status = 'paused'
+           )",
+        [],
+    )?;
+    restore_orphaned_rewrite_statuses(conn)?;
+    conn.execute(
+        "UPDATE jobs
+         SET status = 'failed',
+             message = '检测到软件上次运行时独立任务中断，请重新运行当前批次。',
+             updated_at = ?1
+         WHERE job_type IN ('analysis', 'rewrite')
+           AND status IN ('running', 'pausing', 'terminating')",
+        params![now],
     )?;
     Ok(())
 }
@@ -5772,6 +5803,7 @@ fn prepare_auto_run(
         novel_id.to_string(),
         AutoRunControl {
             status: "running".to_string(),
+            pause_kind: String::new(),
             start_batch_index,
             completed_batches: resume_from,
             job_id: None,
@@ -5797,6 +5829,7 @@ fn register_auto_run_job(
         .entry(novel_id.to_string())
         .or_insert_with(|| AutoRunControl {
             status: "running".to_string(),
+            pause_kind: String::new(),
             start_batch_index,
             completed_batches,
             job_id: None,
@@ -5804,6 +5837,7 @@ fn register_auto_run_job(
             recoverable: true,
         });
     control.status = "running".to_string();
+    control.pause_kind.clear();
     control.start_batch_index = start_batch_index;
     control.completed_batches = completed_batches;
     control.job_id = Some(job_id.to_string());
@@ -5861,8 +5895,8 @@ fn persist_auto_run_checkpoint(
         r#"
         INSERT INTO auto_run_checkpoints (
             novel_id, start_batch_index, next_batch_index, job_id, status,
-            pause_reason, phase, batch_index, profile_ids, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            pause_reason, pause_kind, phase, batch_index, profile_ids, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
         ON CONFLICT(novel_id) DO UPDATE SET
             start_batch_index = excluded.start_batch_index,
             next_batch_index = excluded.next_batch_index,
@@ -5872,6 +5906,11 @@ fn persist_auto_run_checkpoint(
                 WHEN excluded.status = 'running' THEN excluded.pause_reason
                 WHEN excluded.pause_reason = '' THEN auto_run_checkpoints.pause_reason
                 ELSE excluded.pause_reason
+            END,
+            pause_kind = CASE
+                WHEN excluded.status = 'running' THEN ''
+                WHEN excluded.pause_kind = '' THEN auto_run_checkpoints.pause_kind
+                ELSE excluded.pause_kind
             END,
             phase = COALESCE(excluded.phase, auto_run_checkpoints.phase),
             batch_index = COALESCE(excluded.batch_index, auto_run_checkpoints.batch_index),
@@ -5885,6 +5924,7 @@ fn persist_auto_run_checkpoint(
             control.job_id,
             control.status,
             pause_reason,
+            control.pause_kind,
             phase,
             batch_index,
             profile_ids,
@@ -5939,23 +5979,41 @@ fn request_auto_run_stop(
     novel_id: &str,
     status: &str,
 ) -> Result<Job, String> {
-    let (job_id, completed_batches, start_batch_index, message, job_status, terminate_paused_run) = {
+    let (
+        job_id,
+        completed_batches,
+        start_batch_index,
+        message,
+        job_status,
+        terminate_paused_run,
+        hold_paused_run,
+    ) = {
         let mut runs = state.auto_runs.lock().map_err(to_string)?;
         let control = runs
             .get_mut(novel_id)
             .ok_or_else(|| "当前没有正在运行的一键分析改写任务。".to_string())?;
         let terminate_paused_run = should_terminate_paused_run(&control.status, status);
-        control.status = status.to_string();
+        let hold_paused_run = should_hold_paused_run(&control.status, status);
+        if status == "pause_requested" {
+            control.pause_kind = "user".to_string();
+        }
+        if !hold_paused_run {
+            control.status = status.to_string();
+        }
         let job_id = control
             .job_id
             .clone()
             .ok_or_else(|| "当前一键任务尚未创建进度记录。".to_string())?;
-        let message = if status == "terminate_requested" {
+        let message = if hold_paused_run {
+            "已由用户保持暂停；继续时仅处理未完成分片。"
+        } else if status == "terminate_requested" {
             "正在终止一键分析改写，当前未输出批次将不会保存。"
         } else {
             "正在暂停一键分析改写，已完成分片会保留，继续时仅处理未完成分片。"
         };
-        let job_status = if status == "terminate_requested" {
+        let job_status = if hold_paused_run {
+            "paused"
+        } else if status == "terminate_requested" {
             "terminating"
         } else {
             "pausing"
@@ -5967,6 +6025,7 @@ fn request_auto_run_stop(
             message.to_string(),
             job_status.to_string(),
             terminate_paused_run,
+            hold_paused_run,
         )
     };
     if !terminate_paused_run {
@@ -5989,6 +6048,16 @@ fn request_auto_run_stop(
             message,
         )?;
         clear_auto_run(state, novel_id)?;
+        return load_job(state, &job_id);
+    }
+    if hold_paused_run {
+        update_job(
+            state,
+            &job_id,
+            "paused",
+            completed_batches.saturating_sub(start_batch_index),
+            &message,
+        )?;
         return load_job(state, &job_id);
     }
     update_job(
@@ -6020,18 +6089,44 @@ fn finish_stopped_auto_run(
             "一键分析改写已暂停。继续后将处理第 {} 批的未完成分片。",
             completed_batches + 1
         );
-        update_job(state, &job.id, "paused", completed_in_range, &message)?;
-        emit_job_progress(app, &job, "paused", completed_in_range, &message);
-        let mut runs = state.auto_runs.lock().map_err(to_string)?;
-        if let Some(control) = runs.get_mut(&job.novel_id) {
-            control.status = "paused".to_string();
-            control.completed_batches = completed_batches;
-            control.job_id = Some(job.id.clone());
-            let control = control.clone();
-            drop(runs);
-            persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
-        }
+        return pause_auto_run_with_kind(
+            state,
+            app,
+            job,
+            completed_batches,
+            start_batch_index,
+            "user",
+            &message,
+        );
     }
+    load_job(state, &job.id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pause_auto_run_with_kind(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    start_batch_index: i64,
+    pause_kind: &str,
+    message: &str,
+) -> Result<Job, String> {
+    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
+    update_job(state, &job.id, "paused", completed_in_range, message)?;
+    let control = {
+        let mut runs = state.auto_runs.lock().map_err(to_string)?;
+        let control = runs
+            .get_mut(&job.novel_id)
+            .ok_or_else(|| "当前一键任务状态不存在。".to_string())?;
+        control.status = "paused".to_string();
+        control.pause_kind = pause_kind.to_string();
+        control.completed_batches = completed_batches;
+        control.job_id = Some(job.id.clone());
+        control.clone()
+    };
+    persist_auto_run_checkpoint(state, &job.novel_id, &control, message, None, None)?;
+    emit_job_progress(app, &job, "paused", completed_in_range, message);
     load_job(state, &job.id)
 }
 
@@ -6043,24 +6138,20 @@ fn pause_auto_run_after_rate_limit(
     start_batch_index: i64,
     error: &str,
 ) -> Result<Job, String> {
-    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
         "服务商限流重试已耗尽，任务已暂停。请降低并发、等待额度恢复或更换模型后点击继续；已完成分片已保留，将继续处理第 {} 批的未完成分片。\n\n{}",
         completed_batches + 1,
         error
     );
-    update_job(state, &job.id, "paused", completed_in_range, &message)?;
-    emit_job_progress(app, &job, "paused", completed_in_range, &message);
-    let mut runs = state.auto_runs.lock().map_err(to_string)?;
-    if let Some(control) = runs.get_mut(&job.novel_id) {
-        control.status = "paused".to_string();
-        control.completed_batches = completed_batches;
-        control.job_id = Some(job.id.clone());
-        let control = control.clone();
-        drop(runs);
-        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
-    }
-    load_job(state, &job.id)
+    pause_auto_run_with_kind(
+        state,
+        app,
+        job,
+        completed_batches,
+        start_batch_index,
+        "rate_limit",
+        &message,
+    )
 }
 
 fn pause_auto_run_after_network_error(
@@ -6071,24 +6162,20 @@ fn pause_auto_run_after_network_error(
     start_batch_index: i64,
     error: &str,
 ) -> Result<Job, String> {
-    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
         "网络连接异常，任务已暂停。请检查网络、代理或服务商连接状态后点击继续；已完成分片已保留，将继续处理第 {} 批的未完成分片。\n\n{}",
         completed_batches + 1,
         error
     );
-    update_job(state, &job.id, "paused", completed_in_range, &message)?;
-    emit_job_progress(app, &job, "paused", completed_in_range, &message);
-    let mut runs = state.auto_runs.lock().map_err(to_string)?;
-    if let Some(control) = runs.get_mut(&job.novel_id) {
-        control.status = "paused".to_string();
-        control.completed_batches = completed_batches;
-        control.job_id = Some(job.id.clone());
-        let control = control.clone();
-        drop(runs);
-        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
-    }
-    load_job(state, &job.id)
+    pause_auto_run_with_kind(
+        state,
+        app,
+        job,
+        completed_batches,
+        start_batch_index,
+        "network",
+        &message,
+    )
 }
 
 fn pause_auto_run_after_temporary_gateway_error(
@@ -6099,24 +6186,20 @@ fn pause_auto_run_after_temporary_gateway_error(
     start_batch_index: i64,
     error: &str,
 ) -> Result<Job, String> {
-    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
         "模型服务或反向代理暂时不可用，任务已暂停。可以调整并发或模型后点击继续；已完成分片已保留，将继续处理第 {} 批的未完成分片。\n\n{}",
         completed_batches + 1,
         error
     );
-    update_job(state, &job.id, "paused", completed_in_range, &message)?;
-    emit_job_progress(app, &job, "paused", completed_in_range, &message);
-    let mut runs = state.auto_runs.lock().map_err(to_string)?;
-    if let Some(control) = runs.get_mut(&job.novel_id) {
-        control.status = "paused".to_string();
-        control.completed_batches = completed_batches;
-        control.job_id = Some(job.id.clone());
-        let control = control.clone();
-        drop(runs);
-        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
-    }
-    load_job(state, &job.id)
+    pause_auto_run_with_kind(
+        state,
+        app,
+        job,
+        completed_batches,
+        start_batch_index,
+        "temporary_gateway",
+        &message,
+    )
 }
 
 fn pause_auto_run_after_model_format_error(
@@ -6127,24 +6210,44 @@ fn pause_auto_run_after_model_format_error(
     start_batch_index: i64,
     error: &str,
 ) -> Result<Job, String> {
-    let completed_in_range = completed_batches.saturating_sub(start_batch_index);
     let message = format!(
         "模型输出格式多次修复后仍无法解析，任务已暂停。已完成分片已保留，可以点击继续处理第 {} 批的未完成分片；如果频繁出现，请更换 JSON 输出更稳定的模型、提高并发以缩小单个分片，或缩小处理范围。\n\n{}",
         completed_batches + 1,
         error
     );
-    update_job(state, &job.id, "paused", completed_in_range, &message)?;
-    emit_job_progress(app, &job, "paused", completed_in_range, &message);
-    let mut runs = state.auto_runs.lock().map_err(to_string)?;
-    if let Some(control) = runs.get_mut(&job.novel_id) {
-        control.status = "paused".to_string();
-        control.completed_batches = completed_batches;
-        control.job_id = Some(job.id.clone());
-        let control = control.clone();
-        drop(runs);
-        persist_auto_run_checkpoint(state, &job.novel_id, &control, &message, None, None)?;
-    }
-    load_job(state, &job.id)
+    pause_auto_run_with_kind(
+        state,
+        app,
+        job,
+        completed_batches,
+        start_batch_index,
+        "model_format",
+        &message,
+    )
+}
+
+fn pause_auto_run_after_content_filter(
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+    job: Job,
+    completed_batches: i64,
+    start_batch_index: i64,
+    error: &str,
+) -> Result<Job, String> {
+    let message = format!(
+        "模型安全策略拦截了当前请求，任务已自动暂停。已完成分片已保留，可以调整创意设定、复检配置、对应模型的提示词模糊设置或更换模型后点击继续；将从第 {} 批的未完成分片恢复。\n\n{}",
+        completed_batches + 1,
+        error
+    );
+    pause_auto_run_with_kind(
+        state,
+        app,
+        job,
+        completed_batches,
+        start_batch_index,
+        "content_filter",
+        &message,
+    )
 }
 
 fn clear_auto_run(state: &State<'_, AppState>, novel_id: &str) -> Result<(), String> {
@@ -7671,12 +7774,17 @@ mod tests {
             load_chapter_batch_size(&conn).expect("load default batch size"),
             30
         );
+        assert!(!load_auto_continue_enabled(&conn).expect("load default auto continue"));
 
         save_review_enabled(&conn, false).expect("disable review");
         assert!(!load_review_enabled(&conn).expect("load disabled review setting"));
 
         save_review_enabled(&conn, true).expect("enable review");
         assert!(load_review_enabled(&conn).expect("load enabled review setting"));
+        save_auto_continue_enabled(&conn, true).expect("enable auto continue");
+        assert!(load_auto_continue_enabled(&conn).expect("load enabled auto continue"));
+        save_auto_continue_enabled(&conn, false).expect("disable auto continue");
+        assert!(!load_auto_continue_enabled(&conn).expect("load disabled auto continue"));
 
         save_rewrite_parallelism(&conn, 10).expect("save parallelism");
         assert_eq!(
@@ -7731,7 +7839,7 @@ mod tests {
         )
         .expect("insert checkpoint");
         conn.execute(
-            "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, job_id, status, pause_reason, phase, batch_index, profile_ids, created_at, updated_at) VALUES ('novel-2', 1, 1, 'job-2', 'running', '', 'analysis', 2, '[\"profile-2\"]', 'now', 'now')",
+            "INSERT INTO auto_run_checkpoints (novel_id, start_batch_index, next_batch_index, job_id, status, pause_reason, phase, batch_index, profile_ids, created_at, updated_at) VALUES ('novel-2', 1, 1, 'job-2', 'pause_requested', '', 'analysis', 2, '[\"profile-2\"]', 'now', 'now')",
             [],
         )
         .expect("insert auto batch checkpoint");
@@ -7739,6 +7847,7 @@ mod tests {
         let restored = restore_auto_run_controls(&conn).expect("restore controls");
         let control = restored.get("novel-1").expect("restored novel");
         assert_eq!(control.status, "paused");
+        assert_eq!(control.pause_kind, "interrupted");
         assert_eq!(control.completed_batches, 2);
         assert!(control.profile_ids.contains("profile-1"));
         let status: String = conn
@@ -7759,6 +7868,13 @@ mod tests {
                 .expect("restored auto batch")
                 .completed_batches,
             1
+        );
+        assert_eq!(
+            restored
+                .get("novel-2")
+                .expect("restored user pause")
+                .pause_kind,
+            "user"
         );
     }
 
@@ -7810,6 +7926,72 @@ mod tests {
         assert_eq!(status("with-draft"), "completed");
         assert_eq!(status("without-draft"), "failed");
         assert_eq!(status("paused-draft"), "running");
+    }
+
+    #[test]
+    fn startup_fails_orphaned_analysis_and_jobs_but_preserves_paused_auto_chapters() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+        for novel_id in ["orphan", "paused"] {
+            conn.execute(
+                "INSERT INTO novels (
+                    id, title, source_path, encoding, status, created_at
+                 ) VALUES (?1, '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+                params![novel_id],
+            )
+            .expect("insert novel");
+        }
+        conn.execute(
+            "INSERT INTO chapters (
+                id, novel_id, chapter_index, title, original_text,
+                analysis_status, rewrite_status
+             ) VALUES
+                ('orphan-analysis', 'orphan', 1, '第一章', '原文', 'running', 'pending'),
+                ('paused-analysis', 'paused', 1, '第一章', '原文', 'running', 'pending')",
+            [],
+        )
+        .expect("insert chapters");
+        conn.execute(
+            "INSERT INTO jobs (
+                id, novel_id, job_type, status, current_chapter, total_chapters,
+                message, created_at, updated_at
+             ) VALUES
+                ('analysis-job', 'orphan', 'analysis', 'running', 0, 1, '运行中', 'now', 'now'),
+                ('rewrite-job', 'orphan', 'rewrite', 'running', 0, 1, '运行中', 'now', 'now')",
+            [],
+        )
+        .expect("insert jobs");
+        conn.execute(
+            "INSERT INTO auto_run_checkpoints (
+                novel_id, start_batch_index, next_batch_index, status, pause_reason,
+                phase, batch_index, profile_ids, created_at, updated_at
+             ) VALUES (
+                'paused', 0, 0, 'paused', '测试暂停', 'analysis', 0, '[]', 'now', 'now'
+             )",
+            [],
+        )
+        .expect("insert checkpoint");
+
+        restore_orphaned_standalone_task_state(&conn).expect("restore standalone state");
+
+        let chapter_status = |chapter_id: &str| {
+            conn.query_row(
+                "SELECT analysis_status FROM chapters WHERE id = ?1",
+                params![chapter_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("load chapter status")
+        };
+        assert_eq!(chapter_status("orphan-analysis"), "failed");
+        assert_eq!(chapter_status("paused-analysis"), "running");
+        let failed_jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs WHERE status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count failed jobs");
+        assert_eq!(failed_jobs, 2);
     }
 
     #[test]

@@ -419,6 +419,11 @@ mod tests {
     fn auto_control(status: &str, completed_batches: i64) -> AutoRunControl {
         AutoRunControl {
             status: status.to_string(),
+            pause_kind: if status == "paused" {
+                "user".to_string()
+            } else {
+                String::new()
+            },
             start_batch_index: 0,
             completed_batches,
             job_id: Some("job-1".to_string()),
