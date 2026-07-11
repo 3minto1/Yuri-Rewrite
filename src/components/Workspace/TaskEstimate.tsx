@@ -18,6 +18,7 @@ export const TaskEstimate = memo(function TaskEstimate({ estimate, collapsed, on
         <div className="estimate-heading-actions">
           {!collapsed && <span>并发 {estimate.parallelism} · 复检{estimate.review_enabled ? "开启" : "关闭"}</span>}
           <button
+            type="button"
             className="icon-button estimate-toggle"
             title={collapsed ? "展开任务预估详情" : "隐藏任务预估详情"}
             aria-label={collapsed ? "展开任务预估详情" : "隐藏任务预估详情"}

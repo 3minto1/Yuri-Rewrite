@@ -1,4 +1,4 @@
-import { ChevronDown, FilePlus2, HelpCircle, KeyRound, Loader2, Save } from "lucide-react";
+import { ArrowLeft, ChevronDown, FilePlus2, HelpCircle, KeyRound, Loader2, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   getProviderBaseUrl,
@@ -22,22 +22,27 @@ type ModelConfigProps = {
   onCreate: () => void;
   onDiagnose: () => void;
   onSave: () => void;
+  standalone?: boolean;
+  onBack?: () => void;
 };
 
 export function ModelConfig(props: ModelConfigProps) {
   const {
     draft, setDraft, selectedProfile, selectedProfileId, suggestions, suggestionsOpen,
     busy, processing, savedApiKeyMask, onSuggestionsOpenChange,
-    onCreate, onDiagnose, onSave
+    onCreate, onDiagnose, onSave, standalone = false, onBack
   } = props;
   const thinkingSupport = getThinkingModeSupport(draft);
   const updateProviderFields = (updates: Partial<ProfileDraft>) => {
     setDraft((current) => normalizeThinkingMode({ ...current, ...updates }));
   };
   return (
-    <section className="panel model-panel">
+    <section className={standalone ? "panel model-panel model-management-panel" : "panel model-panel"}>
       <div className="panel-heading">
-        <h2>模型配置</h2>
+        <div>
+          <h2>{standalone ? "模型管理" : "模型配置"}</h2>
+          {standalone && <p>配置模型连接、生成参数和本机保存的 API Key。</p>}
+        </div>
         <div className="panel-actions">
           <button onClick={onCreate} disabled={busy !== "" || processing}><FilePlus2 size={16} />新建</button>
           <button onClick={onDiagnose} disabled={!selectedProfileId || busy === "diagnose" || processing}>
@@ -46,6 +51,7 @@ export function ModelConfig(props: ModelConfigProps) {
           <button onClick={onSave} disabled={busy === "profile" || processing}>
             {busy === "profile" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}保存
           </button>
+          {standalone && onBack && <button onClick={onBack}><ArrowLeft size={16} />返回工作台</button>}
         </div>
       </div>
       <ScrollablePanel className="model-scroll">

@@ -334,8 +334,6 @@ export function RewriteAbView({ novelId, initialRunId, onBack, onRunChange, onNo
           })}
           {run.status === "partial" && <button type="button" onClick={() => void retryRun()} disabled={busy !== ""}><RefreshCw size={16} />重试失败项</button>}
           {run.status === "running" && <button type="button" onClick={() => void terminateRun()} disabled={terminationRequested || (busy !== "" && busy !== "retry")}><Square size={16} />{terminationRequested ? "终止中" : "终止"}</button>}
-          <button className="action-primary" type="button" onClick={() => void applyOrRestore("apply")} disabled={!allSelected || run.status === "running" || busy !== ""}><Save size={16} />应用所选</button>
-          {run.status === "applied" && <button type="button" onClick={() => void applyOrRestore("restore")} disabled={busy !== ""}><RotateCcw size={16} />撤销应用</button>}
           <button className="danger-button" type="button" onClick={() => void deleteRun()} disabled={busy !== "" || run.status === "running"}><Trash2 size={16} />删除实验</button>
           <button type="button" onClick={onBack} disabled={busy !== ""}><ArrowLeft size={16} />返回工作台</button>
         </div>
@@ -432,6 +430,16 @@ export function RewriteAbView({ novelId, initialRunId, onBack, onRunChange, onNo
           </div>
         </>
       ) : <div className="rewrite-ab-loading"><Loader2 className="spin" size={22} />正在载入当前章节候选…</div>}
+      <div className="rewrite-ab-apply-bar" role="region" aria-label="应用 A/B 选稿">
+        <div>
+          <strong>已选 {run.selected_chapters}/{run.chapter_count}</strong>
+          <span>{allSelected ? "已为全部章节选择候选，可以应用为正式改写稿。" : "请为实验范围内的每个章节选择一个已完成候选。"}</span>
+        </div>
+        <div className="rewrite-ab-apply-actions">
+          {run.status === "applied" && <button type="button" onClick={() => void applyOrRestore("restore")} disabled={busy !== ""}><RotateCcw size={16} />撤销应用</button>}
+          <button className="action-primary" type="button" onClick={() => void applyOrRestore("apply")} disabled={!allSelected || run.status === "running" || busy !== ""}><Save size={16} />应用所选</button>
+        </div>
+      </div>
     </div>
   );
 }

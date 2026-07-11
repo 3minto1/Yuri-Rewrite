@@ -13,14 +13,19 @@ import {
   Loader2,
   MoreHorizontal,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pause,
   Play,
   RefreshCw,
+  Search,
   Save,
   Settings,
   Sparkles,
   Square,
   Sun,
+  Bot,
+  House,
   Trash2,
   X
 } from "lucide-react";
@@ -106,7 +111,7 @@ type ModelSuggestionGroup = {
 };
 
 type ThemeMode = "light" | "dark";
-type ActiveView = "workspace" | "compare" | "rewrite-ab" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings";
+type ActiveView = "workspace" | "models" | "compare" | "rewrite-ab" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings";
 
 
 const emptyProfile: ProfileDraft = {
@@ -136,6 +141,9 @@ const emptyNovelSettings: NovelSettingsDraft = {
 const savedApiKeyMask = "********";
 const quickStartSeenKey = "yuri-rewrite.quick-start-seen";
 const themePreferenceKey = "yuri-rewrite.theme";
+const sidebarPreferenceKey = "yuri-rewrite.sidebar.collapsed";
+const legacyWorkspaceSidebarPreferenceKey = "yuri-rewrite.sidebar.workspace-collapsed";
+const estimateCollapsedPreferenceKey = "yuri-rewrite.task-estimate-collapsed";
 const qualityIgnoreKeyPrefix = "yuri-rewrite.qualityIgnored.v1.";
 const resetAppSettings: AppSettings = {
   export_dir: null,
@@ -372,6 +380,26 @@ function readInitialTheme(): ThemeMode {
   }
 }
 
+function readBooleanPreference(key: string, fallback: boolean) {
+  try {
+    const stored = window.localStorage.getItem(key);
+    return stored === null ? fallback : stored === "true";
+  } catch {
+    return fallback;
+  }
+}
+
+function readSidebarCollapsedPreference() {
+  try {
+    const stored = window.localStorage.getItem(sidebarPreferenceKey);
+    if (stored !== null) return stored === "true";
+    const legacyWorkspacePreference = window.localStorage.getItem(legacyWorkspaceSidebarPreferenceKey);
+    return legacyWorkspacePreference === null ? false : legacyWorkspacePreference === "true";
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
   const {
     novels, setNovels, detail, setDetail, selectedChapterId, setSelectedChapterId,
@@ -396,11 +424,13 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>({});
   const [corePromptDraft, setCorePromptDraft] = useState("");
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
-  const [estimateCollapsed, setEstimateCollapsed] = useState(false);
+  const [estimateCollapsed, setEstimateCollapsed] = useState(() => readBooleanPreference(estimateCollapsedPreferenceKey, false));
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => readInitialTheme());
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("workspace");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsedPreference);
+  const [novelFilter, setNovelFilter] = useState("");
   const [compareDirty, setCompareDirty] = useState(false);
   const [pendingActiveView, setPendingActiveView] = useState<ActiveView | null>(null);
   const [pendingNovelSettingsActiveView, setPendingNovelSettingsActiveView] = useState<ActiveView | null>(null);
@@ -582,6 +612,17 @@ export default function App() {
   const selectedNovelPendingSplit = detail?.novel.status === "pending_split";
   const pausedAutoRun = autoRunState === "paused";
   const adjustableWhilePaused = processingTaskActive && !pausedAutoRun;
+  const toggleSidebar = useCallback(() => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    try { window.localStorage.setItem(sidebarPreferenceKey, String(next)); } catch { /* Keep the session state. */ }
+  }, [sidebarCollapsed]);
+
+  const filteredNovels = useMemo(() => {
+    const query = novelFilter.trim().toLocaleLowerCase();
+    if (!query) return novels;
+    return novels.filter((novel) => novel.title.toLocaleLowerCase().includes(query));
+  }, [novelFilter, novels]);
 
   const requestJobEstimate = useCallback(async (
     novelId: string | null | undefined,
@@ -2405,7 +2446,7 @@ export default function App() {
   }
 
   return (
-    <main className={dragActive ? "app-shell drag-active" : "app-shell"}>
+    <main className={`${dragActive ? "app-shell drag-active" : "app-shell"}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       {dragActive && (
         <div className="drop-import-overlay" aria-live="polite">
           <div className="drop-import-card">
@@ -2415,99 +2456,61 @@ export default function App() {
           </div>
         </div>
       )}
-      <nav className="app-menu">
-        {browserMockEnabled && (
-          <span className="browser-mock-badge" title="使用内存测试数据，不会访问本地数据库或模型服务">
-            浏览器测试模式
-          </span>
-        )}
-        <button
-          className={activeView === "compare" ? "app-menu-item active" : "app-menu-item"}
-          onClick={() => requestActiveView("compare")}
-          disabled={!detail || selectedNovelPendingSplit}
-          title={selectedNovelPendingSplit ? "请先生成章节列表" : undefined}
-        >
-          对比
-        </button>
-        <button
-          className={activeView === "rewrite-ab" ? "app-menu-item active" : "app-menu-item"}
-          onClick={() => void openExistingRewriteAbRun()}
-          disabled={!detail || selectedNovelPendingSplit || openingRewriteAbRuns}
-          aria-label={rewriteAbProgressRunning && job?.candidate_total
-            ? `A/B 实验，运行中，候选 ${job.candidate_completed ?? 0}/${job.candidate_total}`
-            : rewriteAbRunning
-              ? "A/B 实验，运行中"
-              : "A/B 实验"}
-          title={selectedNovelPendingSplit ? "请先生成章节列表" : "查看当前小说的 A/B 实验"}
-        >
-          {openingRewriteAbRuns || rewriteAbRunning
-            ? <Loader2 className="spin" size={16} aria-hidden="true" />
-            : <GitCompareArrows size={16} aria-hidden="true" />}
-          A/B 实验
-          {rewriteAbProgressRunning && job?.candidate_total ? (
-            <span className="ab-menu-progress" aria-hidden="true">
-              {job.candidate_completed ?? 0}/{job.candidate_total}
-            </span>
-          ) : null}
-        </button>
-        <button
-          className={activeView === "novel-settings" ? "app-menu-item active" : "app-menu-item"}
-          onClick={openNovelSettings}
-          disabled={!detail}
-        >
-          设定
-        </button>
-        <button
-          className={activeView === "core-settings" ? "app-menu-item active" : "app-menu-item"}
-          onClick={() => requestActiveView("core-settings")}
-        >
-          核心设定
-        </button>
-        <button
-          className={activeView === "chapter-rules" ? "app-menu-item active" : "app-menu-item"}
-          onClick={openChapterRules}
-          disabled={!detail}
-        >
-          章节规则
-        </button>
-        <button className="app-menu-item" onClick={() => setShowQuickStart(true)}>
-          <HelpCircle size={16} />
-          帮助
-        </button>
-        <div className="app-menu-spacer" />
-        <button className="app-menu-item" onClick={openGithubRepository} disabled={busy !== ""}>
-          <Github size={16} />
-          GitHub地址
-        </button>
-        <button className="app-menu-item update-menu-item" onClick={checkForUpdates} disabled={busy !== ""}>
-          {busy === "check-updates" || busy === "download-update" ? (
-            <Loader2 className="spin" size={16} />
-          ) : (
-            <RefreshCw size={16} />
-          )}
-          检查更新
-          {hasAvailableUpdate && <span className="update-dot" aria-label="发现新版本" />}
-        </button>
-      </nav>
-
       <aside className="sidebar">
-        <button className="brand brand-button" onClick={() => requestActiveView("workspace")}>
-          <Sparkles size={22} />
-          <div>
-            <strong>Yuri Rewrite</strong>
-            <span>本地小说分析与改写</span>
-          </div>
+        <div className="sidebar-brand-row">
+          <button className="brand brand-button" onClick={() => requestActiveView("workspace")} title="返回工作台">
+            <Sparkles size={22} />
+            <div>
+              <strong>Yuri Rewrite</strong>
+              <span>本地小说分析与改写</span>
+            </div>
+          </button>
+          <button type="button" className="icon-button sidebar-collapse-toggle" aria-label={sidebarCollapsed ? "展开侧栏" : "折叠侧栏"} title={sidebarCollapsed ? "展开侧栏" : "折叠侧栏"} onClick={toggleSidebar}>
+            {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
+        </div>
+
+        {browserMockEnabled && <span className="browser-mock-badge sidebar-copy" title="使用内存测试数据，不会访问本地数据库或模型服务">浏览器测试模式</span>}
+
+        <button className="primary-action sidebar-action" title="导入 TXT" onClick={importTxt} disabled={busy === "import" || processingTaskActive}>
+          {busy === "import" ? <Loader2 className="spin" size={18} /> : <FilePlus2 size={18} />}
+          <span className="sidebar-nav-label">导入 TXT</span>
         </button>
 
-        <button className="primary-action" onClick={importTxt} disabled={busy === "import" || processingTaskActive}>
-          {busy === "import" ? <Loader2 className="spin" size={18} /> : <FilePlus2 size={18} />}
-          导入 TXT
-        </button>
+        <div className="side-section nav-section sidebar-primary-nav">
+          <div className="section-label">工作流</div>
+          <button className={activeView === "workspace" ? "nav-button active" : "nav-button"} title="工作台" onClick={() => requestActiveView("workspace")}>
+            <House size={17} /><span className="sidebar-nav-label">工作台</span>
+          </button>
+          <button className={activeView === "compare" ? "nav-button active" : "nav-button"} title="对比" onClick={() => requestActiveView("compare")} disabled={!detail || selectedNovelPendingSplit}>
+            <GitCompareArrows size={17} /><span className="sidebar-nav-label">对比</span>
+          </button>
+          <button className={activeView === "rewrite-ab" ? "nav-button active" : "nav-button"} title="A/B 实验" onClick={() => void openExistingRewriteAbRun()} disabled={!detail || selectedNovelPendingSplit || openingRewriteAbRuns} aria-label={rewriteAbProgressRunning && job?.candidate_total ? `A/B 实验，运行中，候选 ${job.candidate_completed ?? 0}/${job.candidate_total}` : "A/B 实验"}>
+            {openingRewriteAbRuns || rewriteAbRunning ? <Loader2 className="spin" size={17} /> : <GitCompareArrows size={17} />}
+            <span className="sidebar-nav-label">A/B 实验</span>
+            {rewriteAbProgressRunning && job?.candidate_total ? <span className="ab-menu-progress">{job.candidate_completed ?? 0}/{job.candidate_total}</span> : null}
+          </button>
+        </div>
 
         <div className="side-section">
           <div className="section-label">小说</div>
+          {novels.length > 4 && (
+            <label className="sidebar-novel-filter">
+              <Search size={15} aria-hidden="true" />
+              <input
+                type="search"
+                aria-label="筛选小说"
+                placeholder="筛选小说"
+                value={novelFilter}
+                onChange={(event) => {
+                  setNovelFilter(event.target.value);
+                  setOpenNovelMenuId("");
+                }}
+              />
+            </label>
+          )}
           <div className="novel-list">
-            {novels.map((novel) => (
+            {filteredNovels.map((novel) => (
               <div className="novel-row" key={novel.id}>
                 <button
                   className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"}
@@ -2541,6 +2544,7 @@ export default function App() {
               </div>
             ))}
             {novels.length === 0 && <p className="muted">尚未导入小说。</p>}
+            {novels.length > 0 && filteredNovels.length === 0 && <p className="muted sidebar-novel-empty">没有匹配的小说。</p>}
           </div>
         </div>
 
@@ -2558,21 +2562,46 @@ export default function App() {
           />
         </div>
 
-        <div className="side-section nav-section">
+        <div className="side-section nav-section sidebar-novel-nav">
+          <div className="section-label">小说配置</div>
+          <button className={activeView === "novel-settings" ? "nav-button active" : "nav-button"} title="设定" onClick={openNovelSettings} disabled={!detail}>
+            <Settings size={17} /><span className="sidebar-nav-label">设定</span>
+          </button>
+          <button className={activeView === "core-settings" ? "nav-button active" : "nav-button"} title="核心设定" onClick={() => requestActiveView("core-settings")}>
+            <Sparkles size={17} /><span className="sidebar-nav-label">核心设定</span>
+          </button>
+          <button className={activeView === "chapter-rules" ? "nav-button active" : "nav-button"} title="章节规则" onClick={openChapterRules} disabled={!detail}>
+            <BookOpen size={17} /><span className="sidebar-nav-label">章节规则</span>
+          </button>
+        </div>
+
+        <div className="side-section nav-section sidebar-system-nav">
+          <div className="section-label">数据与系统</div>
+          <button className={activeView === "models" ? "nav-button active" : "nav-button"} title="管理模型" onClick={() => requestActiveView("models")}>
+            <Bot size={17} /><span className="sidebar-nav-label">管理模型</span>
+          </button>
           <button
             className={activeView === "logs" ? "nav-button active" : "nav-button"}
+            title="日志"
             onClick={() => requestActiveView("logs")}
           >
             <ClipboardList size={17} />
-            日志
+            <span className="sidebar-nav-label">日志</span>
           </button>
           <button
             className={activeView === "token-stats" ? "nav-button active" : "nav-button"}
+            title="Token 统计"
             onClick={openTokenStats}
             disabled={busy !== ""}
           >
             <ChartNoAxesCombined size={17} />
-            Token统计
+            <span className="sidebar-nav-label">Token统计</span>
+          </button>
+          <button className={activeView === "settings" ? "nav-button active" : "nav-button"} title="设置" onClick={() => requestActiveView("settings")}>
+            <Settings size={17} /><span className="sidebar-nav-label">设置</span>
+          </button>
+          <button className="nav-button" title="帮助" onClick={() => setShowQuickStart(true)}>
+            <HelpCircle size={17} /><span className="sidebar-nav-label">帮助</span>
           </button>
         </div>
 
@@ -2586,58 +2615,25 @@ export default function App() {
           onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
         >
           {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-          {theme === "dark" ? "日间模式" : "夜间模式"}
+          <span className="sidebar-nav-label">{theme === "dark" ? "日间模式" : "夜间模式"}</span>
         </button>
 
-        <button
-          className={activeView === "settings" ? "nav-button active" : "nav-button"}
-          onClick={() => requestActiveView("settings")}
-        >
-          <Settings size={17} />
-          设置
+        <button className="nav-button" title="GitHub" onClick={openGithubRepository} disabled={busy !== ""}>
+          <Github size={17} /><span className="sidebar-nav-label">GitHub</span>
+        </button>
+        <button className="nav-button update-menu-item" title="检查更新" onClick={checkForUpdates} disabled={busy !== ""}>
+          {busy === "check-updates" || busy === "download-update" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+          <span className="sidebar-nav-label">检查更新</span>
+          {hasAvailableUpdate && <span className="update-dot" aria-label="发现新版本" />}
         </button>
       </aside>
 
       <section className="workspace">
-        {!["compare", "rewrite-ab", "settings", "token-stats", "logs", "chapter-rules", "novel-settings"].includes(activeView) && (
+        {activeView === "workspace" && (
         <header className="topbar">
           <div>
-            <h1>
-              {activeView === "logs"
-                ? "日志"
-                : activeView === "token-stats"
-                  ? "Token统计"
-                : activeView === "settings"
-                  ? "设置"
-                  : activeView === "novel-settings"
-                    ? "基本设定"
-                  : activeView === "chapter-rules"
-                    ? "章节规则"
-                  : activeView === "compare"
-                    ? "对比"
-                    : detail?.novel.title ?? "工作台"}
-            </h1>
-            <p>
-              {activeView === "logs"
-                ? "查看 AI 调用的思考过程与原始输出"
-                : activeView === "token-stats"
-                  ? "按模型和日期查看请求次数、输入与输出 Token"
-                : activeView === "settings"
-                  ? ""
-                  : activeView === "novel-settings"
-                    ? detail
-                      ? `绑定《${detail.novel.title}》的改写规则`
-                      : "导入小说后配置基本设定"
-                  : activeView === "chapter-rules"
-                    ? detail
-                      ? `配置《${detail.novel.title}》的章节拆分规则`
-                      : "导入小说后配置章节拆分规则"
-                  : activeView === "compare"
-                    ? "左侧原文，右侧改写稿"
-                    : detail
-                      ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}`
-                      : "导入 TXT 后开始分析和改写"}
-            </p>
+            <h1>{detail?.novel.title ?? "工作台"}</h1>
+            <p>{detail ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}` : "导入 TXT 后开始分析和改写"}</p>
           </div>
           {activeView === "workspace" && (
             <div className="topbar-actions">
@@ -2681,12 +2677,13 @@ export default function App() {
               <div className="split-button task-primary-split" ref={autoRunMenuRef}>
                 <button
                   className="split-button-main action-primary"
+                  aria-label="一键分析改写"
                   onClick={() => void runAnalyzeRewriteAll()}
                   disabled={!detail || !selectedProfileId || busy !== "" || autoRunState !== "idle"}
                   title="AI自动分析改写全文，耗时较久"
                 >
                   {busy === "auto" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-                  一键分析改写
+                  全文一键
                 </button>
                 <button
                   className="split-button-toggle action-primary"
@@ -2711,12 +2708,13 @@ export default function App() {
               </div>
               <button
                 className="action-primary"
+                aria-label="一键分析改写当前批次"
                 onClick={() => void runAnalyzeRewriteCurrentBatch()}
                 disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
                 title="AI自动分析并改写当前选中批次"
               >
                 {busy === "auto-batch" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-                一键分析改写当前批次
+                当前批次一键
               </button>
               <div className="task-secondary-group">
                 <button
@@ -3011,6 +3009,28 @@ export default function App() {
           />
         )}
 
+        {activeView === "models" && (
+          <div className="page-panel model-management-page">
+            <ModelConfig
+              draft={profileDraft}
+              setDraft={setProfileDraft}
+              selectedProfile={selectedProfile}
+              selectedProfileId={selectedProfileId}
+              suggestions={detectedModelSuggestions}
+              suggestionsOpen={openModelSuggestions}
+              busy={busy}
+              processing={adjustableWhilePaused}
+              savedApiKeyMask={savedApiKeyMask}
+              onSuggestionsOpenChange={setOpenModelSuggestions}
+              onCreate={createNewModelProfile}
+              onDiagnose={diagnoseProfile}
+              onSave={saveProfile}
+              standalone
+              onBack={() => requestActiveView("workspace")}
+            />
+          </div>
+        )}
+
         {activeView === "compare" && (
           <CompareView
             chapters={detail?.chapters ?? []}
@@ -3066,28 +3086,17 @@ export default function App() {
             <TaskEstimate
               estimate={jobEstimate}
               collapsed={estimateCollapsed}
-              onToggle={() => setEstimateCollapsed((value) => !value)}
+              onToggle={() => {
+                const next = !estimateCollapsed;
+                setEstimateCollapsed(next);
+                try { window.localStorage.setItem(estimateCollapsedPreferenceKey, String(next)); } catch { /* Keep the session state. */ }
+              }}
               formatNumber={formatNumber}
               formatSeconds={formatSeconds}
             />
           )}
           {workspaceSection === "main" ? (
-            <div className="content-grid workspace-main-grid">
-              <ModelConfig
-                draft={profileDraft}
-                setDraft={setProfileDraft}
-                selectedProfile={selectedProfile}
-                selectedProfileId={selectedProfileId}
-                suggestions={detectedModelSuggestions}
-                suggestionsOpen={openModelSuggestions}
-                busy={busy}
-                processing={adjustableWhilePaused}
-                savedApiKeyMask={savedApiKeyMask}
-                onSuggestionsOpenChange={setOpenModelSuggestions}
-                onCreate={createNewModelProfile}
-                onDiagnose={diagnoseProfile}
-                onSave={saveProfile}
-              />
+            <div className="content-grid workspace-main-grid workspace-chapter-grid">
               {selectedNovelPendingSplit ? (
                 <section className="panel pending-split-panel">
                   <div>
@@ -3311,10 +3320,10 @@ export default function App() {
               <h2 id="quickstart-title">快速上手</h2>
               <ol>
                 <li>点击导入 TXT，软件会自动识别章节，并按批次整理。</li>
-                <li>先配置模型，填写 Base URL、模型 ID 和 API Key，保存后点击诊断模型。</li>
+            <li>从侧栏进入“管理模型”，填写 Base URL、模型 ID 和 API Key，保存后点击诊断模型。</li>
                 <li>进入设定，填写主角原名、改写后姓名、身材体型、改写模式和额外要求。</li>
                 <li>建议先处理一个批次：点击分析，再点击改写，确认效果稳定后再使用一键分析改写。</li>
-                <li>当前批次可从“改写”选项启动 2–3 个模型的 A/B 改写；候选经确认应用前不会进入正式改写稿或 TXT，返回工作台后可通过顶部“A/B 实验”继续查看候选和进度。</li>
+            <li>当前批次可从“改写”选项启动 2–3 个模型的 A/B 改写；候选经确认应用前不会进入正式改写稿或 TXT，返回工作台后可通过侧栏“A/B 实验”继续查看候选和进度。</li>
                 <li>改写复检默认开启，会增加请求数、等待时间和 token 消耗；如需优先速度，可在设置中关闭。</li>
                 <li>一键分析改写会按批次连续处理；运行中可暂停、继续或终止，限流、网络中断或模型安全策略拦截后也可调整设置再继续。</li>
                 <li>改写完成后进入对比页面，可搜索、查看差异并导出 TXT；导出只包含已完成改写的章节。</li>

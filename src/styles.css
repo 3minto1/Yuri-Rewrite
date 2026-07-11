@@ -3815,6 +3815,12 @@ label textarea {
   padding: 22px 18px 18px;
 }
 
+.sidebar > *,
+.sidebar .side-section {
+  flex: 0 0 auto;
+  min-height: auto;
+}
+
 .brand {
   position: relative;
 }
@@ -4781,5 +4787,458 @@ mark.search-match.active-search-match {
   .page-panel {
     padding-left: 14px;
     padding-right: 14px;
+  }
+}
+
+/* Workflow-first application shell */
+.app-shell {
+  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  transition: grid-template-columns 180ms ease;
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.sidebar {
+  gap: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.sidebar-brand-row {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.sidebar-brand-row .brand-button {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-collapse-toggle {
+  background: transparent;
+  border-color: #49463f;
+  color: #f4efe6;
+  flex: 0 0 36px;
+}
+
+.sidebar .side-section,
+.sidebar .nav-section {
+  gap: 6px;
+}
+
+.sidebar .section-label {
+  margin-top: 2px;
+}
+
+.sidebar .nav-button,
+.sidebar .sidebar-action {
+  min-height: 36px;
+}
+
+.sidebar .nav-button {
+  gap: 10px;
+  position: relative;
+}
+
+.sidebar .ab-menu-progress {
+  margin-left: auto;
+}
+
+.sidebar-novel-filter {
+  align-items: center;
+  background: #302e2a;
+  border: 1px solid #49463f;
+  border-radius: var(--radius-control);
+  color: #c9c0b0;
+  display: flex;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 9px;
+}
+
+.sidebar-novel-filter:focus-within {
+  border-color: #f4efe6;
+  box-shadow: 0 0 0 2px rgb(244 239 230 / 18%);
+}
+
+.sidebar-novel-filter input {
+  background: transparent;
+  border: 0;
+  color: #f4efe6;
+  min-height: 34px;
+  min-width: 0;
+  outline: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.sidebar-novel-filter input::placeholder {
+  color: #a9a093;
+}
+
+.sidebar .novel-list {
+  gap: 8px;
+  max-height: 168px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 3px;
+  scrollbar-gutter: stable;
+}
+
+.sidebar-novel-empty {
+  margin: 4px 0;
+  text-align: center;
+}
+
+.sidebar .novel-list .novel-row:nth-child(n + 3) .context-menu {
+  bottom: 40px;
+  top: auto;
+}
+
+.sidebar-spacer {
+  min-height: 4px;
+}
+
+.sidebar-collapsed .sidebar {
+  align-items: center;
+  padding: 8px;
+}
+
+.sidebar-collapsed .sidebar-brand-row,
+.sidebar-collapsed .sidebar .nav-section,
+.sidebar-collapsed .sidebar > .nav-button,
+.sidebar-collapsed .sidebar > .sidebar-action {
+  width: 100%;
+}
+
+.sidebar-collapsed .brand-button {
+  flex: 0 0 40px;
+  justify-content: center;
+  min-height: 40px;
+  width: 40px;
+}
+
+.sidebar-collapsed .sidebar-brand-row {
+  flex-direction: column;
+}
+
+.sidebar-collapsed .brand-button div,
+.sidebar-collapsed .sidebar-copy,
+.sidebar-collapsed .sidebar > .side-section:not(.nav-section),
+.sidebar-collapsed .sidebar .section-label,
+.sidebar-collapsed .sidebar-nav-label,
+.sidebar-collapsed .sidebar .ab-menu-progress {
+  display: none;
+}
+
+.sidebar-collapsed .sidebar .nav-button,
+.sidebar-collapsed .sidebar .sidebar-action {
+  justify-content: center;
+  min-width: 40px;
+  padding-left: 0;
+  padding-right: 0;
+  width: 100%;
+}
+
+.sidebar-collapsed .sidebar .update-dot {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+}
+
+.topbar {
+  gap: 16px;
+  min-height: 76px;
+  padding: 12px 16px;
+}
+
+.topbar h1 {
+  font-size: 22px;
+}
+
+.topbar-actions {
+  gap: 8px;
+}
+
+.batch-strip {
+  margin: 12px 16px 0;
+  padding: 10px 12px;
+}
+
+.batch-strip label {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+
+.batch-strip label select {
+  flex: 1;
+  min-width: 180px;
+}
+
+.estimate-panel {
+  margin: 8px 16px 0;
+  padding: 10px 12px;
+}
+
+.estimate-heading {
+  margin-bottom: 8px;
+}
+
+.estimate-grid {
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.estimate-grid div {
+  padding: 7px 8px;
+}
+
+.workspace-chapter-grid {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  padding: 10px 16px 16px;
+}
+
+.workspace-chapter-grid > .chapter-list-panel,
+.workspace-chapter-grid > .pending-split-panel {
+  min-height: 0;
+}
+
+.model-management-page {
+  overflow: hidden;
+  padding: 16px;
+}
+
+.model-management-panel {
+  height: 100%;
+}
+
+.model-management-panel .panel-heading > div:first-child p {
+  color: var(--color-text-muted);
+  margin: 4px 0 0;
+}
+
+.model-management-panel .model-form-grid {
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  margin: 0 auto;
+  max-width: 960px;
+}
+
+.app-settings-tabs {
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+  max-width: none;
+  padding: 6px;
+  position: sticky;
+  top: 0;
+  width: 100%;
+  z-index: 3;
+}
+
+.app-settings-tabs button {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  display: flex;
+  gap: 10px;
+  justify-content: flex-start;
+  min-height: 58px;
+  padding: 8px 12px;
+  position: relative;
+  text-align: left;
+}
+
+.app-settings-tabs button > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.app-settings-tabs button strong,
+.app-settings-tabs button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-settings-tabs button strong {
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.app-settings-tabs button small {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.app-settings-tabs button:hover:not(:disabled) {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+.app-settings-tabs button.active,
+.app-settings-tabs button[aria-selected="true"] {
+  background: var(--color-brand-soft);
+  border-color: color-mix(in srgb, var(--color-brand) 52%, var(--color-border));
+  color: var(--color-brand-active);
+}
+
+.app-settings-tabs button.active::after,
+.app-settings-tabs button[aria-selected="true"]::after {
+  background: var(--color-brand);
+  border-radius: 999px 999px 0 0;
+  bottom: -1px;
+  content: "";
+  height: 3px;
+  left: 10px;
+  position: absolute;
+  right: 10px;
+}
+
+.app-settings-tabs button.active strong,
+.app-settings-tabs button[aria-selected="true"] strong {
+  color: var(--color-brand-active);
+}
+
+.app-settings-tabs button:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+.app-settings-tab-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 auto;
+  max-width: 1120px;
+}
+
+.app-settings-tab-panel .settings-section {
+  margin: 0;
+}
+
+.rewrite-ab-model-progress-list {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.rewrite-ab-model-progress {
+  align-items: center;
+  display: grid;
+  gap: 8px 14px;
+  grid-template-columns: minmax(170px, 0.75fr) minmax(140px, 1fr) minmax(250px, 1fr);
+  padding: 8px 10px;
+}
+
+.rewrite-ab-model-progress-heading {
+  min-width: 0;
+}
+
+.rewrite-ab-model-progress-track {
+  grid-column: 2;
+}
+
+.rewrite-ab-model-progress-meta {
+  grid-column: 3;
+  justify-content: flex-end;
+}
+
+.rewrite-ab-apply-bar {
+  align-items: center;
+  background: color-mix(in srgb, var(--color-surface-raised) 94%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 -8px 24px rgb(24 23 20 / 8%);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 8px 10px 8px 14px;
+  position: sticky;
+  bottom: 0;
+  z-index: 12;
+}
+
+.rewrite-ab-apply-bar > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.rewrite-ab-apply-bar span {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.rewrite-ab-apply-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+:root[data-theme="dark"] .rewrite-ab-apply-bar {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+@media (max-width: 1180px) {
+  .app-shell {
+    grid-template-columns: 232px minmax(0, 1fr);
+  }
+
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .topbar {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .topbar-actions {
+    justify-content: flex-end;
+    width: auto;
+  }
+
+  .rewrite-ab-model-progress {
+    grid-template-columns: minmax(170px, .75fr) minmax(180px, 1.15fr) minmax(230px, 1fr);
+  }
+
+  .rewrite-ab-model-progress-track {
+    grid-column: 2;
+  }
+
+  .rewrite-ab-model-progress-meta {
+    grid-column: 3;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 760px) {
+  .model-management-panel .model-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 920px) {
+  .estimate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .estimate-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

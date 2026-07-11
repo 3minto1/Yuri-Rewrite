@@ -1,4 +1,5 @@
-import { ArrowLeft, FolderOpen, HelpCircle, Trash2 } from "lucide-react";
+import { ArrowLeft, Bot, FolderOpen, Gauge, HelpCircle, Trash2 } from "lucide-react";
+import { useState } from "react";
 import { modelProfileDisplayName, modelProfileTitle } from "../../config/modelProfileDisplay";
 import type { AppSettings, ModelProfile } from "../../types";
 
@@ -26,9 +27,34 @@ export function AppSettingsView(props: AppSettingsViewProps) {
   const adjustmentDisabled = processing && !allowPausedTaskAdjustments;
   const batchSize = settings.chapter_batch_size ?? 30;
   const maxParallelism = batchSize === 100 ? 50 : batchSize === 50 ? 25 : 10;
+  type SettingsTab = "models" | "tasks" | "data";
+  const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
+    try {
+      const saved = window.localStorage.getItem("yuri-rewrite.settings-tab");
+      if (saved === "models" || saved === "tasks" || saved === "data") return saved;
+    } catch {
+      // Keep the recommended first tab when storage is unavailable.
+    }
+    return "models";
+  });
+  const selectTab = (tab: SettingsTab) => {
+    setActiveTab(tab);
+    try {
+      window.localStorage.setItem("yuri-rewrite.settings-tab", tab);
+    } catch {
+      // The tab still changes for this session.
+    }
+  };
   return (
     <div className="page-panel">
       <div className="page-heading"><h2>设置</h2><div className="panel-actions"><button onClick={onBack}><ArrowLeft size={16} />返回</button></div></div>
+      <div className="settings-tabs app-settings-tabs" role="tablist" aria-label="应用设置分类">
+        <button type="button" role="tab" aria-label="模型与复检" aria-selected={activeTab === "models"} className={activeTab === "models" ? "active" : ""} onClick={() => selectTab("models")}><Bot size={18} aria-hidden="true" /><span><strong>模型与复检</strong><small>分析与审查模型</small></span></button>
+        <button type="button" role="tab" aria-label="任务与并发" aria-selected={activeTab === "tasks"} className={activeTab === "tasks" ? "active" : ""} onClick={() => selectTab("tasks")}><Gauge size={18} aria-hidden="true" /><span><strong>任务与并发</strong><small>执行方式与速度</small></span></button>
+        <button type="button" role="tab" aria-label="文件与数据" aria-selected={activeTab === "data"} className={activeTab === "data" ? "active" : ""} onClick={() => selectTab("data")}><FolderOpen size={18} aria-hidden="true" /><span><strong>文件与数据</strong><small>导出与本地数据</small></span></button>
+      </div>
+      <div className="app-settings-tab-panel" role="tabpanel">
+      {activeTab === "data" && (<>
       <section className="settings-section">
         <h3>导出目录</h3>
         <div className="setting-row">
@@ -37,6 +63,8 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <button onClick={onClearExportDir} disabled={!settings.export_dir || busy === "clear-export-dir" || processing}>恢复默认</button>
         </div>
       </section>
+      </>)}
+      {activeTab === "tasks" && (<>
       <section className="settings-section">
         <div className="settings-section-heading">
           <h3>任务执行</h3>
@@ -55,6 +83,8 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <span>自动暂停后按原因逐步延长等待时间并继续；可随时关闭，或在倒计时期间选择保持暂停。</span>
         </div>
       </section>
+      </>)}
+      {activeTab === "models" && (<>
       <section className="settings-section">
         <div className="settings-section-heading">
           <h3>分析模型选择</h3>
@@ -93,6 +123,8 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <span>审查专家只判定并列出问题；不通过时会打回改写模型重写，再由审查专家复判。</span>
         </div>
       </section>
+      </>)}
+      {activeTab === "tasks" && (<>
       <section className="settings-section">
         <div className="settings-section-heading">
           <h3>每批次章节数</h3>
@@ -120,6 +152,8 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <span>默认 10。并发 25 需要每批至少 50 章；并发 50 需要每批 100 章。</span>
         </div>
       </section>
+      </>)}
+      {activeTab === "data" && (<>
       <section className="settings-section settings-danger-zone">
         <div className="settings-section-heading">
           <h3>本地数据</h3>
@@ -136,6 +170,8 @@ export function AppSettingsView(props: AppSettingsViewProps) {
           <span>{processing ? "请先终止运行中或暂停的一键任务。" : "永久清空应用工作数据和保存的 API Key；原始 TXT 与导出 TXT 会保留。"}</span>
         </div>
       </section>
+      </>)}
+      </div>
     </div>
   );
 }

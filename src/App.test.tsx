@@ -200,6 +200,11 @@ describe("App feature behavior", () => {
     recoveryRows = [];
     window.localStorage.setItem("yuri-rewrite.quick-start-seen", "true");
     window.localStorage.removeItem("yuri-rewrite.theme");
+    window.localStorage.removeItem("yuri-rewrite.settings-tab");
+    window.localStorage.removeItem("yuri-rewrite.sidebar.collapsed");
+    window.localStorage.removeItem("yuri-rewrite.sidebar.workspace-collapsed");
+    window.localStorage.removeItem("yuri-rewrite.sidebar.focus-collapsed");
+    window.localStorage.removeItem("yuri-rewrite.task-estimate-collapsed");
     delete document.documentElement.dataset.theme;
     installDefaultCommands();
   });
@@ -213,7 +218,91 @@ describe("App feature behavior", () => {
       "title",
       expect.stringContaining("模型名：test-model")
     );
-    expect(screen.getAllByDisplayValue("test-model")).not.toHaveLength(0);
+    expect(screen.queryByDisplayValue("test-model")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
+    expect(screen.getByRole("heading", { name: "模型管理" })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("test-model")).toBeInTheDocument();
+  });
+
+  it("keeps one user-controlled sidebar preference across pages and restarts", async () => {
+    const firstRender = render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    const shell = firstRender.container.querySelector(".app-shell") as HTMLElement;
+    expect(shell).not.toHaveClass("sidebar-collapsed");
+
+    fireEvent.click(screen.getByRole("button", { name: "对比" }));
+    expect(shell).not.toHaveClass("sidebar-collapsed");
+    fireEvent.click(screen.getByRole("button", { name: "折叠侧栏" }));
+    expect(shell).toHaveClass("sidebar-collapsed");
+    expect(window.localStorage.getItem("yuri-rewrite.sidebar.collapsed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "工作台" }));
+    expect(shell).toHaveClass("sidebar-collapsed");
+
+    firstRender.unmount();
+    const secondRender = render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(secondRender.container.querySelector(".app-shell")).toHaveClass("sidebar-collapsed");
+  });
+
+  it("inherits the legacy workspace sidebar preference when the unified preference is absent", async () => {
+    window.localStorage.setItem("yuri-rewrite.sidebar.workspace-collapsed", "true");
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(container.querySelector(".app-shell")).toHaveClass("sidebar-collapsed");
+  });
+
+  it("shows the full estimate by default and remembers an explicit collapse", async () => {
+    const firstRender = render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(screen.getByLabelText("任务预估")).toHaveTextContent("全文规模");
+    const trigger = screen.getByRole("button", { name: "隐藏任务预估详情" });
+    fireEvent.click(trigger);
+    expect(screen.getByLabelText("任务预估")).not.toHaveTextContent("全文规模");
+    expect(window.localStorage.getItem("yuri-rewrite.task-estimate-collapsed")).toBe("true");
+
+    firstRender.unmount();
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(screen.getByRole("button", { name: "展开任务预估详情" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByLabelText("任务预估")).not.toHaveTextContent("全文规模");
+  });
+
+  it("filters a bounded novel list without changing persisted data", async () => {
+    const manyNovels = Array.from({ length: 10 }, (_, index): Novel => ({
+      ...novels[0],
+      id: `novel-${index + 1}`,
+      title: `Novel ${index + 1}`,
+      source_path: `${index + 1}.txt`
+    }));
+    const defaultImplementation = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_novels") return manyNovels;
+      return defaultImplementation(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    const novelList = container.querySelector(".sidebar .novel-list") as HTMLElement;
+    expect(novelList).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Novel 10" })).toBeInTheDocument();
+
+    const filter = screen.getByRole("searchbox", { name: "筛选小说" });
+    fireEvent.change(filter, { target: { value: "NOVEL 10" } });
+    expect(screen.getByRole("button", { name: "Novel 10" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Novel 1" })).not.toBeInTheDocument();
+    fireEvent.change(filter, { target: { value: "不存在" } });
+    expect(screen.getByText("没有匹配的小说。")).toBeInTheDocument();
+    expect(window.localStorage.getItem("yuri-rewrite.novel-filter")).toBeNull();
+  });
+
+  it("renders prominent descriptive application setting tabs", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("tab", { name: "模型与复检" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("分析与审查模型")).toBeInTheDocument();
+    expect(screen.getByText("执行方式与速度")).toBeInTheDocument();
+    expect(screen.getByText("导出与本地数据")).toBeInTheDocument();
   });
 
   it("reopens the latest A/B experiment from the persistent top entry", async () => {
@@ -333,6 +422,7 @@ describe("App feature behavior", () => {
       });
     });
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "任务与并发" }));
 
     const taskSection = screen.getByRole("heading", { name: "任务执行" }).closest("section") as HTMLElement;
     const toggle = within(taskSection).getByRole("button", { name: "关闭" });
@@ -361,6 +451,7 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "文件与数据" }));
     const deleteButton = await screen.findByRole("button", { name: "删除本地数据" });
     fireEvent.click(deleteButton);
 
@@ -504,16 +595,16 @@ describe("App feature behavior", () => {
   it("switches the workspace content between the main panels and canon assets", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    expect(screen.getByRole("heading", { name: "模型配置" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "模型配置" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "章节" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "一致性资产" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "一致性资产" }));
     expect(screen.getByRole("heading", { name: "一致性资产" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "模型配置" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "返回工作台" }));
-    expect(screen.getByRole("heading", { name: "模型配置" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "章节" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
+    expect(screen.getByRole("heading", { name: "模型管理" })).toBeInTheDocument();
   });
 
   it("shows and saves protagonist aliases in novel settings", async () => {
@@ -837,7 +928,8 @@ describe("App feature behavior", () => {
 
     await waitFor(() => expect(screen.getByRole("combobox", { name: "改写模型" })).toHaveValue("profile-2"));
     expect(screen.getByRole("combobox", { name: "改写模型" })).toHaveDisplayValue("备用模型");
-    expect(screen.getAllByDisplayValue("second-model")).not.toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
+    expect(screen.getByDisplayValue("second-model")).toBeInTheDocument();
   });
 
   it("preserves the selected batch after an analysis refresh", async () => {
@@ -1023,10 +1115,12 @@ describe("App feature behavior", () => {
 
   it("saves a replacement API key and restores the mask", async () => {
     render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
     const apiKey = await screen.findByLabelText("API Key");
     fireEvent.focus(apiKey);
     fireEvent.change(apiKey, { target: { value: "replacement-secret" } });
-    const modelPanel = screen.getByRole("heading", { name: "模型配置" }).closest("section");
+    const modelPanel = screen.getByRole("heading", { name: "模型管理" }).closest("section");
     fireEvent.click(within(modelPanel as HTMLElement).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_model_profile", expect.objectContaining({ input: expect.objectContaining({ api_key: "replacement-secret" }) })));
     await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("********"));
@@ -1233,6 +1327,7 @@ describe("App feature behavior", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_selected_profile_id", { profileId: "profile-2" }));
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "任务与并发" }));
     expect(screen.getByRole("radio", { name: "50 章" })).toBeDisabled();
     fireEvent.click(screen.getByRole("radio", { name: "3" }));
     await waitFor(() =>
@@ -1262,6 +1357,7 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "任务与并发" }));
 
     expect(screen.getByRole("radio", { name: "25" })).toBeDisabled();
     expect(screen.getByRole("radio", { name: "50" })).toBeDisabled();
@@ -1670,6 +1766,7 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "任务与并发" }));
     fireEvent.click(screen.getByRole("radio", { name: "10" }));
     await waitFor(() => {
       const saveIndex = mocks.invoke.mock.calls.findIndex(
@@ -1689,6 +1786,7 @@ describe("App feature behavior", () => {
     expect(screen.getByText("当前 45.0 秒 · 全文 2 分 0 秒")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "任务与并发" }));
     fireEvent.click(screen.getByRole("radio", { name: "50 章" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("estimate_job_cost", {
