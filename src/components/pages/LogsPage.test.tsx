@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AiLog, AiLogDaySummary } from "../../types";
+import type { AiLog, AiLogDaySummary, AiLogSummary } from "../../types";
 import { LogsPage } from "./LogsPage";
 
 const days: AiLogDaySummary[] = [
@@ -9,7 +9,7 @@ const days: AiLogDaySummary[] = [
   { date: "2026-06-26", count: 1 }
 ];
 
-const logs: AiLog[] = [
+const logs: AiLogSummary[] = [
   {
     id: "log-1",
     novel_id: "novel-1",
@@ -17,22 +17,39 @@ const logs: AiLog[] = [
     action: "批次改写",
     chapter_title: "第一章",
     status: "success",
-    content: "第一条日志",
-    raw_response: "原始响应",
+    preview: "第一条日志",
     created_at: "2026-06-28T12:00:00+08:00"
   }
 ];
 
+const details: Record<string, AiLog> = {
+  "log-1": {
+    ...logs[0],
+    content: "第一条日志",
+    raw_response: "原始响应"
+  }
+};
+
 function renderPage(overrides: Partial<Parameters<typeof LogsPage>[0]> = {}) {
   const props = {
     logs,
+    details,
+    detailLoadingIds: new Set<string>(),
     days,
     selectedDate: "2026-06-28",
     busy: "",
+    loading: false,
+    stale: false,
+    pageIndex: 0,
+    hasPreviousPage: false,
+    hasNextPage: false,
     onBack: vi.fn(),
     onClear: vi.fn(),
     onRefresh: vi.fn(),
     onSelectDate: vi.fn(),
+    onPreviousPage: vi.fn(),
+    onNextPage: vi.fn(),
+    onRequestDetail: vi.fn(),
     ...overrides
   };
   render(<LogsPage {...props} />);
@@ -63,16 +80,26 @@ describe("LogsPage", () => {
     expect(screen.getByRole("button", { name: "收起详情" })).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("requests full content only when a summary is expanded", () => {
+    const props = renderPage({ details: {} });
+
+    expect(props.onRequestDetail).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "展开详情" }));
+
+    expect(props.onRequestDetail).toHaveBeenCalledTimes(1);
+    expect(props.onRequestDetail).toHaveBeenCalledWith("log-1");
+    expect(screen.getByRole("button", { name: "重新加载详情" })).toBeInTheDocument();
+  });
+
   it("only renders visible log cards while scrolling large days", () => {
-    const manyLogs = Array.from({ length: 80 }, (_, index): AiLog => ({
+    const manyLogs = Array.from({ length: 80 }, (_, index): AiLogSummary => ({
       id: `log-${index + 1}`,
       novel_id: "novel-1",
       profile_id: "profile-1",
       action: `日志 ${index + 1}`,
       chapter_title: `第 ${index + 1} 章`,
       status: "success",
-      content: `正文 ${index + 1}`,
-      raw_response: `原始响应 ${index + 1}`,
+      preview: `正文 ${index + 1}`,
       created_at: `2026-06-28T12:${String(index % 60).padStart(2, "0")}:00+08:00`
     }));
     renderPage({
@@ -96,30 +123,34 @@ describe("LogsPage", () => {
     expect(props.onSelectDate).toHaveBeenCalledWith("2026-06-26");
   });
 
+  it("replaces pages through explicit previous and next controls", () => {
+    const props = renderPage({
+      pageIndex: 1,
+      hasPreviousPage: true,
+      hasNextPage: true,
+      days: [{ date: "2026-06-28", count: 120 }]
+    });
+
+    expect(screen.getByText("第 51–51 条，共 120 条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+
+    expect(props.onPreviousPage).toHaveBeenCalledTimes(1);
+    expect(props.onNextPage).toHaveBeenCalledTimes(1);
+  });
+
   it("distinguishes recent-empty and selected-day-empty states", () => {
-    const { rerender } = render(<LogsPage
-      logs={[]}
-      days={days}
-      selectedDate="2026-06-27"
-      busy=""
-      onBack={vi.fn()}
-      onClear={vi.fn()}
-      onRefresh={vi.fn()}
-      onSelectDate={vi.fn()}
-    />);
+    const props = renderPage({ logs: [], days, selectedDate: "2026-06-27" });
 
     expect(screen.getByText("2026-06-27 暂无 AI 调用日志。")).toBeInTheDocument();
 
-    rerender(<LogsPage
-      logs={[]}
-      days={days.map((day) => ({ ...day, count: 0 }))}
-      selectedDate="2026-06-28"
-      busy=""
-      onBack={vi.fn()}
-      onClear={vi.fn()}
-      onRefresh={vi.fn()}
-      onSelectDate={vi.fn()}
-    />);
+    cleanup();
+    renderPage({
+      ...props,
+      logs: [],
+      days: days.map((day) => ({ ...day, count: 0 })),
+      selectedDate: "2026-06-28"
+    });
 
     expect(screen.getByText("最近 7 天暂无 AI 调用日志。")).toBeInTheDocument();
   });

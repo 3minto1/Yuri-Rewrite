@@ -71,7 +71,9 @@ import { useAppStore } from "./store/appStore";
 import { invokeCommand as invoke } from "./tauriApi";
 import type {
   AiLog,
+  AiLogCursor,
   AiLogDaySummary,
+  AiLogSummary,
   AppSettings,
   AutoRunRecovery,
   CanonAsset,
@@ -82,6 +84,7 @@ import type {
   ModelDiagnosis,
   ModelProfile,
   Novel,
+  NovelBatchUpdatedEvent,
   NovelDetail,
   NovelSettings,
   NovelSettingsDraft,
@@ -417,10 +420,16 @@ export default function App() {
   const [openNovelMenuId, setOpenNovelMenuId] = useState("");
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
-  const [logs, setLogs] = useState<AiLog[]>([]);
+  const [logSummaries, setLogSummaries] = useState<AiLogSummary[]>([]);
+  const [logDetails, setLogDetails] = useState<Record<string, AiLog>>({});
+  const [logDetailLoadingIds, setLogDetailLoadingIds] = useState<Set<string>>(() => new Set());
   const [logDays, setLogDays] = useState<AiLogDaySummary[]>([]);
   const [selectedLogDate, setSelectedLogDate] = useState("");
-  const [logCache, setLogCache] = useState<Record<string, AiLog[]>>({});
+  const [logCurrentCursor, setLogCurrentCursor] = useState<AiLogCursor | null>(null);
+  const [logNextCursor, setLogNextCursor] = useState<AiLogCursor | null>(null);
+  const [logCursorHistory, setLogCursorHistory] = useState<Array<AiLogCursor | null>>([]);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logsStale, setLogsStale] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({});
   const [corePromptDraft, setCorePromptDraft] = useState("");
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
@@ -465,9 +474,18 @@ export default function App() {
   const detailRef = useRef<NovelDetail | null>(null);
   const selectedBatchIdRef = useRef("");
   const selectedChapterIdRef = useRef("");
-  const lastAutoExportedBatchRef = useRef(0);
   const estimateRequestIdRef = useRef(0);
-  const silentNovelRefreshInFlightRef = useRef(false);
+  const pendingBatchUpdatesRef = useRef<NovelBatchUpdatedEvent[]>([]);
+  const processedBatchUpdateKeysRef = useRef(new Set<string>());
+  const batchUpdateDrainInFlightRef = useRef(false);
+  const batchUpdateJobIdRef = useRef("");
+  const latestAppliedBatchIndexRef = useRef(-1);
+  const batchUpdateNeedsFullRefreshRef = useRef(false);
+  const logRequestIdRef = useRef(0);
+  const logDetailGenerationRef = useRef(0);
+  const logDetailLoadingIdsRef = useRef(new Set<string>());
+  const logDetailsRef = useRef<Record<string, AiLog>>({});
+  const logDetailLruRef = useRef<string[]>([]);
   const busyRef = useRef("");
   const importInProgressRef = useRef(false);
   const processingTaskActiveRef = useRef(processingTaskActive);
@@ -699,6 +717,14 @@ export default function App() {
   }, [activeView]);
 
   useEffect(() => {
+    if (activeView === "logs") {
+      void refreshLogs(detail?.novel.id);
+    } else {
+      clearLogViewData();
+    }
+  }, [activeView, detail?.novel.id]);
+
+  useEffect(() => {
     compareDirtyRef.current = compareDirty;
   }, [compareDirty]);
 
@@ -759,6 +785,7 @@ export default function App() {
 
   useAutoRunProgress(detail?.novel.id ?? null, (progress: AutoRunProgress) => {
       setJob(progress);
+      if (progress.status === "running") setLogsStale(true);
       const isAutoProgress = ["auto", "auto_batch"].includes(progress.job_type);
       if (!isAutoProgress && ["analysis", "rewrite", "rewrite_ab"].includes(progress.job_type)) {
         if (progress.status === "running") {
@@ -772,10 +799,6 @@ export default function App() {
       if (progress.status === "running") {
         tokenStatsDirtyRef.current = true;
         setAutoRunState("running");
-        if (progress.current_chapter > lastAutoExportedBatchRef.current) {
-          lastAutoExportedBatchRef.current = progress.current_chapter;
-          void refreshCurrentNovelSilently(progress.novel_id);
-        }
       } else if (progress.status === "paused") {
         setAutoRunState("paused");
       } else if (progress.status === "pausing" || progress.status === "terminating") {
@@ -783,7 +806,6 @@ export default function App() {
       } else if (["completed", "failed", "terminated"].includes(progress.status)) {
         setAutoRunState("idle");
         setAutoRunMode(null);
-        lastAutoExportedBatchRef.current = 0;
         autoContinueEligibleNovelIdsRef.current.delete(progress.novel_id);
         resetAutoContinueTracking(progress.novel_id);
         clearAutoContinueTimers();
@@ -808,6 +830,38 @@ export default function App() {
         }
       }
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listenAppEvent<NovelBatchUpdatedEvent>("novel-batch-updated", (event) => {
+      if (cancelled) return;
+      const payload = event.payload;
+      const currentJob = useAppStore.getState().job;
+      if (
+        detailRef.current?.novel.id !== payload.novelId
+        || currentJob?.id !== payload.jobId
+      ) return;
+      if (batchUpdateJobIdRef.current !== payload.jobId) {
+        batchUpdateJobIdRef.current = payload.jobId;
+        processedBatchUpdateKeysRef.current.clear();
+        pendingBatchUpdatesRef.current = [];
+        latestAppliedBatchIndexRef.current = -1;
+      }
+      const key = `${payload.jobId}:${payload.batchId}`;
+      if (processedBatchUpdateKeysRef.current.has(key)) return;
+      processedBatchUpdateKeysRef.current.add(key);
+      pendingBatchUpdatesRef.current.push(payload);
+      void drainNovelBatchUpdates();
+    }).then((handler) => {
+      if (cancelled) handler();
+      else unlisten = handler;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   useEffect(() => {
     if (detectedModelSuggestions.length === 0) setOpenModelSuggestions(false);
@@ -924,16 +978,11 @@ export default function App() {
     if (!currentProfileIsValid) {
       setSelectedProfileId(savedProfileIsValid ? savedProfileId : profileRows[0]?.id ?? "");
     }
-    let loadedNovel = false;
     if (!detail && novelRows[0]) {
       const firstRecoveryNovel = recoveryRows.find((recovery) => novelRows.some((novel) => novel.id === recovery.novel_id));
       await loadNovel(firstRecoveryNovel?.novel_id ?? novelRows[0].id, { recoveries: recoveryRows });
-      loadedNovel = true;
     } else if (detail) {
       applyRecoveryForNovel(detail.novel.id, recoveryRows);
-    }
-    if (!loadedNovel) {
-      await refreshLogs();
     }
   }
 
@@ -971,6 +1020,8 @@ export default function App() {
       return;
     }
     const next = await invoke("get_novel_detail", { novelId });
+    batchUpdateNeedsFullRefreshRef.current = false;
+    latestAppliedBatchIndexRef.current = -1;
     setDetail(next);
     const recovery = (options.recoveries ?? autoRunRecoveries).find((item) => item.novel_id === novelId);
     const recoveryBatchId = recovery?.job?.job_type === "auto_batch" ? recovery.summary?.batch_id : undefined;
@@ -1005,88 +1056,191 @@ export default function App() {
     setWorkspaceSection("main");
     setActiveView("workspace");
     applyRecoveryForNovel(novelId, options.recoveries);
-    await refreshLogs(next.novel.id);
   }
 
-  async function refreshCurrentNovelSilently(novelId: string) {
-    if (silentNovelRefreshInFlightRef.current) return;
-    if (detailRef.current?.novel.id !== novelId) return;
-    silentNovelRefreshInFlightRef.current = true;
+  async function drainNovelBatchUpdates() {
+    if (batchUpdateDrainInFlightRef.current) return;
+    batchUpdateDrainInFlightRef.current = true;
     try {
-      const next = await invoke("get_novel_detail", { novelId });
-      if (detailRef.current?.novel.id !== novelId) return;
-      setDetail(next);
-      const preservedChapterId = selectedChapterIdRef.current;
-      const preservedBatchId = selectedBatchIdRef.current;
-      if (!next.chapters.some((chapter) => chapter.id === preservedChapterId)) {
-        setSelectedChapterId(next.chapters[0]?.id ?? "");
+      while (pendingBatchUpdatesRef.current.length > 0) {
+        const payload = pendingBatchUpdatesRef.current.shift();
+        if (!payload) continue;
+        const currentJob = useAppStore.getState().job;
+        if (
+          detailRef.current?.novel.id !== payload.novelId
+          || currentJob?.id !== payload.jobId
+        ) continue;
+        try {
+          const update = await invoke("get_novel_batch_update", {
+            novelId: payload.novelId,
+            batchId: payload.batchId
+          });
+          const current = detailRef.current;
+          if (!current || current.novel.id !== update.novel_id) continue;
+          const updatedById = new Map(update.chapters.map((chapter) => [chapter.id, chapter]));
+          const next = {
+            ...current,
+            chapters: current.chapters.map((chapter) => updatedById.get(chapter.id) ?? chapter),
+            canon_assets: payload.batchIndex >= latestAppliedBatchIndexRef.current
+              ? update.canon_assets
+              : current.canon_assets
+          };
+          latestAppliedBatchIndexRef.current = Math.max(
+            latestAppliedBatchIndexRef.current,
+            payload.batchIndex
+          );
+          detailRef.current = next;
+          setDetail(next);
+        } catch {
+          batchUpdateNeedsFullRefreshRef.current = true;
+        }
       }
-      if (!next.batches.some((batch) => batch.id === preservedBatchId)) {
-        setSelectedBatchId(batchIdContainingChapter(next, preservedChapterId));
-      }
-      if (next.settings) {
-        const nextSettingsDraft: NovelSettingsDraft = {
-          protagonist_name: next.settings.protagonist_name,
-          protagonist_aliases: next.settings.protagonist_aliases ?? "",
-          rewritten_protagonist_name: next.settings.rewritten_protagonist_name ?? "",
-          additional_feminize_names: next.settings.additional_feminize_names,
-          bust: next.settings.bust,
-          body_type: next.settings.body_type,
-          rewrite_mode: next.settings.rewrite_mode === "creative" ? "creative" : "strict",
-          advanced_settings: next.settings.advanced_settings,
-          relationship_targets: next.settings.relationship_targets ?? "[]"
-        };
-        setNovelSettingsDraft(nextSettingsDraft);
-        setSavedNovelSettingsDraft(nextSettingsDraft);
-      }
-      await refreshLogs(novelId);
-    } catch {
-      // Progress refresh is best-effort. The final task result still performs a full refresh.
     } finally {
-      silentNovelRefreshInFlightRef.current = false;
+      batchUpdateDrainInFlightRef.current = false;
+      if (pendingBatchUpdatesRef.current.length > 0) void drainNovelBatchUpdates();
+    }
+  }
+
+  function clearLogDetails() {
+    logDetailGenerationRef.current += 1;
+    logDetailLoadingIdsRef.current.clear();
+    logDetailsRef.current = {};
+    logDetailLruRef.current = [];
+    setLogDetails({});
+    setLogDetailLoadingIds(new Set());
+  }
+
+  function clearLogViewData() {
+    logRequestIdRef.current += 1;
+    setLogSummaries([]);
+    setLogDays([]);
+    setSelectedLogDate("");
+    setLogCurrentCursor(null);
+    setLogNextCursor(null);
+    setLogCursorHistory([]);
+    setLogLoading(false);
+    setLogsStale(false);
+    clearLogDetails();
+  }
+
+  async function loadLogPage(
+    date: string,
+    cursor: AiLogCursor | null,
+    history: Array<AiLogCursor | null>,
+    novelId = detail?.novel.id
+  ) {
+    const requestId = ++logRequestIdRef.current;
+    setLogLoading(true);
+    try {
+      const page = await invoke("list_ai_log_summaries_by_date", {
+        novelId: novelId ?? null,
+        date,
+        cursor,
+        limit: 50
+      });
+      if (requestId !== logRequestIdRef.current) return;
+      setSelectedLogDate(date);
+      setLogSummaries(page.items);
+      setLogCurrentCursor(cursor);
+      setLogNextCursor(page.next_cursor ?? null);
+      setLogCursorHistory(history);
+      setLogsStale(false);
+      clearLogDetails();
+    } catch (error) {
+      if (requestId === logRequestIdRef.current) showNotice(String(error));
+    } finally {
+      if (requestId === logRequestIdRef.current) setLogLoading(false);
     }
   }
 
   async function refreshLogs(novelId = detail?.novel.id, preferredDate = selectedLogDate) {
-    const novelArg = novelId ?? null;
-    const days = await invoke("list_ai_log_days", { novelId: novelArg });
-    if (!Array.isArray(days)) {
-      const rows = await invoke("list_ai_logs", { novelId: novelArg });
-      setLogDays([]);
-      setSelectedLogDate("");
-      setLogCache({});
-      setLogs(rows);
-      return;
+    const requestId = ++logRequestIdRef.current;
+    setLogLoading(true);
+    try {
+      const novelArg = novelId ?? null;
+      const days = await invoke("list_ai_log_days", { novelId: novelArg });
+      if (requestId !== logRequestIdRef.current) return;
+      const preferredIsVisible = preferredDate && days.some((day) => day.date === preferredDate);
+      const nextDate = preferredIsVisible
+        ? preferredDate
+        : days.find((day) => day.count > 0)?.date ?? days[0]?.date ?? "";
+      const page = nextDate
+        ? await invoke("list_ai_log_summaries_by_date", {
+            novelId: novelArg,
+            date: nextDate,
+            cursor: null,
+            limit: 50
+          })
+        : { items: [], next_cursor: null, total: 0 };
+      if (requestId !== logRequestIdRef.current) return;
+      setLogDays(days);
+      setSelectedLogDate(nextDate);
+      setLogSummaries(page.items);
+      setLogCurrentCursor(null);
+      setLogNextCursor(page.next_cursor ?? null);
+      setLogCursorHistory([]);
+      setLogsStale(false);
+      clearLogDetails();
+    } catch (error) {
+      if (requestId === logRequestIdRef.current) showNotice(String(error));
+    } finally {
+      if (requestId === logRequestIdRef.current) setLogLoading(false);
     }
-    const preferredIsVisible = preferredDate && days.some((day) => day.date === preferredDate);
-    const nextDate = preferredIsVisible
-      ? preferredDate
-      : days.find((day) => day.count > 0)?.date ?? days[0]?.date ?? "";
-    const rows = nextDate
-      ? await invoke("list_ai_logs_by_date", { novelId: novelArg, date: nextDate })
-      : [];
-    setLogDays(days);
-    setSelectedLogDate(nextDate);
-    setLogCache(nextDate ? { [nextDate]: rows } : {});
-    setLogs(rows);
   }
 
-  async function selectLogDate(date: string) {
-    setSelectedLogDate(date);
-    const cached = logCache[date];
-    if (cached) {
-      setLogs(cached);
-      return;
-    }
+  function selectLogDate(date: string) {
+    void loadLogPage(date, null, []);
+  }
+
+  function nextLogPage() {
+    if (!selectedLogDate || !logNextCursor) return;
+    void loadLogPage(
+      selectedLogDate,
+      logNextCursor,
+      [...logCursorHistory, logCurrentCursor]
+    );
+  }
+
+  function previousLogPage() {
+    if (!selectedLogDate || logCursorHistory.length === 0) return;
+    const nextHistory = logCursorHistory.slice(0, -1);
+    void loadLogPage(
+      selectedLogDate,
+      logCursorHistory[logCursorHistory.length - 1],
+      nextHistory
+    );
+  }
+
+  async function loadLogDetail(logId: string) {
+    if (logDetailsRef.current[logId] || logDetailLoadingIdsRef.current.has(logId)) return;
+    const generation = logDetailGenerationRef.current;
+    logDetailLoadingIdsRef.current.add(logId);
+    setLogDetailLoadingIds((previous) => new Set(previous).add(logId));
     try {
-      const rows = await invoke("list_ai_logs_by_date", {
-        novelId: detail?.novel.id ?? null,
-        date
-      });
-      setLogCache((previous) => ({ ...previous, [date]: rows }));
-      setLogs(rows);
+      const detail = await invoke("get_ai_log_detail", { logId });
+      if (generation !== logDetailGenerationRef.current || activeViewRef.current !== "logs") return;
+      const nextOrder = logDetailLruRef.current.filter((id) => id !== logId);
+      nextOrder.push(logId);
+      const nextDetails = { ...logDetailsRef.current, [logId]: detail };
+      while (nextOrder.length > 3) {
+        const removed = nextOrder.shift();
+        if (removed) delete nextDetails[removed];
+      }
+      logDetailLruRef.current = nextOrder;
+      logDetailsRef.current = nextDetails;
+      setLogDetails(nextDetails);
     } catch (error) {
-      showNotice(String(error));
+      if (generation === logDetailGenerationRef.current && activeViewRef.current === "logs") {
+        showNotice(String(error));
+      }
+    } finally {
+      logDetailLoadingIdsRef.current.delete(logId);
+      if (generation !== logDetailGenerationRef.current) return;
+      setLogDetailLoadingIds((previous) => {
+        const next = new Set(previous);
+        next.delete(logId);
+        return next;
+      });
     }
   }
 
@@ -1363,7 +1517,7 @@ export default function App() {
           setSelectedChapterId("");
           setSelectedBatchId("");
           setNovelSettingsDraft(emptyNovelSettings);
-          setLogs([]);
+          clearLogViewData();
         }
       }
       setNovelPendingDeletion(null);
@@ -1432,7 +1586,7 @@ export default function App() {
       setOpenModelMenu(false);
       await persistSelectedProfileId(nextSelected);
       if (!nextSelected) setProfileDraft(defaultProfile);
-      await refreshLogs();
+      setLogsStale(true);
       showNotice(`已删除模型配置「${displayName}」。`);
     } catch (error) {
       showNotice(String(error));
@@ -1454,7 +1608,7 @@ export default function App() {
         profileId: selectedProfileId
       });
       setModelDiagnosis(result);
-      await refreshLogs();
+      setLogsStale(true);
       const label = result.status === "ok" ? "诊断通过" : result.status === "warning" ? "诊断有警告" : "诊断失败";
       showNotice(label);
     } catch (error) {
@@ -1523,7 +1677,7 @@ export default function App() {
       });
       setJob(result);
       await loadNovel(detail.novel.id, { preserveBatchId: selectedBatch.id, preserveChapterId: selectedChapterId });
-      await refreshLogs(detail.novel.id);
+      setLogsStale(true);
       if (kind === "rewrite" && result.status === "completed") {
         setActiveView("compare");
       }
@@ -1582,7 +1736,7 @@ export default function App() {
         preserveChapterId: selectedChapterId,
         recoveries: recoveryRows
       });
-      await refreshLogs(novelId);
+      setLogsStale(true);
       if (result.status === "completed") {
         autoContinueEligibleNovelIdsRef.current.delete(novelId);
         resetAutoContinueTracking(novelId);
@@ -1720,7 +1874,7 @@ export default function App() {
         preserveChapterId: selectedChapterId,
         recoveries: recoveryRows
       });
-      await refreshLogs(novelId);
+      setLogsStale(true);
       if (result.status === "completed") {
         autoContinueEligibleNovelIdsRef.current.delete(novelId);
         resetAutoContinueTracking(novelId);
@@ -1995,10 +2149,7 @@ export default function App() {
       setNovelSettingsDraft(emptyNovelSettings);
       setSavedNovelSettingsDraft(emptyNovelSettings);
       setProfileDraft(defaultProfile);
-      setLogs([]);
-      setLogDays([]);
-      setSelectedLogDate("");
-      setLogCache({});
+      clearLogViewData();
       setSettings(resetAppSettings);
       setCorePromptDraft("");
       setJobEstimate(null);
@@ -2390,7 +2541,7 @@ export default function App() {
         sourceMode
       });
       updateChapterFromBackend(updated);
-      await refreshLogs(currentDetail.novel.id);
+      setLogsStale(true);
       showNotice(`已重新改写完成《${updated.title}》。`);
     } catch (error) {
       showNotice(String(error));
@@ -2925,14 +3076,24 @@ export default function App() {
 
         {activeView === "logs" && (
           <LogsPage
-            logs={logs}
+            logs={logSummaries}
+            details={logDetails}
+            detailLoadingIds={logDetailLoadingIds}
             days={logDays}
             selectedDate={selectedLogDate}
             busy={busy}
+            loading={logLoading}
+            stale={logsStale}
+            pageIndex={logCursorHistory.length}
+            hasPreviousPage={logCursorHistory.length > 0}
+            hasNextPage={Boolean(logNextCursor)}
             onBack={() => requestActiveView("workspace")}
             onClear={clearLogs}
             onRefresh={() => refreshLogs()}
             onSelectDate={selectLogDate}
+            onPreviousPage={previousLogPage}
+            onNextPage={nextLogPage}
+            onRequestDetail={loadLogDetail}
           />
         )}
 

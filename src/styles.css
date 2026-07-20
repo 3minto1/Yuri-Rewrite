@@ -974,6 +974,21 @@ pre {
   text-align: center;
 }
 
+.log-stale-notice {
+  margin: 0 0 12px;
+}
+
+.log-pagination {
+  align-items: center;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  display: flex;
+  justify-content: space-between;
+  margin-top: 12px;
+  min-height: 44px;
+  padding-top: 8px;
+}
+
 .full-log-list {
   display: flex;
   flex-direction: column;

@@ -1,4 +1,7 @@
-use crate::domain::{AiLog, AiLogDaySummary, AppState, TokenUsageDay, TokenUsageModel, TokenUsageReport};
+use crate::domain::{
+    AiLog, AiLogCursor, AiLogDaySummary, AiLogSummary, AiLogSummaryPage, AppState, TokenUsageDay,
+    TokenUsageModel, TokenUsageReport,
+};
 use crate::{row_to_ai_log, to_string};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection};
@@ -6,6 +9,8 @@ use std::collections::BTreeMap;
 use tauri::State;
 
 const AI_LOG_VISIBLE_DAYS: i64 = 7;
+const DEFAULT_LOG_PAGE_SIZE: usize = 50;
+const MAX_LOG_PAGE_SIZE: usize = 100;
 
 fn log_day_bounds(date: NaiveDate) -> Result<(String, String), String> {
     let start = Local
@@ -34,8 +39,7 @@ fn log_day_bounds(date: NaiveDate) -> Result<(String, String), String> {
 }
 
 fn parse_log_date(date: &str) -> Result<NaiveDate, String> {
-    NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
-        .map_err(|_| "日志日期格式无效。".to_string())
+    NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| "日志日期格式无效。".to_string())
 }
 
 fn count_logs_for_day(
@@ -94,6 +98,148 @@ pub(crate) fn list_ai_logs_by_date(
     let conn = state.conn.lock().map_err(to_string)?;
     let date = parse_log_date(&date)?;
     list_ai_logs_by_date_from_connection(&conn, novel_id.as_deref(), date)
+}
+
+#[tauri::command]
+pub(crate) fn list_ai_log_summaries_by_date(
+    novel_id: Option<String>,
+    date: String,
+    cursor: Option<AiLogCursor>,
+    limit: Option<usize>,
+    state: State<AppState>,
+) -> Result<AiLogSummaryPage, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let date = parse_log_date(&date)?;
+    list_ai_log_summaries_by_date_from_connection(
+        &conn,
+        novel_id.as_deref(),
+        date,
+        cursor.as_ref(),
+        limit,
+    )
+}
+
+fn list_ai_log_summaries_by_date_from_connection(
+    conn: &Connection,
+    novel_id: Option<&str>,
+    date: NaiveDate,
+    cursor: Option<&AiLogCursor>,
+    limit: Option<usize>,
+) -> Result<AiLogSummaryPage, String> {
+    let limit = limit.unwrap_or(DEFAULT_LOG_PAGE_SIZE);
+    if !(1..=MAX_LOG_PAGE_SIZE).contains(&limit) {
+        return Err(format!(
+            "日志分页数量必须在 1 到 {MAX_LOG_PAGE_SIZE} 之间。"
+        ));
+    }
+    let (start, end) = log_day_bounds(date)?;
+    let cursor_created_at = cursor.map(|value| value.created_at.as_str());
+    let cursor_id = cursor.map(|value| value.id.as_str());
+    let fetch_limit = i64::try_from(limit + 1).map_err(to_string)?;
+    let base_select = "SELECT id, novel_id, profile_id, action, chapter_title, status,
+        CASE
+            WHEN content != '' THEN substr(content, 1, 180)
+            WHEN reasoning IS NOT NULL AND reasoning != '' THEN substr(reasoning, 1, 180)
+            WHEN raw_response IS NOT NULL AND raw_response != '' THEN substr(raw_response, 1, 180)
+            ELSE '无正文内容。'
+        END,
+        finish_reason, created_at
+        FROM ai_logs";
+    let cursor_filter = "AND (?4 IS NULL OR datetime(created_at) < datetime(?4)
+            OR (datetime(created_at) = datetime(?4) AND id < ?5))
+        ORDER BY datetime(created_at) DESC, id DESC LIMIT ?6";
+    let mut rows = if let Some(novel_id) = novel_id {
+        let sql = format!(
+            "{base_select}
+             WHERE (novel_id = ?1 OR novel_id IS NULL)
+               AND datetime(created_at) >= datetime(?2)
+               AND datetime(created_at) < datetime(?3)
+               {cursor_filter}"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(to_string)?;
+        let collected = stmt
+            .query_map(
+                params![
+                    novel_id,
+                    start,
+                    end,
+                    cursor_created_at,
+                    cursor_id,
+                    fetch_limit
+                ],
+                row_to_ai_log_summary,
+            )
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+        collected
+    } else {
+        let sql = format!(
+            "{base_select}
+             WHERE datetime(created_at) >= datetime(?1)
+               AND datetime(created_at) < datetime(?2)
+               AND (?3 IS NULL OR datetime(created_at) < datetime(?3)
+                    OR (datetime(created_at) = datetime(?3) AND id < ?4))
+             ORDER BY datetime(created_at) DESC, id DESC LIMIT ?5"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(to_string)?;
+        let collected = stmt
+            .query_map(
+                params![start, end, cursor_created_at, cursor_id, fetch_limit],
+                row_to_ai_log_summary,
+            )
+            .map_err(to_string)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_string)?;
+        collected
+    };
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = has_more.then(|| {
+        let last = rows.last().expect("a page with more rows cannot be empty");
+        AiLogCursor {
+            created_at: last.created_at.clone(),
+            id: last.id.clone(),
+        }
+    });
+    Ok(AiLogSummaryPage {
+        items: rows,
+        next_cursor,
+        total: count_logs_for_day(conn, novel_id, date)?,
+    })
+}
+
+fn row_to_ai_log_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiLogSummary> {
+    Ok(AiLogSummary {
+        id: row.get(0)?,
+        novel_id: row.get(1)?,
+        profile_id: row.get(2)?,
+        action: row.get(3)?,
+        chapter_title: row.get(4)?,
+        status: row.get(5)?,
+        preview: row.get(6)?,
+        finish_reason: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn get_ai_log_detail(log_id: String, state: State<AppState>) -> Result<AiLog, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    get_ai_log_detail_from_connection(&conn, &log_id)
+}
+
+fn get_ai_log_detail_from_connection(conn: &Connection, log_id: &str) -> Result<AiLog, String> {
+    conn.query_row(
+        "SELECT id, novel_id, profile_id, action, chapter_title, status, content, reasoning,
+            raw_response, finish_reason, created_at FROM ai_logs WHERE id = ?1",
+        params![log_id],
+        row_to_ai_log,
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => "未找到 AI 日志详情。".to_string(),
+        other => to_string(other),
+    })
 }
 
 fn list_ai_logs_by_date_from_connection(
@@ -405,11 +551,7 @@ mod tests {
 
     fn local_midday_rfc3339(date: NaiveDate) -> String {
         Local
-            .from_local_datetime(
-                &date
-                    .and_hms_opt(12, 0, 0)
-                    .expect("valid local midday"),
-            )
+            .from_local_datetime(&date.and_hms_opt(12, 0, 0).expect("valid local midday"))
             .single()
             .expect("local midday")
             .to_rfc3339()
@@ -420,13 +562,37 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open database");
         init_db(&conn).expect("initialize schema");
         let date = NaiveDate::from_ymd_opt(2026, 6, 18).expect("date");
-        insert_ai_log(&conn, "log-1", Some("novel-1"), "旧日志", "first", "2026-06-18T10:00:00+08:00");
-        insert_ai_log(&conn, "log-2", Some("novel-1"), "新日志", "second", "2026-06-18T12:00:00+08:00");
-        insert_ai_log(&conn, "log-3", Some("novel-1"), "次日日志", "next", "2026-06-19T00:30:00+08:00");
+        insert_ai_log(
+            &conn,
+            "log-1",
+            Some("novel-1"),
+            "旧日志",
+            "first",
+            "2026-06-18T10:00:00+08:00",
+        );
+        insert_ai_log(
+            &conn,
+            "log-2",
+            Some("novel-1"),
+            "新日志",
+            "second",
+            "2026-06-18T12:00:00+08:00",
+        );
+        insert_ai_log(
+            &conn,
+            "log-3",
+            Some("novel-1"),
+            "次日日志",
+            "next",
+            "2026-06-19T00:30:00+08:00",
+        );
 
         let rows = list_ai_logs_by_date_from_connection(&conn, None, date).expect("list logs");
 
-        assert_eq!(rows.iter().map(|log| log.id.as_str()).collect::<Vec<_>>(), ["log-2", "log-1"]);
+        assert_eq!(
+            rows.iter().map(|log| log.id.as_str()).collect::<Vec<_>>(),
+            ["log-2", "log-1"]
+        );
     }
 
     #[test]
@@ -434,17 +600,148 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open database");
         init_db(&conn).expect("initialize schema");
         let date = NaiveDate::from_ymd_opt(2026, 6, 18).expect("date");
-        insert_ai_log(&conn, "novel-log", Some("novel-1"), "小说日志", "novel", "2026-06-18T10:00:00+08:00");
-        insert_ai_log(&conn, "global-log", None, "全局日志", "global", "2026-06-18T11:00:00+08:00");
-        insert_ai_log(&conn, "other-log", Some("novel-2"), "其他小说", "other", "2026-06-18T12:00:00+08:00");
+        insert_ai_log(
+            &conn,
+            "novel-log",
+            Some("novel-1"),
+            "小说日志",
+            "novel",
+            "2026-06-18T10:00:00+08:00",
+        );
+        insert_ai_log(
+            &conn,
+            "global-log",
+            None,
+            "全局日志",
+            "global",
+            "2026-06-18T11:00:00+08:00",
+        );
+        insert_ai_log(
+            &conn,
+            "other-log",
+            Some("novel-2"),
+            "其他小说",
+            "other",
+            "2026-06-18T12:00:00+08:00",
+        );
 
-        let rows = list_ai_logs_by_date_from_connection(&conn, Some("novel-1"), date).expect("list logs");
+        let rows =
+            list_ai_logs_by_date_from_connection(&conn, Some("novel-1"), date).expect("list logs");
 
-        assert_eq!(count_logs_for_day(&conn, Some("novel-1"), date).expect("count logs"), 2);
+        assert_eq!(
+            count_logs_for_day(&conn, Some("novel-1"), date).expect("count logs"),
+            2
+        );
         assert_eq!(
             rows.iter().map(|log| log.id.as_str()).collect::<Vec<_>>(),
             ["global-log", "novel-log"]
         );
+    }
+
+    #[test]
+    fn summary_pages_use_a_stable_created_at_and_id_cursor() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        let date = NaiveDate::from_ymd_opt(2026, 6, 18).expect("date");
+        let created_at = local_midday_rfc3339(date);
+        for id in ["log-1", "log-2", "log-3", "log-4", "log-5"] {
+            insert_ai_log(&conn, id, Some("novel-1"), "改写", id, &created_at);
+        }
+
+        let first = list_ai_log_summaries_by_date_from_connection(
+            &conn,
+            Some("novel-1"),
+            date,
+            None,
+            Some(2),
+        )
+        .expect("first page");
+        assert_eq!(first.total, 5);
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|log| log.id.as_str())
+                .collect::<Vec<_>>(),
+            ["log-5", "log-4"]
+        );
+
+        let second = list_ai_log_summaries_by_date_from_connection(
+            &conn,
+            Some("novel-1"),
+            date,
+            first.next_cursor.as_ref(),
+            Some(2),
+        )
+        .expect("second page");
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|log| log.id.as_str())
+                .collect::<Vec<_>>(),
+            ["log-3", "log-2"]
+        );
+
+        let third = list_ai_log_summaries_by_date_from_connection(
+            &conn,
+            Some("novel-1"),
+            date,
+            second.next_cursor.as_ref(),
+            Some(2),
+        )
+        .expect("third page");
+        assert_eq!(third.items[0].id, "log-1");
+        assert!(third.next_cursor.is_none());
+    }
+
+    #[test]
+    fn summaries_are_bounded_and_details_remain_lazy_and_complete() {
+        let conn = Connection::open_in_memory().expect("open database");
+        init_db(&conn).expect("initialize schema");
+        let date = NaiveDate::from_ymd_opt(2026, 6, 18).expect("date");
+        let created_at = local_midday_rfc3339(date);
+        let content = "长".repeat(400);
+        insert_ai_log(
+            &conn,
+            "novel-log",
+            Some("novel-1"),
+            "小说日志",
+            &content,
+            &created_at,
+        );
+        insert_ai_log(&conn, "global-log", None, "全局日志", "global", &created_at);
+        insert_ai_log(
+            &conn,
+            "other-log",
+            Some("novel-2"),
+            "其他小说",
+            "other",
+            &created_at,
+        );
+
+        let page =
+            list_ai_log_summaries_by_date_from_connection(&conn, Some("novel-1"), date, None, None)
+                .expect("summary page");
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.len(), 2);
+        let summary = page
+            .items
+            .iter()
+            .find(|item| item.id == "novel-log")
+            .expect("novel summary");
+        assert_eq!(summary.preview.chars().count(), 180);
+
+        let detail = get_ai_log_detail_from_connection(&conn, "novel-log").expect("full detail");
+        assert_eq!(detail.content, content);
+        assert!(list_ai_log_summaries_by_date_from_connection(
+            &conn,
+            Some("novel-1"),
+            date,
+            None,
+            Some(MAX_LOG_PAGE_SIZE + 1),
+        )
+        .is_err());
     }
 
     #[test]
@@ -454,7 +751,14 @@ mod tests {
         let today = Local::now().date_naive();
         let recent_at = local_midday_rfc3339(today - Duration::days(6));
         let old_at = local_midday_rfc3339(today - Duration::days(7));
-        insert_ai_log(&conn, "recent-log", Some("novel-1"), "近期日志", "recent", &recent_at);
+        insert_ai_log(
+            &conn,
+            "recent-log",
+            Some("novel-1"),
+            "近期日志",
+            "recent",
+            &recent_at,
+        );
         insert_ai_log(&conn, "old-log", Some("novel-1"), "旧日志", "old", &old_at);
         conn.execute(
             "INSERT INTO token_usage_records (
@@ -479,7 +783,9 @@ mod tests {
             .expect("collect logs");
         assert_eq!(log_ids, ["recent-log"]);
         let usage_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM token_usage_records", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM token_usage_records", [], |row| {
+                row.get(0)
+            })
             .expect("count usage");
         assert_eq!(usage_count, 1);
     }
@@ -582,7 +888,15 @@ mod tests {
                     id, novel_id, profile_id, profile_name, model,
                     input_tokens, output_tokens, created_at
                  ) VALUES (?1, 'novel-1', ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![id, profile_id, profile_name, model, input, output, created_at],
+                params![
+                    id,
+                    profile_id,
+                    profile_name,
+                    model,
+                    input,
+                    output,
+                    created_at
+                ],
             )
             .expect("insert token usage");
         }

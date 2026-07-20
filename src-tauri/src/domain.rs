@@ -66,6 +66,24 @@ pub(crate) struct NovelDetail {
     pub(crate) settings: Option<NovelSettings>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct NovelBatchUpdate {
+    pub(crate) novel_id: String,
+    pub(crate) batch_id: String,
+    pub(crate) batch_index: i64,
+    pub(crate) chapters: Vec<Chapter>,
+    pub(crate) canon_assets: Vec<CanonAsset>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NovelBatchUpdatedEvent {
+    pub(crate) novel_id: String,
+    pub(crate) job_id: String,
+    pub(crate) batch_id: String,
+    pub(crate) batch_index: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct ChapterBatch {
     pub(crate) id: String,
@@ -248,6 +266,32 @@ pub(crate) struct AiLog {
 pub(crate) struct AiLogDaySummary {
     pub(crate) date: String,
     pub(crate) count: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct AiLogSummary {
+    pub(crate) id: String,
+    pub(crate) novel_id: Option<String>,
+    pub(crate) profile_id: String,
+    pub(crate) action: String,
+    pub(crate) chapter_title: Option<String>,
+    pub(crate) status: String,
+    pub(crate) preview: String,
+    pub(crate) finish_reason: Option<String>,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub(crate) struct AiLogCursor {
+    pub(crate) created_at: String,
+    pub(crate) id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AiLogSummaryPage {
+    pub(crate) items: Vec<AiLogSummary>,
+    pub(crate) next_cursor: Option<AiLogCursor>,
+    pub(crate) total: usize,
 }
 
 #[derive(Debug, Serialize)]

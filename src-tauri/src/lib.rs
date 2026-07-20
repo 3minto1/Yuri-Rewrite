@@ -120,6 +120,7 @@ pub fn run() {
             split_novel_with_builtin_rule,
             list_novels,
             get_novel_detail,
+            get_novel_batch_update,
             delete_novel,
             save_model_profile,
             delete_model_profile,
@@ -131,6 +132,8 @@ pub fn run() {
             list_ai_log_days,
             list_ai_logs,
             list_ai_logs_by_date,
+            list_ai_log_summaries_by_date,
+            get_ai_log_detail,
             clear_ai_logs,
             get_token_usage_stats,
             delete_token_usage_for_model,
@@ -610,9 +613,10 @@ async fn analyze_batch_with_parallelism(
                 };
                 if let Some(batch_index) = checkpoint_batch_index {
                     stage_analysis_shard(state, novel_id, batch_index, &shard, &parsed)?;
+                } else {
+                    parsed_by_shard.push((idx, parsed));
                 }
                 report_auto_shard_completed(state, novel_id, idx, &shard)?;
-                parsed_by_shard.push((idx, parsed));
             }
             Err(error) => {
                 append_ai_log(
@@ -1658,9 +1662,10 @@ async fn generate_rewrite_shards(
             Ok(parsed) => {
                 if let Some(batch_index) = checkpoint_batch_index {
                     stage_rewrite_shard(state, novel_id, batch_index, &parsed)?;
+                } else {
+                    parsed_by_shard.push((idx, parsed));
                 }
                 report_auto_shard_completed(state, novel_id, idx, &shard)?;
-                parsed_by_shard.push((idx, parsed))
             }
             Err(error) => {
                 return Err(format!("{}：{}", shard_label, error));
@@ -2072,9 +2077,10 @@ async fn generate_reviewed_rewrite_pipeline(
             Ok((idx, _, shard, parsed)) => {
                 if let Some(batch_index) = checkpoint_batch_index {
                     stage_rewrite_shard(state, novel_id, batch_index, &parsed)?;
+                } else {
+                    parsed_by_shard.push((idx, parsed));
                 }
                 report_auto_shard_completed(state, novel_id, idx, &shard)?;
-                parsed_by_shard.push((idx, parsed))
             }
             Err(error) => {
                 return Err(error);
@@ -5394,64 +5400,199 @@ fn mark_chapters_analysis_failed(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn merge_analysis_into_canon_assets(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> {
+struct AnalysisAssetAccumulator {
+    kind: &'static str,
+    lines: Vec<String>,
+    seen: HashSet<String>,
+    stored_chars: usize,
+    overflow: bool,
+}
+
+impl AnalysisAssetAccumulator {
+    fn new(kind: &'static str) -> Self {
+        Self {
+            kind,
+            lines: Vec::new(),
+            seen: HashSet::new(),
+            stored_chars: 0,
+            overflow: false,
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.overflow
+    }
+
+    fn push_line(&mut self, line: &str) {
+        if self.overflow {
+            return;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if !trimmed.starts_with("## ") {
+            let key = normalize_analysis_entry(trimmed);
+            if key.is_empty() || !self.seen.insert(key) {
+                return;
+            }
+        }
+        let separator_chars = usize::from(!self.lines.is_empty());
+        let line_chars = trimmed.chars().count();
+        if self.stored_chars + separator_chars + line_chars > analysis_asset_char_limit(self.kind) {
+            self.overflow = true;
+            return;
+        }
+        self.stored_chars += separator_chars + line_chars;
+        self.lines.push(trimmed.to_string());
+    }
+
+    fn push_text(&mut self, text: &str) {
+        for line in text.split(['\r', '\n']) {
+            self.push_line(line);
+            if self.overflow {
+                break;
+            }
+        }
+    }
+
+    fn push_section(&mut self, title: &str, text: &str) {
+        if self.overflow || text.trim().is_empty() {
+            return;
+        }
+        self.push_line(&format!("## {title}"));
+        self.push_text(text);
+    }
+
+    fn finish(mut self) -> String {
+        if !self.overflow {
+            return self.lines.join("\n");
+        }
+        let note = format!("[{}已去重并达到长度上限，后续低相关条目已省略]", self.kind);
+        let note_chars = note.chars().count();
+        while !self.lines.is_empty()
+            && self.stored_chars + 1 + note_chars > analysis_asset_char_limit(self.kind)
+        {
+            if let Some(line) = self.lines.pop() {
+                self.stored_chars = self
+                    .stored_chars
+                    .saturating_sub(line.chars().count() + usize::from(!self.lines.is_empty()));
+            }
+        }
+        if self.lines.is_empty() {
+            note
+        } else {
+            format!("{}\n{}", self.lines.join("\n"), note)
+        }
+    }
+}
+
+struct AnalysisCanonAssets {
+    has_rows: bool,
+    summary: String,
+    characters: String,
+    relationships: String,
+    locations: String,
+    foreshadowing: String,
+    terms: String,
+}
+
+fn push_analysis_json_field(
+    accumulator: &mut AnalysisAssetAccumulator,
+    title: &str,
+    value: &serde_json::Value,
+    field: &str,
+) {
+    if accumulator.is_full() {
+        return;
+    }
+    let Some(field_value) = value.get(field) else {
+        return;
+    };
+    let text = json_field_to_text(field_value);
+    accumulator.push_section(title, &text);
+}
+
+fn build_analysis_canon_assets(
+    conn: &Connection,
+    novel_id: &str,
+) -> rusqlite::Result<AnalysisCanonAssets> {
+    let mut summary = AnalysisAssetAccumulator::new("AI分析汇总");
+    let mut characters = AnalysisAssetAccumulator::new("人物卡");
+    let mut relationships = AnalysisAssetAccumulator::new("人物关系");
+    let mut locations = AnalysisAssetAccumulator::new("地点");
+    let mut foreshadowing = AnalysisAssetAccumulator::new("伏笔");
+    let mut terms = AnalysisAssetAccumulator::new("术语表");
+    let mut has_rows = false;
     let mut stmt = conn.prepare(
         "SELECT title, analysis_json FROM chapters WHERE novel_id = ?1 AND analysis_json IS NOT NULL ORDER BY chapter_index",
     )?;
-    let rows = stmt
-        .query_map(params![novel_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let analyses = rows
-        .iter()
-        .map(|(title, analysis_json)| format!("## {}\n{}", title, analysis_json))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let mut rows = stmt.query(params![novel_id])?;
+    while let Some(row) = rows.next()? {
+        has_rows = true;
+        let title = row.get::<_, String>(0)?;
+        let analysis_json = row.get::<_, String>(1)?;
+        summary.push_section(&title, &analysis_json);
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&analysis_json) {
+            push_analysis_json_field(&mut characters, &title, &value, "characters");
+            push_analysis_json_field(&mut relationships, &title, &value, "relationships");
+            push_analysis_json_field(&mut locations, &title, &value, "locations");
+            push_analysis_json_field(&mut foreshadowing, &title, &value, "foreshadowing");
+            if !terms.is_full() {
+                let mut wrote_header = false;
+                for (field, label) in [
+                    ("terms", "原文术语："),
+                    ("names", "原文姓名与称谓："),
+                    ("name_feminization_map", "姓名女性化映射："),
+                    ("rewrite_notes", "改写注意事项："),
+                ] {
+                    let Some(field_value) = value.get(field) else {
+                        continue;
+                    };
+                    let text = json_field_to_text(field_value);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    if !wrote_header {
+                        terms.push_line(&format!("## {title}"));
+                        wrote_header = true;
+                    }
+                    terms.push_line(label);
+                    terms.push_text(&text);
+                }
+            }
+        }
+        if summary.is_full()
+            && characters.is_full()
+            && relationships.is_full()
+            && locations.is_full()
+            && foreshadowing.is_full()
+            && terms.is_full()
+        {
+            break;
+        }
+    }
+    Ok(AnalysisCanonAssets {
+        has_rows,
+        summary: summary.finish(),
+        characters: characters.finish(),
+        relationships: relationships.finish(),
+        locations: locations.finish(),
+        foreshadowing: foreshadowing.finish(),
+        terms: terms.finish(),
+    })
+}
+
+#[allow(dead_code)]
+fn merge_analysis_into_canon_assets(conn: &Connection, novel_id: &str) -> rusqlite::Result<()> {
+    let assets = build_analysis_canon_assets(conn, novel_id)?;
     let now = Utc::now().to_rfc3339();
-    upsert_canon_asset(
-        conn,
-        novel_id,
-        "AI分析汇总",
-        &compact_analysis_asset("AI分析汇总", &analyses),
-        &now,
-    )?;
-    upsert_canon_asset(
-        conn,
-        novel_id,
-        "人物卡",
-        &compact_analysis_asset("人物卡", &collect_analysis_field(&rows, "characters")),
-        &now,
-    )?;
-    upsert_canon_asset(
-        conn,
-        novel_id,
-        "人物关系",
-        &compact_analysis_asset("人物关系", &collect_analysis_field(&rows, "relationships")),
-        &now,
-    )?;
-    upsert_canon_asset(
-        conn,
-        novel_id,
-        "地点",
-        &compact_analysis_asset("地点", &collect_analysis_field(&rows, "locations")),
-        &now,
-    )?;
-    upsert_canon_asset(
-        conn,
-        novel_id,
-        "伏笔",
-        &compact_analysis_asset("伏笔", &collect_analysis_field(&rows, "foreshadowing")),
-        &now,
-    )?;
-    upsert_canon_asset(
-        conn,
-        novel_id,
-        "术语表",
-        &compact_analysis_asset("术语表", &collect_analysis_terms(&rows)),
-        &now,
-    )?;
+    upsert_canon_asset(conn, novel_id, "AI分析汇总", &assets.summary, &now)?;
+    upsert_canon_asset(conn, novel_id, "人物卡", &assets.characters, &now)?;
+    upsert_canon_asset(conn, novel_id, "人物关系", &assets.relationships, &now)?;
+    upsert_canon_asset(conn, novel_id, "地点", &assets.locations, &now)?;
+    upsert_canon_asset(conn, novel_id, "伏笔", &assets.foreshadowing, &now)?;
+    upsert_canon_asset(conn, novel_id, "术语表", &assets.terms, &now)?;
     Ok(())
 }
 
@@ -5473,21 +5614,7 @@ fn upsert_canon_asset(
     Ok(())
 }
 
-fn collect_analysis_field(rows: &[(String, String)], field: &str) -> String {
-    rows.iter()
-        .filter_map(|(title, analysis_json)| {
-            let value = serde_json::from_str::<serde_json::Value>(analysis_json).ok()?;
-            let text = json_field_to_text(value.get(field)?);
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(format!("## {}\n{}", title, text))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
+#[cfg(test)]
 fn compact_analysis_asset(kind: &str, content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let mut seen = HashSet::new();
@@ -5534,6 +5661,7 @@ fn analysis_asset_char_limit(kind: &str) -> usize {
     }
 }
 
+#[cfg(test)]
 fn truncate_analysis_asset_at_line(kind: &str, content: &str) -> String {
     let limit = analysis_asset_char_limit(kind);
     if content.chars().count() <= limit {
@@ -5559,49 +5687,6 @@ fn truncate_analysis_asset_at_line(kind: &str, content: &str) -> String {
     output
 }
 
-fn collect_analysis_terms(rows: &[(String, String)]) -> String {
-    rows.iter()
-        .filter_map(|(title, analysis_json)| {
-            let value = serde_json::from_str::<serde_json::Value>(analysis_json).ok()?;
-            let mut sections = Vec::new();
-            if let Some(text) = value
-                .get("terms")
-                .map(json_field_to_text)
-                .filter(|text| !text.trim().is_empty())
-            {
-                sections.push(format!("原文术语：\n{}", text));
-            }
-            if let Some(text) = value
-                .get("names")
-                .map(json_field_to_text)
-                .filter(|text| !text.trim().is_empty())
-            {
-                sections.push(format!("原文姓名与称谓：\n{}", text));
-            }
-            if let Some(text) = value
-                .get("name_feminization_map")
-                .map(json_field_to_text)
-                .filter(|text| !text.trim().is_empty())
-            {
-                sections.push(format!("姓名女性化映射：\n{}", text));
-            }
-            if let Some(text) = value
-                .get("rewrite_notes")
-                .map(json_field_to_text)
-                .filter(|text| !text.trim().is_empty())
-            {
-                sections.push(format!("改写注意事项：\n{}", text));
-            }
-            if sections.is_empty() {
-                None
-            } else {
-                Some(format!("## {}\n{}", title, sections.join("\n\n")))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 fn json_field_to_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => String::new(),
@@ -5624,66 +5709,17 @@ fn fill_empty_canon_assets_from_analysis(
     conn: &Connection,
     novel_id: &str,
 ) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT title, analysis_json FROM chapters WHERE novel_id = ?1 AND analysis_json IS NOT NULL ORDER BY chapter_index",
-    )?;
-    let rows = stmt
-        .query_map(params![novel_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    if rows.is_empty() {
+    let assets = build_analysis_canon_assets(conn, novel_id)?;
+    if !assets.has_rows {
         return Ok(());
     }
-
-    let analyses = rows
-        .iter()
-        .map(|(title, analysis_json)| format!("## {}\n{}", title, analysis_json))
-        .collect::<Vec<_>>()
-        .join("\n\n");
     let now = Utc::now().to_rfc3339();
-    upsert_empty_canon_asset(
-        conn,
-        novel_id,
-        "AI分析汇总",
-        &compact_analysis_asset("AI分析汇总", &analyses),
-        &now,
-    )?;
-    upsert_empty_canon_asset(
-        conn,
-        novel_id,
-        "人物卡",
-        &compact_analysis_asset("人物卡", &collect_analysis_field(&rows, "characters")),
-        &now,
-    )?;
-    upsert_empty_canon_asset(
-        conn,
-        novel_id,
-        "人物关系",
-        &compact_analysis_asset("人物关系", &collect_analysis_field(&rows, "relationships")),
-        &now,
-    )?;
-    upsert_empty_canon_asset(
-        conn,
-        novel_id,
-        "地点",
-        &compact_analysis_asset("地点", &collect_analysis_field(&rows, "locations")),
-        &now,
-    )?;
-    upsert_empty_canon_asset(
-        conn,
-        novel_id,
-        "伏笔",
-        &compact_analysis_asset("伏笔", &collect_analysis_field(&rows, "foreshadowing")),
-        &now,
-    )?;
-    upsert_empty_canon_asset(
-        conn,
-        novel_id,
-        "术语表",
-        &compact_analysis_asset("术语表", &collect_analysis_terms(&rows)),
-        &now,
-    )?;
+    upsert_empty_canon_asset(conn, novel_id, "AI分析汇总", &assets.summary, &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "人物卡", &assets.characters, &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "人物关系", &assets.relationships, &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "地点", &assets.locations, &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "伏笔", &assets.foreshadowing, &now)?;
+    upsert_empty_canon_asset(conn, novel_id, "术语表", &assets.terms, &now)?;
     Ok(())
 }
 
@@ -8335,6 +8371,61 @@ mod tests {
         assert_eq!(compact.matches("萧炎与小医仙同行").count(), 1);
         assert!(compact.contains("已去重并达到长度上限"));
         assert!(compact.chars().count() <= analysis_asset_char_limit("地点"));
+    }
+
+    #[test]
+    fn analysis_canon_assets_stream_rows_in_order_with_bounded_deduplication() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        init_db(&conn).expect("init db");
+        conn.execute(
+            "INSERT INTO novels (id, title, source_path, encoding, status, created_at)
+             VALUES ('novel-1', '测试', 'a.txt', 'UTF-8', 'imported', 'now')",
+            [],
+        )
+        .expect("insert novel");
+        for index in 1..=240_i64 {
+            let analysis = serde_json::json!({
+                "characters": ["共同人物", format!("人物{index}：{}", "长描述".repeat(20))],
+                "relationships": [format!("关系{index}")],
+                "locations": ["共同地点", format!("地点{index}")],
+                "foreshadowing": [format!("伏笔{index}")],
+                "terms": ["共同术语", format!("术语{index}")],
+                "names": [format!("姓名{index}")],
+                "name_feminization_map": [format!("旧名{index} -> 新名{index}")],
+                "rewrite_notes": [format!("注意{index}")]
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO chapters (
+                    id, novel_id, chapter_index, title, original_text, analysis_json,
+                    analysis_status, rewrite_status
+                 ) VALUES (?1, 'novel-1', ?2, ?3, '原文', ?4, 'completed', 'pending')",
+                params![
+                    format!("chapter-{index}"),
+                    index,
+                    format!("第{index}章"),
+                    analysis
+                ],
+            )
+            .expect("insert analyzed chapter");
+        }
+
+        let assets = build_analysis_canon_assets(&conn, "novel-1").expect("build assets");
+
+        assert!(assets.has_rows);
+        assert!(assets.summary.starts_with("## 第1章\n"));
+        assert!(assets.summary.contains("已去重并达到长度上限"));
+        assert!(assets.summary.chars().count() <= analysis_asset_char_limit("AI分析汇总"));
+        assert_eq!(assets.characters.matches("共同人物").count(), 1);
+        assert!(
+            assets.characters.find("人物1").expect("first character")
+                < assets.characters.find("人物2").expect("second character")
+        );
+        assert!(assets.characters.chars().count() <= analysis_asset_char_limit("人物卡"));
+        assert_eq!(assets.locations.matches("共同地点").count(), 1);
+        assert!(assets.terms.contains("原文术语："));
+        assert!(assets.terms.contains("姓名女性化映射："));
+        assert!(assets.terms.chars().count() <= analysis_asset_char_limit("术语表"));
     }
 
     #[test]

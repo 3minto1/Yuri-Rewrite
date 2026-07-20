@@ -61,6 +61,21 @@ export type NovelDetail = {
   settings?: NovelSettings | null;
 };
 
+export type NovelBatchUpdate = {
+  novel_id: string;
+  batch_id: string;
+  batch_index: number;
+  chapters: Chapter[];
+  canon_assets: CanonAsset[];
+};
+
+export type NovelBatchUpdatedEvent = {
+  novelId: string;
+  jobId: string;
+  batchId: string;
+  batchIndex: number;
+};
+
 export type ChapterRule = {
   mode: "simple" | "regex";
   line_start: boolean;
@@ -300,6 +315,29 @@ export type AiLog = {
 export type AiLogDaySummary = {
   date: string;
   count: number;
+};
+
+export type AiLogSummary = {
+  id: string;
+  novel_id?: string | null;
+  profile_id: string;
+  action: string;
+  chapter_title?: string | null;
+  status: string;
+  preview: string;
+  finish_reason?: string | null;
+  created_at: string;
+};
+
+export type AiLogCursor = {
+  created_at: string;
+  id: string;
+};
+
+export type AiLogSummaryPage = {
+  items: AiLogSummary[];
+  next_cursor?: AiLogCursor | null;
+  total: number;
 };
 
 export type AppSettings = {

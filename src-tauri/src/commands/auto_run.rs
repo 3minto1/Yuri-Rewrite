@@ -1,4 +1,4 @@
-use crate::domain::{AppState, ChapterBatch, Job};
+use crate::domain::{AppState, ChapterBatch, Job, NovelBatchUpdatedEvent};
 use crate::rate_limit::is_rate_limit_retry_exhausted;
 use crate::task_control::AutoRunCleanup;
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 };
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashSet;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecoverableAutoRunFailure {
@@ -28,6 +28,18 @@ enum RecoverableAutoRunFailure {
     TemporaryGateway,
     Network,
     ModelFormat,
+}
+
+fn emit_novel_batch_updated(app: &AppHandle, job: &Job, batch: &ChapterBatch) {
+    let _ = app.emit(
+        "novel-batch-updated",
+        NovelBatchUpdatedEvent {
+            novel_id: job.novel_id.clone(),
+            job_id: job.id.clone(),
+            batch_id: batch.id.clone(),
+            batch_index: batch.batch_index,
+        },
+    );
 }
 
 fn paused_recovery_job_type(
@@ -301,6 +313,7 @@ pub(crate) async fn start_analyze_rewrite_batch(
 
     let completed_message = format!("当前批次分析与改写完成：{}", batch.label);
     update_job(&state, &job.id, "completed", 1, &completed_message)?;
+    emit_novel_batch_updated(&app, &job, &batch);
     emit_job_progress(&app, &job, "completed", 1, &completed_message);
     clear_auto_run(&state, &novel_id)?;
     job = load_job(&state, &job.id)?;
@@ -576,6 +589,7 @@ pub(crate) async fn start_analyze_rewrite_all(
             &completed_message,
         )?;
         set_auto_run_completed(&state, &novel_id, current)?;
+        emit_novel_batch_updated(&app, &job, batch);
         emit_job_progress(
             &app,
             &job,

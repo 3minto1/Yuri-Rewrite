@@ -2,7 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { browserMockEnabled } from "./platform/runtime";
 import type {
   AiLog,
+  AiLogCursor,
   AiLogDaySummary,
+  AiLogSummaryPage,
   AppSettings,
   AutoRunRecovery,
   CanonAsset,
@@ -17,6 +19,7 @@ import type {
   ModelProfile,
   ModelProfileInput,
   Novel,
+  NovelBatchUpdate,
   NovelDetail,
   NovelSettings,
   ProfileDraft,
@@ -36,6 +39,10 @@ import type {
 type CommandMap = {
   list_novels: { args?: undefined; result: Novel[] };
   get_novel_detail: { args: { novelId: string }; result: NovelDetail };
+  get_novel_batch_update: {
+    args: { novelId: string; batchId: string };
+    result: NovelBatchUpdate;
+  };
   list_auto_run_recoveries: { args?: undefined; result: AutoRunRecovery[] };
   import_txt: { args: { filePath: string }; result: Novel };
   get_chapter_rule: { args: { novelId: string }; result: StoredChapterRule | null };
@@ -49,6 +56,11 @@ type CommandMap = {
   delete_local_data: { args: { confirmationPhrase: string }; result: LocalDataDeletionResult };
   diagnose_model_profile: { args: { profileId: string }; result: ModelDiagnosis };
   list_ai_log_days: { args: { novelId: string | null }; result: AiLogDaySummary[] };
+  list_ai_log_summaries_by_date: {
+    args: { novelId: string | null; date: string; cursor?: AiLogCursor | null; limit?: number };
+    result: AiLogSummaryPage;
+  };
+  get_ai_log_detail: { args: { logId: string }; result: AiLog };
   list_ai_logs_by_date: { args: { novelId: string | null; date: string }; result: AiLog[] };
   list_ai_logs: { args: { novelId: string | null }; result: AiLog[] };
   clear_ai_logs: { args: { novelId: string | null }; result: void };

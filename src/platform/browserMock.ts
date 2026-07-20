@@ -1,6 +1,8 @@
 import type {
   AiLog,
+  AiLogCursor,
   AiLogDaySummary,
+  AiLogSummaryPage,
   AppSettings,
   CanonAsset,
   Chapter,
@@ -151,7 +153,7 @@ function logDateKey(createdAt: string) {
   return `${year}-${month}-${day}`;
 }
 
-function recentLogDays(): AiLogDaySummary[] {
+function recentLogDays(novelId?: string | null): AiLogDaySummary[] {
   const today = new Date();
   return Array.from({ length: 7 }, (_, index) => {
     const date = new Date(today);
@@ -159,7 +161,10 @@ function recentLogDays(): AiLogDaySummary[] {
     const key = logDateKey(date.toISOString());
     return {
       date: key,
-      count: logs.filter((log) => logDateKey(log.created_at) === key).length
+      count: logs.filter(
+        (log) => logDateKey(log.created_at) === key
+          && (!novelId || !log.novel_id || log.novel_id === novelId)
+      ).length
     };
   });
 }
@@ -376,6 +381,22 @@ export async function invokeBrowserMock(
     case "get_novel_detail":
       if (localDataDeleted) throw new Error("浏览器测试数据已删除。");
       return detail();
+    case "get_novel_batch_update": {
+      if (localDataDeleted) throw new Error("浏览器测试数据已删除。");
+      const batch = detail().batches.find(
+        (item) => item.id === args?.batchId && item.novel_id === args?.novelId
+      );
+      if (!batch) throw new Error("未找到需要刷新的小说批次。");
+      return {
+        novel_id: novel.id,
+        batch_id: batch.id,
+        batch_index: batch.batch_index,
+        chapters: chapters
+          .filter((chapter) => chapter.index >= batch.start_chapter && chapter.index <= batch.end_chapter)
+          .map((chapter) => ({ ...chapter })),
+        canon_assets: canonAssets.map((asset) => ({ ...asset }))
+      };
+    }
     case "get_chapter_rule":
       return chapterRule ? { ...chapterRule, rule: { ...chapterRule.rule } } : null;
     case "preview_chapter_rule":
@@ -455,7 +476,49 @@ export async function invokeBrowserMock(
         ]
       } satisfies ModelDiagnosis;
     case "list_ai_log_days":
-      return recentLogDays();
+      return recentLogDays(typeof args?.novelId === "string" ? args.novelId : null);
+    case "list_ai_log_summaries_by_date": {
+      const cursor = args?.cursor as AiLogCursor | null | undefined;
+      const limit = Number(args?.limit ?? 50);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new Error("日志分页数量必须在 1 到 100 之间。");
+      }
+      const novelId = typeof args?.novelId === "string" ? args.novelId : null;
+      const allMatches = logs
+        .filter((log) => logDateKey(log.created_at) === args?.date)
+        .filter((log) => !novelId || !log.novel_id || log.novel_id === novelId)
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at) || right.id.localeCompare(left.id));
+      const cursorTime = cursor ? Date.parse(cursor.created_at) : 0;
+      const matches = allMatches.filter((log) => {
+        if (!cursor) return true;
+        const createdAt = Date.parse(log.created_at);
+        return createdAt < cursorTime || (createdAt === cursorTime && log.id < cursor.id);
+      });
+      const pageItems = matches.slice(0, limit);
+      const hasMore = matches.length > limit;
+      return {
+        items: pageItems.map((log) => ({
+          id: log.id,
+          novel_id: log.novel_id,
+          profile_id: log.profile_id,
+          action: log.action,
+          chapter_title: log.chapter_title,
+          status: log.status,
+          preview: (log.content || log.reasoning || log.raw_response || "无正文内容。").slice(0, 180),
+          finish_reason: log.finish_reason,
+          created_at: log.created_at
+        })),
+        next_cursor: hasMore && pageItems.length > 0
+          ? { created_at: pageItems[pageItems.length - 1].created_at, id: pageItems[pageItems.length - 1].id }
+          : null,
+        total: allMatches.length
+      } satisfies AiLogSummaryPage;
+    }
+    case "get_ai_log_detail": {
+      const detail = logs.find((log) => log.id === args?.logId);
+      if (!detail) throw new Error("未找到 AI 日志详情。");
+      return { ...detail };
+    }
     case "list_ai_logs_by_date":
       return logs
         .filter((log) => logDateKey(log.created_at) === args?.date)

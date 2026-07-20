@@ -1,17 +1,27 @@
-import { ArrowLeft, ChevronDown, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AiLog, AiLogDaySummary } from "../../types";
+import type { AiLog, AiLogDaySummary, AiLogSummary } from "../../types";
 import { getStatusTone, StatusBadge } from "../common/StatusBadge";
 
 type LogsPageProps = {
-  logs: AiLog[];
+  logs: AiLogSummary[];
+  details: Record<string, AiLog>;
+  detailLoadingIds: Set<string>;
   days: AiLogDaySummary[];
   selectedDate: string;
   busy: string;
+  loading: boolean;
+  stale: boolean;
+  pageIndex: number;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
   onBack: () => void;
   onClear: () => void;
   onRefresh: () => void;
   onSelectDate: (date: string) => void;
+  onPreviousPage: () => void;
+  onNextPage: () => void;
+  onRequestDetail: (logId: string) => void | Promise<void>;
 };
 
 const COLLAPSED_LOG_HEIGHT = 138;
@@ -27,9 +37,8 @@ function formatLogDate(date: string) {
   return `${date} ${weekday}`;
 }
 
-function logPreview(log: AiLog) {
-  const source = log.content || log.reasoning || log.raw_response || "无正文内容。";
-  const normalized = source.replace(/\s+/g, " ").trim();
+function logPreview(log: AiLogSummary) {
+  const normalized = log.preview.replace(/\s+/g, " ").trim();
   if (normalized.length <= LOG_PREVIEW_LIMIT) return normalized;
   return `${normalized.slice(0, LOG_PREVIEW_LIMIT)}...`;
 }
@@ -50,13 +59,23 @@ function lowerBound(values: number[], target: number) {
 
 export function LogsPage({
   logs,
+  details,
+  detailLoadingIds,
   days,
   selectedDate,
   busy,
+  loading,
+  stale,
+  pageIndex,
+  hasPreviousPage,
+  hasNextPage,
   onBack,
   onClear,
   onRefresh,
-  onSelectDate
+  onSelectDate,
+  onPreviousPage,
+  onNextPage,
+  onRequestDetail
 }: LogsPageProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -118,6 +137,7 @@ export function LogsPage({
   }, []);
 
   function toggleLogDetails(logId: string) {
+    if (!expandedLogIds.has(logId)) void onRequestDetail(logId);
     setExpandedLogIds((previous) => {
       const next = new Set(previous);
       if (next.has(logId)) {
@@ -157,13 +177,20 @@ export function LogsPage({
           </button>
         ))}
       </div>
+      {stale && (
+        <div className="inline-notice log-stale-notice">
+          任务产生了新日志，点击“刷新”查看最新内容。
+        </div>
+      )}
       <div
         className="full-log-list"
         aria-label="日志内容"
         ref={listRef}
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
       >
-        {totalLogCount === 0 ? (
+        {loading ? (
+          <p className="muted">正在加载日志…</p>
+        ) : totalLogCount === 0 ? (
           <p className="muted">最近 7 天暂无 AI 调用日志。</p>
         ) : logs.length === 0 ? (
           <p className="muted">{selectedDay ? `${selectedDay.date} 暂无 AI 调用日志。` : "该日期暂无 AI 调用日志。"}</p>
@@ -172,6 +199,8 @@ export function LogsPage({
             {virtualLogs.map((log, index) => {
               const absoluteIndex = visibleRange.start + index;
               const expanded = expandedLogIds.has(log.id);
+              const detail = details[log.id];
+              const detailLoading = detailLoadingIds.has(log.id);
               return (
                 <article
                   className={`full-log-item status-container status-${getStatusTone(log.status)} ${expanded ? "expanded" : ""}`}
@@ -205,9 +234,17 @@ export function LogsPage({
                   <p className="log-preview">{logPreview(log)}</p>
                   {expanded && (
                     <div className="log-detail-sections">
-                      {log.reasoning && <section><h3>思考过程</h3><pre>{log.reasoning}</pre></section>}
-                      <section><h3>输出文本</h3><pre>{log.content || "无正文内容。"}</pre></section>
-                      <section><h3>原始响应</h3><pre>{log.raw_response || log.content || "无原始响应。"}</pre></section>
+                      {detailLoading ? (
+                        <p className="muted">正在加载日志详情…</p>
+                      ) : detail ? (
+                        <>
+                          {detail.reasoning && <section><h3>思考过程</h3><pre>{detail.reasoning}</pre></section>}
+                          <section><h3>输出文本</h3><pre>{detail.content || "无正文内容。"}</pre></section>
+                          <section><h3>原始响应</h3><pre>{detail.raw_response || detail.content || "无原始响应。"}</pre></section>
+                        </>
+                      ) : (
+                        <button type="button" onClick={() => void onRequestDetail(log.id)}>重新加载详情</button>
+                      )}
                     </div>
                   )}
                 </article>
@@ -216,6 +253,21 @@ export function LogsPage({
           </div>
         )}
       </div>
+      {selectedDay && selectedDay.count > 0 && (
+        <div className="log-pagination" aria-label="日志分页">
+          <span>
+            第 {pageIndex * 50 + (logs.length > 0 ? 1 : 0)}–{pageIndex * 50 + logs.length} 条，共 {selectedDay.count} 条
+          </span>
+          <div className="panel-actions">
+            <button type="button" onClick={onPreviousPage} disabled={loading || !hasPreviousPage}>
+              <ChevronLeft size={15} />上一页
+            </button>
+            <button type="button" onClick={onNextPage} disabled={loading || !hasNextPage}>
+              下一页<ChevronRight size={15} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

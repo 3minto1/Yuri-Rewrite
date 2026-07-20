@@ -4,21 +4,30 @@ import App from "./App";
 import { clearDiffCache } from "./components/Compare/compareDiffCache";
 import { useAppStore } from "./store/appStore";
 import type { AutoRunProgress } from "./useAutoRunProgress";
-import type { AiLog, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelDetail, RewriteAbRunDetail, UpdateProgress } from "./types";
+import type { AiLog, AiLogSummary, AppSettings, AutoRunRecovery, Job, JobEstimate, ModelProfile, Novel, NovelBatchUpdatedEvent, NovelDetail, RewriteAbRunDetail, UpdateProgress } from "./types";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   progressCallback: undefined as ((progress: AutoRunProgress) => void) | undefined,
-  updateCallback: undefined as ((progress: UpdateProgress) => void) | undefined
+  updateCallback: undefined as ((progress: UpdateProgress) => void) | undefined,
+  batchUpdateCallback: undefined as ((progress: NovelBatchUpdatedEvent) => void) | undefined
 }));
 
 vi.mock("./tauriApi", () => ({ invokeCommand: mocks.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_event: string, callback: (event: { payload: UpdateProgress }) => void) => {
-    mocks.updateCallback = (payload: UpdateProgress) => callback({ payload });
+vi.mock("./platform/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./platform/runtime")>();
+  return {
+    ...actual,
+    listenAppEvent: vi.fn(async (event: string, callback: (event: { payload: unknown }) => void) => {
+    if (event === "update-progress") {
+      mocks.updateCallback = (payload: UpdateProgress) => callback({ payload });
+    } else if (event === "novel-batch-updated") {
+      mocks.batchUpdateCallback = (payload: NovelBatchUpdatedEvent) => callback({ payload });
+    }
     return vi.fn();
-  })
-}));
+    })
+  };
+});
 vi.mock("./useAutoRunProgress", () => ({
   useAutoRunProgress: (_novelId: string | null, callback: (progress: AutoRunProgress) => void) => {
     mocks.progressCallback = callback;
@@ -143,6 +152,8 @@ function installDefaultCommands() {
     if (command === "list_auto_run_recoveries") return recoveryRows;
     if (command === "get_novel_detail") return detail;
     if (command === "list_ai_log_days") return [{ date: "2026-06-19", count: 0 }];
+    if (command === "list_ai_log_summaries_by_date") return { items: [], next_cursor: null, total: 0 };
+    if (command === "get_ai_log_detail") return null;
     if (command === "list_ai_logs_by_date") return [];
     if (command === "list_ai_logs") return [];
     if (command === "get_token_usage_stats") {
@@ -197,6 +208,7 @@ describe("App feature behavior", () => {
     mocks.invoke.mockReset();
     mocks.progressCallback = undefined;
     mocks.updateCallback = undefined;
+    mocks.batchUpdateCallback = undefined;
     recoveryRows = [];
     window.localStorage.setItem("yuri-rewrite.quick-start-seen", "true");
     window.localStorage.removeItem("yuri-rewrite.theme");
@@ -219,6 +231,9 @@ describe("App feature behavior", () => {
       expect.stringContaining("模型名：test-model")
     );
     expect(screen.queryByDisplayValue("test-model")).not.toBeInTheDocument();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("list_ai_log_days", expect.anything());
+    expect(mocks.invoke).not.toHaveBeenCalledWith("list_ai_log_summaries_by_date", expect.anything());
+    expect(mocks.invoke).not.toHaveBeenCalledWith("get_ai_log_detail", expect.anything());
     fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
     expect(screen.getByRole("heading", { name: "模型管理" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("test-model")).toBeInTheDocument();
@@ -1798,15 +1813,40 @@ describe("App feature behavior", () => {
   });
 
   it("refreshes rewritten chapters after an auto batch finishes without changing pages", async () => {
-    let currentDetail = detail;
-    let currentLogs: AiLog[] = [];
+    const updatedChapter = {
+      ...detail.chapters[0],
+      rewrite_text: "第一批更新后的改写内容"
+    };
+    const logSummary: AiLogSummary = {
+      id: "log-1",
+      novel_id: "novel-1",
+      profile_id: "profile-1",
+      action: "批次改写",
+      chapter_title: "第一批",
+      status: "success",
+      preview: "第一批日志内容",
+      created_at: "2026-06-16T00:00:00Z"
+    };
+    const logDetail: AiLog = {
+      ...logSummary,
+      content: "第一批日志内容",
+      reasoning: "",
+      raw_response: ""
+    };
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "get_novel_detail") return currentDetail;
+      if (command === "get_novel_detail") return detail;
       if (command === "list_novels") return novels;
       if (command === "list_model_profiles") return [profile];
       if (command === "get_app_settings") return settings;
       if (command === "list_auto_run_recoveries") return [];
-      if (command === "list_ai_logs") return currentLogs;
+      if (command === "get_novel_batch_update") {
+        return { novel_id: "novel-1", batch_id: "batch-1", batch_index: 1, chapters: [updatedChapter], canon_assets: [] };
+      }
+      if (command === "list_ai_log_days") return [{ date: "2026-06-16", count: 1 }];
+      if (command === "list_ai_log_summaries_by_date") {
+        return { items: [logSummary], next_cursor: null, total: 1 };
+      }
+      if (command === "get_ai_log_detail") return logDetail;
       if (command === "estimate_job_cost") return estimate;
       if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
       return undefined;
@@ -1814,30 +1854,10 @@ describe("App feature behavior", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
+    await waitFor(() => expect(mocks.batchUpdateCallback).toBeTypeOf("function"));
     fireEvent.click(screen.getByRole("button", { name: "对比" }));
     expect(screen.getByText("改写内容")).toBeInTheDocument();
 
-    currentDetail = {
-      ...detail,
-      chapters: [
-        {
-          ...detail.chapters[0],
-          rewrite_text: "第一批更新后的改写内容"
-        }
-      ]
-    };
-    currentLogs = [{
-      id: "log-1",
-      novel_id: "novel-1",
-      profile_id: "profile-1",
-      action: "批次改写",
-      chapter_title: "第一批",
-      status: "success",
-      content: "第一批日志内容",
-      reasoning: "",
-      raw_response: "",
-      created_at: "2026-06-16T00:00:00Z"
-    }];
     act(() => {
       mocks.progressCallback?.({
         id: "auto-1",
@@ -1849,11 +1869,96 @@ describe("App feature behavior", () => {
         message: "已完成第 1 批改写"
       });
     });
+    act(() => {
+      mocks.batchUpdateCallback?.({
+        novelId: "novel-1",
+        jobId: "auto-1",
+        batchId: "batch-1",
+        batchIndex: 1
+      });
+    });
 
     await waitFor(() => expect(screen.getByText("第一批更新后的改写内容")).toBeInTheDocument());
+    expect(mocks.invoke).toHaveBeenCalledWith("get_novel_batch_update", {
+      novelId: "novel-1",
+      batchId: "batch-1"
+    });
     expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "日志" }));
-    await waitFor(() => expect(screen.getAllByText("第一批日志内容").length).toBeGreaterThan(0));
+    await screen.findByText("第一批日志内容");
+    fireEvent.click(screen.getByRole("button", { name: "展开详情" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("get_ai_log_detail", { logId: "log-1" }));
+  });
+
+  it("deduplicates batch events and prevents an older event from replacing newer canon", async () => {
+    const secondChapter = {
+      ...detail.chapters[0],
+      id: "chapter-2",
+      index: 2,
+      title: "第二章",
+      rewrite_text: "第二章旧稿"
+    };
+    const initialDetail: NovelDetail = {
+      ...detail,
+      chapters: [detail.chapters[0], secondChapter],
+      canon_assets: [{ novel_id: "novel-1", kind: "outline", content: "初始", updated_at: "old" }]
+    };
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_novel_detail") return initialDetail;
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "get_novel_batch_update") {
+        const batchId = (args as { batchId: string }).batchId;
+        return batchId === "batch-2"
+          ? {
+              novel_id: "novel-1",
+              batch_id: batchId,
+              batch_index: 2,
+              chapters: [{ ...secondChapter, rewrite_text: "第二章新稿" }],
+              canon_assets: [{ novel_id: "novel-1", kind: "outline", content: "第二批新设定", updated_at: "new" }]
+            }
+          : {
+              novel_id: "novel-1",
+              batch_id: batchId,
+              batch_index: 1,
+              chapters: [{ ...detail.chapters[0], rewrite_text: "第一章新稿" }],
+              canon_assets: [{ novel_id: "novel-1", kind: "outline", content: "第一批旧设定", updated_at: "middle" }]
+            };
+      }
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    await waitFor(() => expect(mocks.batchUpdateCallback).toBeTypeOf("function"));
+    act(() => {
+      mocks.progressCallback?.({
+        id: "auto-out-of-order",
+        novel_id: "novel-1",
+        job_type: "auto",
+        status: "running",
+        current_chapter: 1,
+        total_chapters: 2,
+        message: "运行中"
+      });
+      mocks.batchUpdateCallback?.({ novelId: "novel-1", jobId: "auto-out-of-order", batchId: "batch-2", batchIndex: 2 });
+      mocks.batchUpdateCallback?.({ novelId: "novel-1", jobId: "auto-out-of-order", batchId: "batch-1", batchIndex: 1 });
+      mocks.batchUpdateCallback?.({ novelId: "novel-1", jobId: "auto-out-of-order", batchId: "batch-2", batchIndex: 2 });
+    });
+
+    await waitFor(() => {
+      const current = useAppStore.getState().detail!;
+      expect(current.chapters.find((chapter) => chapter.id === "chapter-1")?.rewrite_text).toBe("第一章新稿");
+      expect(current.chapters.find((chapter) => chapter.id === "chapter-2")?.rewrite_text).toBe("第二章新稿");
+      expect(current.canon_assets[0].content).toBe("第二批新设定");
+    });
+    expect(
+      mocks.invoke.mock.calls.filter(([command]) => command === "get_novel_batch_update")
+    ).toHaveLength(2);
   });
 
   it("loads logs by selected recent date", async () => {
@@ -1891,9 +1996,23 @@ describe("App feature behavior", () => {
         { date: "2026-06-28", count: 1 },
         { date: "2026-06-27", count: 1 }
       ];
-      if (command === "list_ai_logs_by_date") {
+      if (command === "list_ai_log_summaries_by_date") {
         const payload = args as { date?: string } | undefined;
-        return dayLogs[payload?.date ?? ""] ?? [];
+        const items = (dayLogs[payload?.date ?? ""] ?? []).map((log) => ({
+          id: log.id,
+          novel_id: log.novel_id,
+          profile_id: log.profile_id,
+          action: log.action,
+          chapter_title: log.chapter_title,
+          status: log.status,
+          preview: log.content,
+          created_at: log.created_at
+        }));
+        return { items, next_cursor: null, total: items.length };
+      }
+      if (command === "get_ai_log_detail") {
+        const payload = args as { logId?: string } | undefined;
+        return Object.values(dayLogs).flat().find((log) => log.id === payload?.logId) ?? null;
       }
       if (command === "estimate_job_cost") return estimate;
       if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
@@ -1908,10 +2027,66 @@ describe("App feature behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: /2026-06-27.*1/ }));
 
     await screen.findByText("昨天的完整日志");
-    expect(mocks.invoke).toHaveBeenCalledWith("list_ai_logs_by_date", {
+    expect(mocks.invoke).toHaveBeenCalledWith("list_ai_log_summaries_by_date", {
       novelId: "novel-1",
-      date: "2026-06-27"
+      date: "2026-06-27",
+      cursor: null,
+      limit: 50
     });
+  });
+
+  it("keeps at most three lazy log details and clears them after leaving the page", async () => {
+    const summaries = Array.from({ length: 4 }, (_, index): AiLogSummary => ({
+      id: `log-${index + 1}`,
+      novel_id: "novel-1",
+      profile_id: "profile-1",
+      action: `日志 ${index + 1}`,
+      chapter_title: `第 ${index + 1} 章`,
+      status: "success",
+      preview: `预览 ${index + 1}`,
+      created_at: `2026-06-28T12:0${index}:00+08:00`
+    }));
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "get_novel_detail") return detail;
+      if (command === "list_novels") return novels;
+      if (command === "list_model_profiles") return [profile];
+      if (command === "get_app_settings") return settings;
+      if (command === "list_auto_run_recoveries") return [];
+      if (command === "list_ai_log_days") return [{ date: "2026-06-28", count: 4 }];
+      if (command === "list_ai_log_summaries_by_date") {
+        return { items: summaries, next_cursor: null, total: 4 };
+      }
+      if (command === "get_ai_log_detail") {
+        const logId = (args as { logId: string }).logId;
+        const summary = summaries.find((item) => item.id === logId)!;
+        return { ...summary, content: `完整 ${logId}`, raw_response: `原始 ${logId}` };
+      }
+      if (command === "estimate_job_cost") return estimate;
+      if (command === "check_for_updates") return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
+      return undefined;
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    await screen.findByText("预览 1");
+
+    for (const logId of ["log-1", "log-2", "log-3", "log-4"]) {
+      fireEvent.click(screen.getAllByRole("button", { name: "展开详情" })[0]);
+      await screen.findByText(`完整 ${logId}`);
+    }
+    expect(screen.getByRole("button", { name: "重新加载详情" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "工作台" }));
+    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    await screen.findByText("预览 1");
+    fireEvent.click(screen.getAllByRole("button", { name: "展开详情" })[0]);
+    await screen.findByText("完整 log-1");
+    expect(
+      mocks.invoke.mock.calls.filter(
+        ([command, args]) => command === "get_ai_log_detail" && (args as { logId: string }).logId === "log-1"
+      )
+    ).toHaveLength(2);
   });
 
   it("updates auto run remaining time as batches complete", async () => {

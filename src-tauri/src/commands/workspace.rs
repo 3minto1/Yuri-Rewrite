@@ -1,4 +1,6 @@
-use crate::domain::{AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate};
+use crate::domain::{
+    AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate, NovelBatchUpdate,
+};
 use crate::task_control::{AutoRunControl, AutoRunProgressState};
 use crate::{
     chapter_text_chars, estimate_requests_for_chapters, estimate_wait_seconds_for_chapters,
@@ -6,7 +8,7 @@ use crate::{
     load_review_enabled, load_rewrite_parallelism, row_to_chapter, to_string,
 };
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use tauri::State;
 
 fn chapter_edit_is_allowed(
@@ -250,6 +252,34 @@ pub(crate) fn list_chapter_batches(
 }
 
 #[tauri::command]
+pub(crate) fn get_novel_batch_update(
+    novel_id: String,
+    batch_id: String,
+    state: State<AppState>,
+) -> Result<NovelBatchUpdate, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    get_novel_batch_update_from_connection(&conn, &novel_id, &batch_id)
+}
+
+fn get_novel_batch_update_from_connection(
+    conn: &Connection,
+    novel_id: &str,
+    batch_id: &str,
+) -> Result<NovelBatchUpdate, String> {
+    let batch = load_chapter_batches(conn, novel_id)?
+        .into_iter()
+        .find(|batch| batch.id == batch_id)
+        .ok_or_else(|| "未找到需要刷新的小说批次。".to_string())?;
+    Ok(NovelBatchUpdate {
+        novel_id: novel_id.to_string(),
+        batch_id: batch_id.to_string(),
+        batch_index: batch.batch_index,
+        chapters: crate::load_chapters_for_batch(conn, novel_id, &batch.id)?,
+        canon_assets: load_canon_assets(conn, novel_id)?,
+    })
+}
+
+#[tauri::command]
 pub(crate) fn estimate_job_cost(
     novel_id: String,
     batch_id: Option<String>,
@@ -479,6 +509,43 @@ mod tests {
         chapter_edit_is_allowed_for_auto_run(&conn, &chapter(5), &control, None)
             .expect("paused completed batch can be edited");
         assert!(chapter_edit_is_allowed_for_auto_run(&conn, &chapter(15), &control, None).is_err());
+    }
+
+    #[test]
+    fn batch_update_returns_only_the_selected_batch_and_current_canon() {
+        let conn = Connection::open_in_memory().expect("open database");
+        seed_batches(&conn);
+        for index in [1_i64, 10, 11, 20] {
+            conn.execute(
+                "INSERT INTO chapters (
+                    id, novel_id, chapter_index, title, original_text,
+                    analysis_status, rewrite_status
+                 ) VALUES (?1, 'novel-1', ?2, ?3, '原文', 'completed', 'completed')",
+                params![format!("chapter-{index}"), index, format!("第{index}章")],
+            )
+            .expect("insert chapter");
+        }
+        conn.execute(
+            "INSERT INTO canon_assets (novel_id, kind, content, updated_at)
+             VALUES ('novel-1', 'outline', '最新大纲', 'now')",
+            [],
+        )
+        .expect("insert canon");
+
+        let update = get_novel_batch_update_from_connection(&conn, "novel-1", "batch-2")
+            .expect("batch update");
+
+        assert_eq!(update.batch_index, 2);
+        assert_eq!(
+            update
+                .chapters
+                .iter()
+                .map(|chapter| chapter.index)
+                .collect::<Vec<_>>(),
+            [11, 20]
+        );
+        assert_eq!(update.canon_assets[0].content, "最新大纲");
+        assert!(get_novel_batch_update_from_connection(&conn, "novel-1", "missing").is_err());
     }
 
     #[test]
