@@ -119,7 +119,10 @@ pub(crate) fn build_relevant_canon_text(
     let mut keywords = relevant_canon_keywords(chapters, settings);
     for asset in assets {
         if asset.kind == "姓名映射表" {
-            collect_mapping_keywords(&asset.content, &mut keywords);
+            collect_mapping_keywords(
+                &sanitize_name_mapping_for_prompt(&asset.content),
+                &mut keywords,
+            );
         }
     }
 
@@ -182,7 +185,8 @@ pub(crate) fn build_relevant_canon_text_from_text(
 }
 
 pub(crate) fn compact_canon_asset_content(kind: &str, content: &str) -> String {
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let sanitized = sanitize_canon_asset_content(kind, content);
+    let normalized = sanitized.replace("\r\n", "\n").replace('\r', "\n");
     let mut seen = HashSet::new();
     let mut lines = Vec::new();
     for line in normalized.lines() {
@@ -205,6 +209,117 @@ pub(crate) fn compact_canon_asset_content(kind: &str, content: &str) -> String {
         take_chars(&deduped, head_limit),
         take_last_chars(&deduped, tail_limit)
     )
+}
+
+fn sanitize_canon_asset_content(kind: &str, content: &str) -> String {
+    match kind {
+        "姓名映射表" => sanitize_name_mapping_for_prompt(content),
+        "AI分析汇总" => sanitize_analysis_summary_for_prompt(content),
+        "术语表" => sanitize_terms_for_prompt(content),
+        _ => content.to_string(),
+    }
+}
+
+fn sanitize_name_mapping_for_prompt(content: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return content.to_string();
+    };
+    if let Some(object) = value.as_object_mut() {
+        let legacy_sources = object
+            .get("legacy_unmanaged_sources")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        if let Some(names) = object
+            .get_mut("names")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            names.retain(|entry| {
+                entry
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|source| !legacy_sources.contains(source))
+            });
+        }
+        let remove_protagonist = object
+            .get("protagonist")
+            .and_then(|entry| entry.get("source"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| legacy_sources.contains(source));
+        if remove_protagonist {
+            object.insert("protagonist".to_string(), serde_json::Value::Null);
+        }
+        object.remove("version");
+        object.remove("managed_sources");
+        object.remove("legacy_unmanaged_sources");
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| content.to_string())
+}
+
+fn sanitize_analysis_summary_for_prompt(content: &str) -> String {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let mut output = Vec::new();
+    let mut header: Option<String> = None;
+    let mut body = Vec::new();
+    let flush = |header: &mut Option<String>, body: &mut Vec<String>, output: &mut Vec<String>| {
+        let Some(header) = header.take() else {
+            return;
+        };
+        let joined = body.join("\n");
+        body.clear();
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&joined) {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("name_feminization_map");
+                object.remove("rewrite_notes");
+            }
+            output.push(header);
+            output
+                .push(serde_json::to_string_pretty(&value).unwrap_or_else(|_| joined.to_string()));
+        } else {
+            output.push(header);
+            output.push(joined);
+        }
+    };
+    for line in normalized.lines() {
+        if line.trim_start().starts_with("## ") {
+            flush(&mut header, &mut body, &mut output);
+            header = Some(line.trim().to_string());
+        } else if header.is_some() {
+            body.push(line.to_string());
+        } else {
+            output.push(line.to_string());
+        }
+    }
+    flush(&mut header, &mut body, &mut output);
+    output
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sanitize_terms_for_prompt(content: &str) -> String {
+    let mut output = Vec::new();
+    let mut skip_deprecated = false;
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        if matches!(trimmed, "姓名女性化映射：" | "改写注意事项：") {
+            skip_deprecated = true;
+            continue;
+        }
+        if trimmed.starts_with("## ") || matches!(trimmed, "原文术语：" | "原文姓名与称谓：")
+        {
+            skip_deprecated = false;
+        }
+        if !skip_deprecated {
+            output.push(line);
+        }
+    }
+    output.join("\n")
 }
 
 fn parse_compact_canon_assets(canon_text: &str) -> Vec<CanonAsset> {

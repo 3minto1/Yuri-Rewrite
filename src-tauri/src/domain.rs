@@ -117,11 +117,29 @@ pub(crate) struct NameMappingEntry {
     pub(crate) target: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct NameMappingAsset {
     pub(crate) version: i64,
     pub(crate) protagonist: Option<NameMappingEntry>,
     pub(crate) names: Vec<NameMappingEntry>,
+    #[serde(default)]
+    pub(crate) managed_sources: Vec<String>,
+    #[serde(default)]
+    pub(crate) legacy_unmanaged_sources: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct NameMappingConsistencyEntry {
+    pub(crate) source: String,
+    pub(crate) target: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct NameMappingConsistencyReport {
+    pub(crate) managed: Vec<NameMappingConsistencyEntry>,
+    pub(crate) manual: Vec<NameMappingConsistencyEntry>,
+    pub(crate) legacy_unmanaged: Vec<NameMappingConsistencyEntry>,
+    pub(crate) needs_resolution: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

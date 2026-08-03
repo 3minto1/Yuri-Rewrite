@@ -18,6 +18,7 @@ import type {
   ModelDiagnosis,
   ModelProfile,
   ModelProfileInput,
+  NameMappingConsistencyReport,
   Novel,
   NovelBatchUpdate,
   NovelDetail,
@@ -96,6 +97,14 @@ type CommandMap = {
     result: JobEstimate;
   };
   update_canon_assets: { args: { novelId: string; assets: CanonAssetInput[] }; result: CanonAsset[] };
+  inspect_name_mapping_consistency: {
+    args: { novelId: string };
+    result: NameMappingConsistencyReport;
+  };
+  resolve_name_mapping_consistency: {
+    args: { novelId: string; removeSources: string[]; keepAsManualSources: string[] };
+    result: NameMappingConsistencyReport;
+  };
   update_chapter_title: {
     args: { chapterId: string; title: string };
     result: import("./types").Chapter;

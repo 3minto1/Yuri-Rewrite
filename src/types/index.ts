@@ -28,6 +28,18 @@ export type CanonAsset = {
   updated_at: string;
 };
 
+export type NameMappingConsistencyEntry = {
+  source: string;
+  target: string;
+};
+
+export type NameMappingConsistencyReport = {
+  managed: NameMappingConsistencyEntry[];
+  manual: NameMappingConsistencyEntry[];
+  legacy_unmanaged: NameMappingConsistencyEntry[];
+  needs_resolution: boolean;
+};
+
 export type ChapterBatch = {
   id: string;
   novel_id: string;

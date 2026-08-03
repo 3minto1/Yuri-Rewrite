@@ -1,11 +1,14 @@
 use crate::domain::{
-    AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate, NovelBatchUpdate,
+    AppState, CanonAsset, CanonAssetInput, Chapter, ChapterBatch, JobEstimate,
+    NameMappingConsistencyReport, NovelBatchUpdate,
 };
 use crate::task_control::{AutoRunControl, AutoRunProgressState};
 use crate::{
     chapter_text_chars, estimate_requests_for_chapters, estimate_wait_seconds_for_chapters,
-    load_canon_assets, load_chapter_batches, load_chapters, load_recent_model_stats,
-    load_review_enabled, load_rewrite_parallelism, row_to_chapter, to_string,
+    inspect_name_mapping_asset, load_canon_asset_content, load_canon_assets, load_chapter_batches,
+    load_chapters, load_novel_settings, load_recent_model_stats, load_review_enabled,
+    load_rewrite_parallelism, normalize_edited_name_mapping_asset, resolve_name_mapping_asset,
+    row_to_chapter, to_string,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -381,8 +384,23 @@ pub(crate) fn update_canon_assets(
         return Err("当前小说任务运行中，不能修改一致性资产。".to_string());
     }
     let conn = state.conn.lock().map_err(to_string)?;
+    let settings = load_novel_settings(&conn, &novel_id)?;
+    let existing_mapping =
+        load_canon_asset_content(&conn, &novel_id, "姓名映射表")?.unwrap_or_default();
     let updated_at = Utc::now().to_rfc3339();
     for asset in assets {
+        let content = if asset.kind == "姓名映射表" {
+            if asset.content == existing_mapping {
+                asset.content
+            } else {
+                let settings = settings
+                    .as_ref()
+                    .ok_or_else(|| "请先保存小说设定，再编辑姓名映射表。".to_string())?;
+                normalize_edited_name_mapping_asset(&asset.content, settings)?
+            }
+        } else {
+            asset.content
+        };
         conn.execute(
             r#"
             INSERT INTO canon_assets (novel_id, kind, content, updated_at)
@@ -391,11 +409,63 @@ pub(crate) fn update_canon_assets(
                 content = excluded.content,
                 updated_at = excluded.updated_at
             "#,
-            params![novel_id, asset.kind, asset.content, updated_at],
+            params![novel_id, asset.kind, content, updated_at],
         )
         .map_err(to_string)?;
     }
     load_canon_assets(&conn, &novel_id)
+}
+
+#[tauri::command]
+pub(crate) fn inspect_name_mapping_consistency(
+    novel_id: String,
+    state: State<AppState>,
+) -> Result<NameMappingConsistencyReport, String> {
+    let conn = state.conn.lock().map_err(to_string)?;
+    let settings = load_novel_settings(&conn, &novel_id)?
+        .ok_or_else(|| "请先保存小说设定，再检查姓名映射。".to_string())?;
+    let content = load_canon_asset_content(&conn, &novel_id, "姓名映射表")?.unwrap_or_default();
+    Ok(inspect_name_mapping_asset(&content, &settings))
+}
+
+#[tauri::command]
+pub(crate) fn resolve_name_mapping_consistency(
+    novel_id: String,
+    remove_sources: Vec<String>,
+    keep_as_manual_sources: Vec<String>,
+    state: State<AppState>,
+) -> Result<NameMappingConsistencyReport, String> {
+    if state.active_tasks.novel_is_active(&novel_id)?
+        || state
+            .auto_runs
+            .lock()
+            .map_err(to_string)?
+            .contains_key(&novel_id)
+    {
+        return Err("当前小说任务运行或暂停中，不能清理姓名映射。".to_string());
+    }
+    let conn = state.conn.lock().map_err(to_string)?;
+    let settings = load_novel_settings(&conn, &novel_id)?
+        .ok_or_else(|| "请先保存小说设定，再清理姓名映射。".to_string())?;
+    let content = load_canon_asset_content(&conn, &novel_id, "姓名映射表")?.unwrap_or_default();
+    let updated = resolve_name_mapping_asset(
+        &content,
+        &settings,
+        &remove_sources,
+        &keep_as_manual_sources,
+    )?;
+    conn.execute(
+        r#"
+        INSERT INTO canon_assets (novel_id, kind, content, updated_at)
+        VALUES (?1, '姓名映射表', ?2, ?3)
+        ON CONFLICT(novel_id, kind) DO UPDATE SET
+            content = excluded.content,
+            updated_at = excluded.updated_at
+        "#,
+        params![novel_id, updated, Utc::now().to_rfc3339()],
+    )
+    .map_err(to_string)?;
+    Ok(inspect_name_mapping_asset(&updated, &settings))
 }
 
 #[cfg(test)]

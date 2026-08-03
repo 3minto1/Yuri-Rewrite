@@ -30,6 +30,7 @@ import {
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { CompareView } from "./components/Compare/CompareView";
 import { RewriteAbStartDialog } from "./components/Compare/RewriteAbStartDialog";
 import { RewriteAbView } from "./components/Compare/RewriteAbView";
@@ -49,6 +50,7 @@ import { TokenStatsPage } from "./components/pages/TokenStatsPage";
 import { BatchPanel } from "./components/Workspace/BatchPanel";
 import { ChapterList } from "./components/Workspace/ChapterList";
 import { ModelConfig } from "./components/Workspace/ModelConfig";
+import { NameMappingCleanupDialog } from "./components/Workspace/NameMappingCleanupDialog";
 import { TaskEstimate } from "./components/Workspace/TaskEstimate";
 import {
   emptyProfile as defaultProfile,
@@ -83,6 +85,7 @@ import type {
   JobEstimate,
   ModelDiagnosis,
   ModelProfile,
+  NameMappingConsistencyReport,
   Novel,
   NovelBatchUpdatedEvent,
   NovelDetail,
@@ -159,6 +162,16 @@ const resetAppSettings: AppSettings = {
   rewrite_parallelism: 10,
   auto_continue_enabled: false
 };
+
+function configuredOptionalNameSources(settingsValue: NovelSettingsDraft): Set<string> {
+  return new Set(
+    [settingsValue.protagonist_aliases, settingsValue.additional_feminize_names]
+      .flatMap((value) => value.split(/\r?\n/))
+      .map((value) => value.split(/->|=>|→/, 1)[0].trim())
+      .filter(Boolean)
+  );
+}
+
 const modelSuggestionGroups: ModelSuggestionGroup[] = [
   {
     id: "deepseek",
@@ -418,6 +431,76 @@ export default function App() {
     setAutoControlBusy, job, setJob, processingTaskActive
   } = useTaskState();
   const [openNovelMenuId, setOpenNovelMenuId] = useState("");
+  const [novelMenuPos, setNovelMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const novelListRef = useRef<HTMLDivElement>(null);
+  const novelMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const novelListScrollTimerRef = useRef<number | null>(null);
+  const handleNovelListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    if (openNovelMenuId) {
+      setOpenNovelMenuId("");
+    }
+    const element = event.currentTarget;
+    element.classList.add("scrolling");
+    if (novelListScrollTimerRef.current !== null) {
+      window.clearTimeout(novelListScrollTimerRef.current);
+    }
+    novelListScrollTimerRef.current = window.setTimeout(() => {
+      element.classList.remove("scrolling");
+    }, 800);
+  }, [openNovelMenuId]);
+  useEffect(() => {
+    novelListRef.current?.classList.remove("scrolling");
+    if (novelListScrollTimerRef.current !== null) {
+      window.clearTimeout(novelListScrollTimerRef.current);
+      novelListScrollTimerRef.current = null;
+    }
+    if (!openNovelMenuId) {
+      setNovelMenuPos(null);
+      novelMenuTriggerRef.current = null;
+    }
+  }, [openNovelMenuId]);
+  const handleNovelMenuToggle = useCallback((event: React.MouseEvent<HTMLButtonElement>, novel: Novel) => {
+    const button = event.currentTarget;
+    if (openNovelMenuId === novel.id) {
+      setOpenNovelMenuId("");
+      return;
+    }
+    const rect = button.getBoundingClientRect();
+    const menuWidth = 154;
+    setOpenNovelMenuId(novel.id);
+    setNovelMenuPos({
+      top: rect.bottom + 4,
+      left: Math.max(8, rect.right - menuWidth)
+    });
+    novelMenuTriggerRef.current = button;
+  }, [openNovelMenuId]);
+  useEffect(() => {
+    if (!openNovelMenuId) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenNovelMenuId("");
+      }
+    };
+    const handleResize = () => {
+      setOpenNovelMenuId("");
+    };
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      const menuEl = document.querySelector(".context-menu--novel-portal");
+      const trigger = novelMenuTriggerRef.current;
+      if (menuEl && !menuEl.contains(target) && trigger && !trigger.contains(target)) {
+        setOpenNovelMenuId("");
+      }
+    };
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("keydown", handleEscape);
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("keydown", handleEscape);
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [openNovelMenuId]);
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
   const [logSummaries, setLogSummaries] = useState<AiLogSummary[]>([]);
@@ -458,6 +541,8 @@ export default function App() {
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const [showQuickStart, setShowQuickStart] = useState(false);
   const [showDeleteLocalDataDialog, setShowDeleteLocalDataDialog] = useState(false);
+  const [nameMappingReport, setNameMappingReport] = useState<NameMappingConsistencyReport | null>(null);
+  const [showNameMappingCleanupDialog, setShowNameMappingCleanupDialog] = useState(false);
   const [showRewriteAbDialog, setShowRewriteAbDialog] = useState(false);
   const [selectedRewriteAbRunId, setSelectedRewriteAbRunId] = useState("");
   const [openingRewriteAbRuns, setOpeningRewriteAbRuns] = useState(false);
@@ -642,6 +727,8 @@ export default function App() {
     return novels.filter((novel) => novel.title.toLocaleLowerCase().includes(query));
   }, [novelFilter, novels]);
 
+  const novelMenuNovel = useMemo(() => filteredNovels.find((novel) => novel.id === openNovelMenuId), [filteredNovels, openNovelMenuId]);
+
   const requestJobEstimate = useCallback(async (
     novelId: string | null | undefined,
     batchId: string | null,
@@ -699,6 +786,38 @@ export default function App() {
   useEffect(() => {
     detailRef.current = detail;
   }, [detail]);
+
+  useEffect(() => {
+    setNameMappingReport(null);
+    setShowNameMappingCleanupDialog(false);
+  }, [detail?.novel.id]);
+
+  useEffect(() => {
+    if (
+      workspaceSection !== "canon"
+      || !detail?.novel.id
+      || !detail.settings
+      || processingTaskActive
+    ) {
+      return undefined;
+    }
+    let cancelled = false;
+    void invoke("inspect_name_mapping_consistency", { novelId: detail.novel.id })
+      .then((report) => {
+        if (!cancelled) setNameMappingReport(report);
+      })
+      .catch(() => {
+        if (!cancelled) setNameMappingReport(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    detail?.novel.id,
+    detail?.settings?.updated_at,
+    processingTaskActive,
+    workspaceSection
+  ]);
 
   useEffect(() => {
     selectedBatchIdRef.current = selectedBatchId;
@@ -1366,6 +1485,11 @@ export default function App() {
       showNotice("请填写主角姓名。");
       return false;
     }
+    const previousOptionalSources = configuredOptionalNameSources(savedNovelSettingsDraft);
+    const nextOptionalSources = configuredOptionalNameSources(novelSettingsDraft);
+    const removedOptionalSources = [...previousOptionalSources].filter(
+      (source) => !nextOptionalSources.has(source)
+    );
     setBusy("novel-settings");
     setNotice("");
     try {
@@ -1381,7 +1505,8 @@ export default function App() {
         advancedSettings: novelSettingsDraft.advanced_settings,
         relationshipTargets: novelSettingsDraft.relationship_targets
       });
-      setDetail({ ...detail, settings: saved });
+      const refreshedDetail = await invoke("get_novel_detail", { novelId: detail.novel.id });
+      setDetail({ ...refreshedDetail, settings: saved });
       const nextDraft: NovelSettingsDraft = {
         protagonist_name: saved.protagonist_name,
         protagonist_aliases: saved.protagonist_aliases ?? "",
@@ -1398,7 +1523,14 @@ export default function App() {
       if (navigateAfterSave) {
         commitActiveView("workspace");
       }
-      showNotice("基本设定已保存。");
+      const hasExistingRewrites = refreshedDetail.chapters.some(
+        (chapter) => chapter.rewrite_status === "completed" && Boolean(chapter.rewrite_text?.trim())
+      );
+      showNotice(
+        removedOptionalSources.length > 0 && hasExistingRewrites
+          ? `基本设定和姓名映射已更新；已删除 ${removedOptionalSources.length} 个女性化姓名。已有改写稿不会自动变化，请重新改写受影响批次。`
+          : "基本设定和姓名映射已保存。"
+      );
       return true;
     } catch (error) {
       showNotice(String(error));
@@ -1629,6 +1761,10 @@ export default function App() {
         assets
       });
       setDetail({ ...detail, canon_assets: updated });
+      const report = await invoke("inspect_name_mapping_consistency", {
+        novelId: detail.novel.id
+      });
+      setNameMappingReport(report);
       showNotice("一致性资产已保存。");
     } catch (error) {
       showNotice(String(error));
@@ -1761,6 +1897,58 @@ export default function App() {
         setAutoRunState("idle");
         setAutoRunMode(null);
       }
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function inspectNameMappings(openDialog = true) {
+    if (!detail) return;
+    setBusy("name-mapping-inspect");
+    setNotice("");
+    try {
+      const report = await invoke("inspect_name_mapping_consistency", {
+        novelId: detail.novel.id
+      });
+      setNameMappingReport(report);
+      if (report.needs_resolution && openDialog) {
+        setShowNameMappingCleanupDialog(true);
+      } else if (!report.needs_resolution) {
+        showNotice("姓名映射已与当前设定一致，没有需要确认的旧版残留。");
+      }
+    } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function resolveLegacyNameMappings(keepAsManualSources: string[]) {
+    if (!detail || !nameMappingReport) return;
+    const legacySources = nameMappingReport.legacy_unmanaged.map((entry) => entry.source);
+    const keep = new Set(keepAsManualSources);
+    const removeSources = legacySources.filter((source) => !keep.has(source));
+    setBusy("name-mapping-cleanup");
+    setNotice("");
+    try {
+      const report = await invoke("resolve_name_mapping_consistency", {
+        novelId: detail.novel.id,
+        removeSources,
+        keepAsManualSources
+      });
+      const refreshedDetail = await invoke("get_novel_detail", {
+        novelId: detail.novel.id
+      });
+      setDetail(refreshedDetail);
+      setNameMappingReport(report);
+      setShowNameMappingCleanupDialog(false);
+      showNotice(
+        removeSources.length > 0
+          ? `已删除 ${removeSources.length} 条旧版姓名映射；已有改写稿未改动，请重新改写受影响批次。`
+          : "旧版姓名映射已全部保留为手动映射。"
+      );
+    } catch (error) {
       showNotice(String(error));
     } finally {
       setBusy("");
@@ -2660,7 +2848,11 @@ export default function App() {
               />
             </label>
           )}
-          <div className="novel-list">
+          <div
+            className="novel-list"
+            ref={novelListRef}
+            onScroll={handleNovelListScroll}
+          >
             {filteredNovels.map((novel) => (
               <div className="novel-row" key={novel.id}>
                 <button
@@ -2679,24 +2871,28 @@ export default function App() {
                 <button
                   className="icon-button menu-trigger"
                   aria-label={`打开《${novel.title}》菜单`}
-                  onClick={() => setOpenNovelMenuId(openNovelMenuId === novel.id ? "" : novel.id)}
+                  onClick={(event) => handleNovelMenuToggle(event, novel)}
                   disabled={processingTaskActive}
                 >
                   <MoreHorizontal size={17} />
                 </button>
-                {openNovelMenuId === novel.id && (
-                  <div className="context-menu">
-                    <button onClick={() => deleteNovel(novel)} disabled={busy === "delete-novel" || processingTaskActive}>
-                      <Trash2 size={15} />
-                      删除当前小说
-                    </button>
-                  </div>
-                )}
               </div>
             ))}
             {novels.length === 0 && <p className="muted">尚未导入小说。</p>}
             {novels.length > 0 && filteredNovels.length === 0 && <p className="muted sidebar-novel-empty">没有匹配的小说。</p>}
           </div>
+          {openNovelMenuId && novelMenuPos && novelMenuNovel && createPortal(
+            <div
+              className="context-menu context-menu--novel-portal"
+              style={{ top: novelMenuPos.top, left: novelMenuPos.left }}
+            >
+              <button onClick={() => deleteNovel(novelMenuNovel)} disabled={busy === "delete-novel" || processingTaskActive}>
+                <Trash2 size={15} />
+                删除当前小说
+              </button>
+            </div>,
+            document.body
+          )}
         </div>
 
         <div className="side-section">
@@ -3301,10 +3497,27 @@ export default function App() {
                   </button>
                   <h2>一致性资产</h2>
                 </div>
-                <button onClick={saveCanonAssets} disabled={!detail || busy === "canon" || processingTaskActive}>
-                  {busy === "canon" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-                  保存
-                </button>
+                <div className="canon-workspace-actions">
+                  {nameMappingReport?.needs_resolution && (
+                    <span className="canon-mapping-warning">
+                      发现 {nameMappingReport.legacy_unmanaged.length} 条旧版未归属映射
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void inspectNameMappings()}
+                    disabled={!detail || Boolean(busy) || processingTaskActive}
+                  >
+                    {busy === "name-mapping-inspect"
+                      ? <Loader2 className="spin" size={16} />
+                      : <Search size={16} />}
+                    检查旧映射
+                  </button>
+                  <button onClick={saveCanonAssets} disabled={!detail || Boolean(busy) || processingTaskActive}>
+                    {busy === "canon" ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                    保存
+                  </button>
+                </div>
               </div>
               <div className="asset-stack">
                 {detail?.canon_assets.map((asset) => (
@@ -3379,6 +3592,16 @@ export default function App() {
           busy={busy === "delete-local-data"}
           onCancel={() => setShowDeleteLocalDataDialog(false)}
           onConfirm={(confirmationPhrase) => void deleteLocalData(confirmationPhrase)}
+        />
+      )}
+      {showNameMappingCleanupDialog && nameMappingReport?.needs_resolution && (
+        <NameMappingCleanupDialog
+          busy={busy === "name-mapping-cleanup"}
+          report={nameMappingReport}
+          onCancel={() => setShowNameMappingCleanupDialog(false)}
+          onConfirm={(keepAsManualSources) => {
+            void resolveLegacyNameMappings(keepAsManualSources);
+          }}
         />
       )}
       {showRewriteAbDialog && detail && selectedBatch && (

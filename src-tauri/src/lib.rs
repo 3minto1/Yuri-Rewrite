@@ -145,6 +145,8 @@ pub fn run() {
             save_novel_settings,
             list_chapter_batches,
             update_canon_assets,
+            inspect_name_mapping_consistency,
+            resolve_name_mapping_consistency,
             update_chapter_title,
             start_analysis,
             start_rewrite,
@@ -1038,7 +1040,14 @@ async fn ensure_name_mapping_asset(
         let conn = state.conn.lock().map_err(to_string)?;
         load_canon_asset_content(&conn, novel_id, "姓名映射表")?
     };
-    let mut mappings = parse_name_mapping_entries(existing_content.as_deref().unwrap_or(""));
+    let synchronized_content = sync_name_mapping_asset_for_settings(
+        existing_content.as_deref().unwrap_or(""),
+        None,
+        settings,
+    )?;
+    let synchronized_asset = parse_name_mapping_asset(&synchronized_content);
+    let legacy_unmanaged_sources = synchronized_asset.legacy_unmanaged_sources;
+    let mut mappings = synchronized_asset.names;
     let required_names = required_feminized_name_sources(settings);
     if required_names.is_empty() {
         return Ok(());
@@ -1110,7 +1119,12 @@ async fn ensure_name_mapping_asset(
         }
     }
 
-    let content = build_name_mapping_asset_content(settings, mappings)?;
+    let content = build_name_mapping_asset_content_with_managed(
+        settings,
+        mappings,
+        configured_name_mapping_sources(settings),
+        legacy_unmanaged_sources,
+    )?;
     let conn = state.conn.lock().map_err(to_string)?;
     upsert_canon_asset(
         &conn,
@@ -1281,34 +1295,51 @@ fn push_unique_name(names: &mut Vec<String>, name: &str) {
     }
 }
 
-fn parse_name_mapping_entries(content: &str) -> Vec<NameMappingEntry> {
+fn parse_name_mapping_asset(content: &str) -> NameMappingAsset {
     if content.trim().is_empty() {
-        return Vec::new();
+        return NameMappingAsset {
+            version: 1,
+            protagonist: None,
+            names: Vec::new(),
+            managed_sources: Vec::new(),
+            legacy_unmanaged_sources: Vec::new(),
+        };
     }
     let Ok(value) = parse_jsonish_value(content) else {
-        return Vec::new();
+        return NameMappingAsset {
+            version: 1,
+            protagonist: None,
+            names: Vec::new(),
+            managed_sources: Vec::new(),
+            legacy_unmanaged_sources: Vec::new(),
+        };
     };
     let mut entries = Vec::new();
-    if let Some(protagonist) = value
+    let protagonist = value
         .get("protagonist")
         .and_then(serde_json::Value::as_object)
-    {
-        let source = protagonist
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .trim();
-        let target = protagonist
-            .get("target")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .trim();
-        if !source.is_empty() && !target.is_empty() {
-            entries.push(NameMappingEntry {
-                source: source.to_string(),
-                target: target.to_string(),
-            });
-        }
+        .and_then(|protagonist| {
+            let source = protagonist
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let target = protagonist
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if source.is_empty() || target.is_empty() {
+                None
+            } else {
+                Some(NameMappingEntry {
+                    source: source.to_string(),
+                    target: target.to_string(),
+                })
+            }
+        });
+    if let Some(entry) = protagonist.as_ref() {
+        upsert_name_mapping_entry(&mut entries, &entry.source, &entry.target);
     }
     if let Some(items) = value.get("names").and_then(serde_json::Value::as_array) {
         for item in items {
@@ -1327,12 +1358,241 @@ fn parse_name_mapping_entries(content: &str) -> Vec<NameMappingEntry> {
             }
         }
     }
+    let mut managed_sources = value
+        .get("managed_sources")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    managed_sources.sort();
+    managed_sources.dedup();
+    let mut legacy_unmanaged_sources = value
+        .get("legacy_unmanaged_sources")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    legacy_unmanaged_sources.sort();
+    legacy_unmanaged_sources.dedup();
+    NameMappingAsset {
+        version: value
+            .get("version")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1),
+        protagonist,
+        names: entries,
+        managed_sources,
+        legacy_unmanaged_sources,
+    }
+}
+
+#[cfg(test)]
+fn parse_name_mapping_entries(content: &str) -> Vec<NameMappingEntry> {
+    parse_name_mapping_asset(content).names
+}
+
+pub(crate) fn configured_name_mapping_sources(settings: &NovelSettings) -> Vec<String> {
+    required_feminized_name_sources(settings)
+}
+
+fn explicit_name_mapping_entries(settings: &NovelSettings) -> Vec<NameMappingEntry> {
+    let mut entries = Vec::new();
+    if !settings.rewritten_protagonist_name.trim().is_empty() {
+        entries.push(NameMappingEntry {
+            source: settings.protagonist_name.trim().to_string(),
+            target: settings.rewritten_protagonist_name.trim().to_string(),
+        });
+    }
+    for entry in additional_feminize_name_mappings(&settings.protagonist_aliases) {
+        upsert_name_mapping_entry(&mut entries, &entry.source, &entry.target);
+    }
+    for entry in additional_feminize_name_mappings(&settings.additional_feminize_names) {
+        upsert_name_mapping_entry(&mut entries, &entry.source, &entry.target);
+    }
     entries
 }
 
-fn build_name_mapping_asset_content(
+pub(crate) fn sync_name_mapping_asset_for_settings(
+    existing_content: &str,
+    old_settings: Option<&NovelSettings>,
+    new_settings: &NovelSettings,
+) -> Result<String, String> {
+    let parsed = parse_name_mapping_asset(existing_content);
+    let legacy_asset = parsed.version < 2;
+    let mut legacy_unmanaged_sources = parsed.legacy_unmanaged_sources;
+    let mut mappings = parsed.names;
+    let mut previously_managed = if parsed.version >= 2 {
+        parsed.managed_sources
+    } else {
+        old_settings
+            .map(configured_name_mapping_sources)
+            .unwrap_or_default()
+    };
+    if let Some(old_settings) = old_settings {
+        for source in configured_name_mapping_sources(old_settings) {
+            push_unique_name(&mut previously_managed, &source);
+        }
+    }
+    let managed_sources = configured_name_mapping_sources(new_settings);
+    let current = managed_sources.iter().cloned().collect::<HashSet<_>>();
+    let previous = previously_managed.into_iter().collect::<HashSet<_>>();
+    if legacy_asset {
+        for entry in &mappings {
+            if !previous.contains(&entry.source) {
+                push_unique_name(&mut legacy_unmanaged_sources, &entry.source);
+            }
+        }
+    }
+    legacy_unmanaged_sources.retain(|source| !current.contains(source));
+    mappings.retain(|entry| !previous.contains(&entry.source) || current.contains(&entry.source));
+    for entry in explicit_name_mapping_entries(new_settings) {
+        upsert_name_mapping_entry(&mut mappings, &entry.source, &entry.target);
+    }
+    build_name_mapping_asset_content_with_managed(
+        new_settings,
+        mappings,
+        managed_sources,
+        legacy_unmanaged_sources,
+    )
+}
+
+pub(crate) fn normalize_edited_name_mapping_asset(
+    content: &str,
+    settings: &NovelSettings,
+) -> Result<String, String> {
+    let parsed = parse_name_mapping_asset(content);
+    if !content.trim().is_empty() && parsed.names.is_empty() {
+        return Err("姓名映射表必须是包含 protagonist 或 names 的合法 JSON。".to_string());
+    }
+    build_name_mapping_asset_content_with_managed(
+        settings,
+        parsed.names,
+        configured_name_mapping_sources(settings),
+        Vec::new(),
+    )
+}
+
+pub(crate) fn inspect_name_mapping_asset(
+    content: &str,
+    settings: &NovelSettings,
+) -> NameMappingConsistencyReport {
+    let parsed = parse_name_mapping_asset(content);
+    let configured = configured_name_mapping_sources(settings)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let managed_sources = if parsed.version >= 2 {
+        parsed
+            .managed_sources
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>()
+    } else {
+        configured.clone()
+    };
+    let legacy_sources = if parsed.version >= 2 {
+        parsed
+            .legacy_unmanaged_sources
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>()
+    } else {
+        parsed
+            .names
+            .iter()
+            .filter(|entry| !managed_sources.contains(&entry.source))
+            .map(|entry| entry.source.clone())
+            .collect::<HashSet<_>>()
+    };
+    let mut managed = Vec::new();
+    let mut manual = Vec::new();
+    let mut legacy_unmanaged = Vec::new();
+    for entry in parsed.names {
+        let output = NameMappingConsistencyEntry {
+            source: entry.source.clone(),
+            target: entry.target.clone(),
+        };
+        if managed_sources.contains(&entry.source) {
+            managed.push(output);
+        } else if legacy_sources.contains(&entry.source) {
+            legacy_unmanaged.push(output);
+        } else {
+            manual.push(output);
+        }
+    }
+    NameMappingConsistencyReport {
+        needs_resolution: !legacy_unmanaged.is_empty(),
+        managed,
+        manual,
+        legacy_unmanaged,
+    }
+}
+
+pub(crate) fn resolve_name_mapping_asset(
+    content: &str,
+    settings: &NovelSettings,
+    remove_sources: &[String],
+    keep_as_manual_sources: &[String],
+) -> Result<String, String> {
+    let parsed = parse_name_mapping_asset(content);
+    let report = inspect_name_mapping_asset(content, settings);
+    let legacy = report
+        .legacy_unmanaged
+        .iter()
+        .map(|entry| entry.source.as_str())
+        .collect::<HashSet<_>>();
+    let remove = remove_sources
+        .iter()
+        .map(|source| source.trim())
+        .filter(|source| !source.is_empty())
+        .collect::<HashSet<_>>();
+    let keep = keep_as_manual_sources
+        .iter()
+        .map(|source| source.trim())
+        .filter(|source| !source.is_empty())
+        .collect::<HashSet<_>>();
+    if remove
+        .iter()
+        .chain(keep.iter())
+        .any(|source| !legacy.contains(source))
+    {
+        return Err("只能处理检查结果中列出的旧版未归属映射。".to_string());
+    }
+    if remove.iter().any(|source| keep.contains(source)) {
+        return Err("同一姓名不能同时删除并保留。".to_string());
+    }
+    let unresolved = legacy
+        .iter()
+        .filter(|source| !remove.contains(**source) && !keep.contains(**source))
+        .count();
+    if unresolved > 0 {
+        return Err("请为每一条旧版未归属映射选择删除或保留。".to_string());
+    }
+    let mappings = parsed
+        .names
+        .into_iter()
+        .filter(|entry| !remove.contains(entry.source.as_str()))
+        .collect::<Vec<_>>();
+    build_name_mapping_asset_content_with_managed(
+        settings,
+        mappings,
+        configured_name_mapping_sources(settings),
+        Vec::new(),
+    )
+}
+
+fn build_name_mapping_asset_content_with_managed(
     settings: &NovelSettings,
     mut mappings: Vec<NameMappingEntry>,
+    mut managed_sources: Vec<String>,
+    mut legacy_unmanaged_sources: Vec<String>,
 ) -> Result<String, String> {
     if !settings.rewritten_protagonist_name.trim().is_empty() {
         upsert_name_mapping_entry(
@@ -1353,12 +1613,35 @@ fn build_name_mapping_asset_content(
         .cloned();
     mappings.sort_by(|left, right| left.source.cmp(&right.source));
     mappings.dedup_by(|left, right| left.source == right.source);
+    managed_sources.retain(|source| !source.trim().is_empty());
+    managed_sources.sort();
+    managed_sources.dedup();
+    legacy_unmanaged_sources.retain(|source| {
+        !source.trim().is_empty() && !managed_sources.iter().any(|managed| managed == source)
+    });
+    legacy_unmanaged_sources.sort();
+    legacy_unmanaged_sources.dedup();
     let asset = NameMappingAsset {
-        version: 1,
+        version: 2,
         protagonist,
         names: mappings,
+        managed_sources,
+        legacy_unmanaged_sources,
     };
     serde_json::to_string_pretty(&asset).map_err(to_string)
+}
+
+#[cfg(test)]
+fn build_name_mapping_asset_content(
+    settings: &NovelSettings,
+    mappings: Vec<NameMappingEntry>,
+) -> Result<String, String> {
+    build_name_mapping_asset_content_with_managed(
+        settings,
+        mappings,
+        configured_name_mapping_sources(settings),
+        Vec::new(),
+    )
 }
 
 fn upsert_name_mapping_entry(entries: &mut Vec<NameMappingEntry>, source: &str, target: &str) {
@@ -5532,20 +5815,23 @@ fn build_analysis_canon_assets(
         has_rows = true;
         let title = row.get::<_, String>(0)?;
         let analysis_json = row.get::<_, String>(1)?;
-        summary.push_section(&title, &analysis_json);
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&analysis_json) {
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&analysis_json) {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("name_feminization_map");
+                object.remove("rewrite_notes");
+            }
+            summary.push_section(
+                &title,
+                &serde_json::to_string(&value).unwrap_or_else(|_| analysis_json.clone()),
+            );
             push_analysis_json_field(&mut characters, &title, &value, "characters");
             push_analysis_json_field(&mut relationships, &title, &value, "relationships");
             push_analysis_json_field(&mut locations, &title, &value, "locations");
             push_analysis_json_field(&mut foreshadowing, &title, &value, "foreshadowing");
             if !terms.is_full() {
                 let mut wrote_header = false;
-                for (field, label) in [
-                    ("terms", "原文术语："),
-                    ("names", "原文姓名与称谓："),
-                    ("name_feminization_map", "姓名女性化映射："),
-                    ("rewrite_notes", "改写注意事项："),
-                ] {
+                for (field, label) in [("terms", "原文术语："), ("names", "原文姓名与称谓：")]
+                {
                     let Some(field_value) = value.get(field) else {
                         continue;
                     };
@@ -5561,6 +5847,8 @@ fn build_analysis_canon_assets(
                     terms.push_text(&text);
                 }
             }
+        } else {
+            summary.push_section(&title, &analysis_json);
         }
         if summary.is_full()
             && characters.is_full()
@@ -8424,7 +8712,10 @@ mod tests {
         assert!(assets.characters.chars().count() <= analysis_asset_char_limit("人物卡"));
         assert_eq!(assets.locations.matches("共同地点").count(), 1);
         assert!(assets.terms.contains("原文术语："));
-        assert!(assets.terms.contains("姓名女性化映射："));
+        assert!(!assets.terms.contains("姓名女性化映射："));
+        assert!(!assets.terms.contains("改写注意事项："));
+        assert!(!assets.summary.contains("name_feminization_map"));
+        assert!(!assets.summary.contains("rewrite_notes"));
         assert!(assets.terms.chars().count() <= analysis_asset_char_limit("术语表"));
     }
 
@@ -8673,6 +8964,168 @@ mod tests {
         assert!(prompt.contains("其他指定女性化人物/姓名映射：林动 -> 林筝"));
         assert!(prompt.contains("必须逐字使用指定改写名"));
         assert!(prompt.contains("并发分片和后续批次也必须继续使用同一份映射表"));
+    }
+
+    #[test]
+    fn settings_sync_removes_deleted_managed_mapping_and_keeps_manual_mapping() {
+        let mut old_settings = sample_novel_settings();
+        old_settings.additional_feminize_names = "林动 -> 林筝".to_string();
+        let mut new_settings = old_settings.clone();
+        new_settings.additional_feminize_names.clear();
+        let existing = serde_json::json!({
+            "version": 2,
+            "protagonist": { "source": "萧炎", "target": "萧妍" },
+            "names": [
+                { "source": "萧炎", "target": "萧妍" },
+                { "source": "炎儿", "target": "小妍儿" },
+                { "source": "林动", "target": "林筝" },
+                { "source": "手动人物", "target": "手动女名" }
+            ],
+            "managed_sources": ["萧炎", "炎儿", "林动"],
+            "legacy_unmanaged_sources": []
+        })
+        .to_string();
+
+        let synced =
+            sync_name_mapping_asset_for_settings(&existing, Some(&old_settings), &new_settings)
+                .expect("sync mapping");
+        let parsed = parse_name_mapping_asset(&synced);
+
+        assert!(!parsed.names.iter().any(|entry| entry.source == "林动"));
+        assert!(parsed
+            .names
+            .iter()
+            .any(|entry| entry.source == "手动人物" && entry.target == "手动女名"));
+        assert!(!parsed.managed_sources.contains(&"林动".to_string()));
+    }
+
+    #[test]
+    fn settings_sync_updates_explicit_mapping_target() {
+        let mut old_settings = sample_novel_settings();
+        old_settings.additional_feminize_names = "林动 -> 林筝".to_string();
+        let mut new_settings = old_settings.clone();
+        new_settings.additional_feminize_names = "林动 -> 林冬儿".to_string();
+        let existing =
+            build_name_mapping_asset_content(&old_settings, Vec::new()).expect("mapping content");
+
+        let synced =
+            sync_name_mapping_asset_for_settings(&existing, Some(&old_settings), &new_settings)
+                .expect("sync mapping");
+        let parsed = parse_name_mapping_asset(&synced);
+
+        assert!(parsed
+            .names
+            .iter()
+            .any(|entry| entry.source == "林动" && entry.target == "林冬儿"));
+    }
+
+    #[test]
+    fn legacy_unmanaged_mapping_requires_resolution_and_can_be_removed() {
+        let settings = sample_novel_settings();
+        let legacy = serde_json::json!({
+            "version": 1,
+            "protagonist": { "source": "萧炎", "target": "萧妍" },
+            "names": [
+                { "source": "萧炎", "target": "萧妍" },
+                { "source": "炎儿", "target": "小妍儿" },
+                { "source": "旧设定人物", "target": "旧女性名" }
+            ]
+        })
+        .to_string();
+        let upgraded = sync_name_mapping_asset_for_settings(&legacy, None, &settings)
+            .expect("upgrade mapping");
+        let report = inspect_name_mapping_asset(&upgraded, &settings);
+
+        assert!(report.needs_resolution);
+        assert_eq!(report.legacy_unmanaged.len(), 1);
+        assert_eq!(report.legacy_unmanaged[0].source, "旧设定人物");
+
+        let resolved =
+            resolve_name_mapping_asset(&upgraded, &settings, &["旧设定人物".to_string()], &[])
+                .expect("resolve legacy mapping");
+        let final_report = inspect_name_mapping_asset(&resolved, &settings);
+        assert!(!final_report.needs_resolution);
+        assert!(!parse_name_mapping_asset(&resolved)
+            .names
+            .iter()
+            .any(|entry| entry.source == "旧设定人物"));
+    }
+
+    #[test]
+    fn legacy_unmanaged_mapping_can_be_kept_as_manual() {
+        let settings = sample_novel_settings();
+        let legacy = serde_json::json!({
+            "version": 1,
+            "names": [
+                { "source": "萧炎", "target": "萧妍" },
+                { "source": "炎儿", "target": "小妍儿" },
+                { "source": "手动人物", "target": "手动女名" }
+            ]
+        })
+        .to_string();
+        let upgraded =
+            sync_name_mapping_asset_for_settings(&legacy, None, &settings).expect("upgrade mapping");
+        let resolved = resolve_name_mapping_asset(
+            &upgraded,
+            &settings,
+            &[],
+            &["手动人物".to_string()],
+        )
+        .expect("keep legacy mapping");
+        let report = inspect_name_mapping_asset(&resolved, &settings);
+
+        assert!(!report.needs_resolution);
+        assert!(report
+            .manual
+            .iter()
+            .any(|entry| entry.source == "手动人物" && entry.target == "手动女名"));
+    }
+
+    #[test]
+    fn canon_prompt_strips_mapping_metadata_and_legacy_rewrite_fields() {
+        let assets = vec![
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "姓名映射表".to_string(),
+                content: serde_json::json!({
+                    "version": 2,
+                    "protagonist": { "source": "萧炎", "target": "萧妍" },
+                    "names": [
+                        { "source": "萧炎", "target": "萧妍" },
+                        { "source": "旧人物", "target": "旧女名" }
+                    ],
+                    "managed_sources": ["萧炎"],
+                    "legacy_unmanaged_sources": ["旧人物"]
+                })
+                .to_string(),
+                updated_at: "now".to_string(),
+            },
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "AI分析汇总".to_string(),
+                content: "## 第一章\n{\"characters\":[\"萧炎\"],\"name_feminization_map\":[\"林动 -> 林筝\"],\"rewrite_notes\":[\"改成女性\"]}".to_string(),
+                updated_at: "now".to_string(),
+            },
+            CanonAsset {
+                novel_id: "novel-1".to_string(),
+                kind: "术语表".to_string(),
+                content: "## 第一章\n原文术语：\n- 斗气\n姓名女性化映射：\n- 林动 -> 林筝\n改写注意事项：\n- 改成女性".to_string(),
+                updated_at: "now".to_string(),
+            },
+        ];
+
+        let prompt = build_compact_canon_text(&assets);
+
+        assert!(prompt.contains("萧炎"));
+        assert!(prompt.contains("斗气"));
+        assert!(!prompt.contains("managed_sources"));
+        assert!(!prompt.contains("legacy_unmanaged_sources"));
+        assert!(!prompt.contains("旧人物"));
+        assert!(!prompt.contains("旧女名"));
+        assert!(!prompt.contains("name_feminization_map"));
+        assert!(!prompt.contains("rewrite_notes"));
+        assert!(!prompt.contains("林动 -> 林筝"));
+        assert!(!prompt.contains("改成女性"));
     }
 
     #[test]

@@ -5,8 +5,9 @@ use crate::services::chapter_batch_files::{
 };
 use crate::task_control::{auto_runs_are_only_paused, auto_runs_have_non_paused};
 use crate::{
-    load_chapters, load_novel_settings, normalize_additional_feminize_names,
-    normalize_relationship_targets, to_string,
+    load_canon_asset_content, load_chapters, load_novel_settings,
+    normalize_additional_feminize_names, normalize_relationship_targets,
+    sync_name_mapping_asset_for_settings, to_string,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -589,8 +590,14 @@ pub(crate) fn save_novel_settings(
         relationship_targets,
         updated_at: Utc::now().to_rfc3339(),
     };
-    let conn = state.conn.lock().map_err(to_string)?;
-    conn.execute(
+    let mut conn = state.conn.lock().map_err(to_string)?;
+    let old_settings = load_novel_settings(&conn, &novel_id)?;
+    let existing_mapping =
+        load_canon_asset_content(&conn, &novel_id, "姓名映射表")?.unwrap_or_default();
+    let mapping_content =
+        sync_name_mapping_asset_for_settings(&existing_mapping, old_settings.as_ref(), &settings)?;
+    let tx = conn.transaction().map_err(to_string)?;
+    tx.execute(
         r#"
         INSERT INTO novel_settings (novel_id, protagonist_name, protagonist_aliases, rewritten_protagonist_name, additional_feminize_names, bust, body_type, rewrite_mode, advanced_settings, relationship_targets, updated_at)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -621,6 +628,18 @@ pub(crate) fn save_novel_settings(
         ],
     )
     .map_err(to_string)?;
+    tx.execute(
+        r#"
+        INSERT INTO canon_assets (novel_id, kind, content, updated_at)
+        VALUES (?1, '姓名映射表', ?2, ?3)
+        ON CONFLICT(novel_id, kind) DO UPDATE SET
+            content = excluded.content,
+            updated_at = excluded.updated_at
+        "#,
+        params![settings.novel_id, mapping_content, settings.updated_at],
+    )
+    .map_err(to_string)?;
+    tx.commit().map_err(to_string)?;
     Ok(settings)
 }
 

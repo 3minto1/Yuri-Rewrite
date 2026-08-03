@@ -13,6 +13,7 @@ import type {
   ModelDiagnosis,
   ModelProfile,
   ModelProfileInput,
+  NameMappingConsistencyReport,
   Novel,
   NovelDetail,
   NovelSettings,
@@ -125,10 +126,95 @@ let novelSettings: NovelSettings = {
 };
 
 let canonAssets: CanonAsset[] = [
+  {
+    novel_id: novel.id,
+    kind: "姓名映射表",
+    content: JSON.stringify({
+      version: 2,
+      protagonist: { source: "东伯雪鹰", target: "东伯雪璎" },
+      names: [
+        { source: "东伯雪鹰", target: "东伯雪璎" },
+        { source: "雪鹰", target: "雪瑛" }
+      ],
+      managed_sources: ["东伯雪鹰", "雪鹰"]
+    }, null, 2),
+    updated_at: now
+  },
   { novel_id: novel.id, kind: "人物关系", content: "东伯雪璎与余靖秋互相信任。", updated_at: now },
   { novel_id: novel.id, kind: "人物卡", content: "东伯雪璎：主角，沉稳坚韧。", updated_at: now },
   { novel_id: novel.id, kind: "地点", content: "雪鹰领：故事初期主要地点。", updated_at: now }
 ];
+
+type BrowserNameMappingAsset = {
+  version: number;
+  protagonist?: { source: string; target: string } | null;
+  names: Array<{ source: string; target: string }>;
+  managed_sources?: string[];
+  legacy_unmanaged_sources?: string[];
+};
+
+function browserConfiguredNameSources(settingsValue: NovelSettings): string[] {
+  const sources = [
+    settingsValue.protagonist_name,
+    ...settingsValue.protagonist_aliases.split(/\r?\n/),
+    ...settingsValue.additional_feminize_names.split(/\r?\n/)
+  ]
+    .map((entry) => entry.split(/->|=>|→/, 1)[0].trim())
+    .filter(Boolean);
+  return [...new Set(sources)];
+}
+
+function browserNameMappingAsset(): BrowserNameMappingAsset {
+  const content = canonAssets.find((asset) => asset.kind === "姓名映射表")?.content ?? "";
+  try {
+    const parsed = JSON.parse(content) as BrowserNameMappingAsset;
+    return {
+      version: Number(parsed.version || 1),
+      protagonist: parsed.protagonist ?? null,
+      names: Array.isArray(parsed.names) ? parsed.names : [],
+      managed_sources: Array.isArray(parsed.managed_sources) ? parsed.managed_sources : [],
+      legacy_unmanaged_sources: Array.isArray(parsed.legacy_unmanaged_sources)
+        ? parsed.legacy_unmanaged_sources
+        : []
+    };
+  } catch {
+    return { version: 1, protagonist: null, names: [], managed_sources: [] };
+  }
+}
+
+function setBrowserNameMappingAsset(asset: BrowserNameMappingAsset): void {
+  const index = canonAssets.findIndex((item) => item.kind === "姓名映射表");
+  const next: CanonAsset = {
+    novel_id: novel.id,
+    kind: "姓名映射表",
+    content: JSON.stringify(asset, null, 2),
+    updated_at: now
+  };
+  if (index >= 0) canonAssets[index] = next;
+  else canonAssets.unshift(next);
+}
+
+function browserNameMappingReport(settingsValue = novelSettings): NameMappingConsistencyReport {
+  const asset = browserNameMappingAsset();
+  const configured = new Set(browserConfiguredNameSources(settingsValue));
+  const managedSources = new Set(asset.version >= 2 ? asset.managed_sources ?? [] : configured);
+  const legacySources = new Set(
+    asset.version >= 2
+      ? asset.legacy_unmanaged_sources ?? []
+      : asset.names.filter((entry) => !managedSources.has(entry.source)).map((entry) => entry.source)
+  );
+  const managed = asset.names.filter((entry) => managedSources.has(entry.source));
+  const manual = asset.version >= 2
+    ? asset.names.filter((entry) => !managedSources.has(entry.source))
+    : [];
+  const legacy_unmanaged = asset.names.filter((entry) => legacySources.has(entry.source));
+  return {
+    managed,
+    manual,
+    legacy_unmanaged,
+    needs_resolution: legacy_unmanaged.length > 0
+  };
+}
 
 let chapterRule: StoredChapterRule | null = null;
 
@@ -548,7 +634,9 @@ export async function invokeBrowserMock(
     case "delete_token_usage_for_model":
       return 1;
     case "save_novel_settings":
-      novelSettings = {
+      {
+      const previousSettings = novelSettings;
+      const nextSettings: NovelSettings = {
         novel_id: novel.id,
         protagonist_name: String(args?.protagonistName ?? ""),
         protagonist_aliases: String(args?.protagonistAliases ?? ""),
@@ -561,7 +649,50 @@ export async function invokeBrowserMock(
         relationship_targets: String(args?.relationshipTargets ?? "[]"),
         updated_at: now
       };
+      const mapping = browserNameMappingAsset();
+      const previousManaged = new Set(
+        mapping.version >= 2
+          ? mapping.managed_sources ?? []
+          : browserConfiguredNameSources(previousSettings)
+      );
+      const nextManaged = browserConfiguredNameSources(nextSettings);
+      const nextManagedSet = new Set(nextManaged);
+      const legacySources = new Set(
+        mapping.version >= 2
+          ? mapping.legacy_unmanaged_sources ?? []
+          : mapping.names
+              .filter((entry) => !previousManaged.has(entry.source))
+              .map((entry) => entry.source)
+      );
+      for (const source of nextManaged) legacySources.delete(source);
+      const names = mapping.names.filter(
+        (entry) => !previousManaged.has(entry.source) || nextManagedSet.has(entry.source)
+      );
+      const upsert = (source: string, target: string) => {
+        if (!source || !target) return;
+        const existing = names.find((entry) => entry.source === source);
+        if (existing) existing.target = target;
+        else names.push({ source, target });
+      };
+      upsert(nextSettings.protagonist_name, nextSettings.rewritten_protagonist_name);
+      for (const line of [
+        ...nextSettings.protagonist_aliases.split(/\r?\n/),
+        ...nextSettings.additional_feminize_names.split(/\r?\n/)
+      ]) {
+        const [source, target] = line.split(/->|=>|→/).map((value) => value.trim());
+        if (target) upsert(source, target);
+      }
+      novelSettings = nextSettings;
+      const protagonist = names.find((entry) => entry.source === nextSettings.protagonist_name) ?? null;
+      setBrowserNameMappingAsset({
+        version: 2,
+        protagonist,
+        names,
+        managed_sources: nextManaged,
+        legacy_unmanaged_sources: [...legacySources]
+      });
       return { ...novelSettings };
+      }
     case "estimate_job_cost":
       return estimate();
     case "estimate_rewrite_ab": {
@@ -677,6 +808,30 @@ export async function invokeBrowserMock(
         updated_at: now
       }));
       return canonAssets.map((asset) => ({ ...asset }));
+    case "inspect_name_mapping_consistency":
+      return browserNameMappingReport();
+    case "resolve_name_mapping_consistency": {
+      const report = browserNameMappingReport();
+      const legacy = new Set(report.legacy_unmanaged.map((entry) => entry.source));
+      const remove = new Set((args?.removeSources as string[] | undefined) ?? []);
+      const keep = new Set((args?.keepAsManualSources as string[] | undefined) ?? []);
+      for (const source of [...remove, ...keep]) {
+        if (!legacy.has(source)) throw new Error("只能处理检查结果中列出的旧版未归属映射。");
+      }
+      if ([...legacy].some((source) => !remove.has(source) && !keep.has(source))) {
+        throw new Error("请为每一条旧版未归属映射选择删除或保留。");
+      }
+      const asset = browserNameMappingAsset();
+      const names = asset.names.filter((entry) => !remove.has(entry.source));
+      setBrowserNameMappingAsset({
+        version: 2,
+        protagonist: names.find((entry) => entry.source === novelSettings.protagonist_name) ?? null,
+        names,
+        managed_sources: browserConfiguredNameSources(novelSettings),
+        legacy_unmanaged_sources: []
+      });
+      return browserNameMappingReport();
+    }
     case "update_chapter_title": {
       const title = String(args?.title ?? "").trim();
       if (!title) throw new Error("章节名称不能为空。");

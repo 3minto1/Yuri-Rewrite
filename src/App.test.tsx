@@ -160,6 +160,9 @@ function installDefaultCommands() {
       return { start_date: "2026-05-21", end_date: "2026-06-19", requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
     }
     if (command === "estimate_job_cost") return estimate;
+    if (command === "inspect_name_mapping_consistency") {
+      return { managed: [], manual: [], legacy_unmanaged: [], needs_resolution: false };
+    }
     if (command === "list_rewrite_ab_runs") return [];
     if (command === "check_for_updates") {
       return { current_version: "0.2.2", latest_version: "0.2.2", latest_tag: "v0.2.2", is_latest: true, release_url: "", asset_name: "", asset_download_url: "" };
@@ -620,6 +623,48 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("heading", { name: "章节" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
     expect(screen.getByRole("heading", { name: "模型管理" })).toBeInTheDocument();
+  });
+
+  it("inspects and resolves legacy name mappings from the canon workspace", async () => {
+    const defaultInvoke = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "inspect_name_mapping_consistency") {
+        return {
+          managed: [{ source: "林明", target: "林茗" }],
+          manual: [],
+          legacy_unmanaged: [{ source: "旧人物", target: "旧女名" }],
+          needs_resolution: true
+        };
+      }
+      if (command === "resolve_name_mapping_consistency") {
+        return {
+          managed: [{ source: "林明", target: "林茗" }],
+          manual: [],
+          legacy_unmanaged: [],
+          needs_resolution: false
+        };
+      }
+      return defaultInvoke?.(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "一致性资产" }));
+    expect(await screen.findByText("发现 1 条旧版未归属映射")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "检查旧映射" }));
+    expect(await screen.findByRole("dialog", { name: "检查旧版姓名映射" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "应用处理" }));
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith(
+      "resolve_name_mapping_consistency",
+      {
+        novelId: "novel-1",
+        removeSources: ["旧人物"],
+        keepAsManualSources: []
+      }
+    ));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "检查旧版姓名映射" })).not.toBeInTheDocument());
   });
 
   it("shows and saves protagonist aliases in novel settings", async () => {
