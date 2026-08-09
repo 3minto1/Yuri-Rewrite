@@ -31,7 +31,7 @@
   align-items: center;
   background: rgb(255 255 255 / 5%);
   border-color: rgb(255 255 255 / 8%);
-  color: var(--color-neutral-soft);
+  color: var(--color-sidebar-text);
   display: inline-flex;
   gap: 8px;
   min-height: 28px;
@@ -79,14 +79,14 @@
   background:
     linear-gradient(180deg, rgb(255 255 255 / 3%), transparent 34%),
     var(--color-ink);
-  color: var(--color-surface-muted);
+  color: var(--color-sidebar-text);
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
   overflow: hidden;
   padding: 12px;
-  border-right: 1px solid var(--color-ink-muted);
+  border-right: 1px solid var(--color-sidebar-border);
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -164,8 +164,8 @@
 
 .nav-button {
   background: transparent;
-  border-color: var(--color-ink-border);
-  color: var(--color-surface-muted);
+  border-color: var(--color-sidebar-border);
+  color: var(--color-sidebar-text);
   justify-content: flex-start;
   width: 100%;
 }
@@ -177,7 +177,7 @@
   color: var(--color-text);
 }
 .section-label {
-  color: var(--color-border-strong);
+  color: var(--color-sidebar-muted);
   font-size: 12px;
 }
 
@@ -206,8 +206,8 @@
 
 .novel-item {
   background: transparent;
-  border-color: var(--color-ink-border);
-  color: var(--color-surface-muted);
+  border-color: var(--color-sidebar-border);
+  color: var(--color-sidebar-text);
   width: 100%;
 }
 
@@ -449,7 +449,7 @@
 
 .brand span,
 .section-label {
-  color: var(--color-border-strong);
+  color: var(--color-sidebar-muted);
 }
 
 
@@ -460,8 +460,8 @@
 .novel-item,
 .menu-trigger {
   background: rgb(255 255 255 / 3%);
-  border-color: rgb(255 255 255 / 10%);
-  color: var(--color-neutral-soft);
+  border-color: var(--color-sidebar-border);
+  color: var(--color-sidebar-text);
 }
 
 .nav-button.active,
@@ -518,91 +518,6 @@
   box-shadow: 0 8px 22px rgb(36 31 25 / 5%);
 }
 
-@media (max-width: 1120px) {
-  .app-shell {
-    grid-template-columns: 248px minmax(0, 1fr);
-  }
-
-  .app-menu {
-    gap: 5px;
-    padding: 0 12px;
-  }
-
-  .app-menu-item {
-    padding: 0 10px;
-  }
-
-  .sidebar {
-    padding-left: 14px;
-    padding-right: 14px;
-  }
-
-  .topbar {
-    gap: 12px;
-    padding-left: 18px;
-    padding-right: 18px;
-  }
-
-  .topbar-actions {
-    gap: 6px;
-  }
-
-  .topbar-actions button {
-    padding-left: 10px;
-    padding-right: 10px;
-  }
-
-  .content-grid,
-  .compare-page {
-    gap: 12px;
-    padding: 12px 14px 18px;
-  }
-
-  .compare-toolbar-secondary-row {
-    align-items: center;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .compare-toolbar-left-actions {
-    grid-column: 1;
-    grid-row: 1;
-    min-width: 0;
-  }
-
-  .compare-toolbar-right-actions {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .compare-word-count {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    min-width: 0;
-  }
-
-  .workspace-main-grid {
-    grid-template-columns: minmax(300px, 0.92fr) minmax(330px, 1.08fr);
-  }
-
-  .model-panel .panel-actions {
-    flex-basis: 160px;
-  }
-
-  .chapter-list-heading .panel-actions {
-    gap: 6px;
-  }
-
-  .chapter-jump-input {
-    flex-basis: 96px;
-  }
-
-  .page-panel {
-    padding-left: 14px;
-    padding-right: 14px;
-  }
-}
-
 /* Workflow-first application shell */
 
 
@@ -625,8 +540,8 @@
 
 .sidebar-collapse-toggle {
   background: transparent;
-  border-color: var(--color-ink-border);
-  color: var(--color-surface-muted);
+  border-color: var(--color-sidebar-border);
+  color: var(--color-sidebar-text);
   flex: 0 0 36px;
 }
 
@@ -655,10 +570,10 @@
 
 .sidebar-novel-filter {
   align-items: center;
-  background: var(--color-ink-muted);
-  border: 1px solid var(--color-ink-border);
+  background: var(--color-sidebar-surface);
+  border: 1px solid var(--color-sidebar-border);
   border-radius: var(--radius-control);
-  color: var(--color-border-strong);
+  color: var(--color-sidebar-muted);
   display: flex;
   gap: 7px;
   min-height: 36px;
@@ -666,14 +581,14 @@
 }
 
 .sidebar-novel-filter:focus-within {
-  border-color: var(--color-surface-muted);
-  box-shadow: 0 0 0 2px rgb(244 239 230 / 18%);
+  border-color: var(--color-sidebar-text);
+  box-shadow: 0 0 0 2px rgb(230 236 243 / 18%);
 }
 
 .sidebar-novel-filter input {
   background: transparent;
   border: 0;
-  color: var(--color-surface-muted);
+  color: var(--color-sidebar-text);
   min-height: 34px;
   min-width: 0;
   outline: 0;
@@ -682,7 +597,7 @@
 }
 
 .sidebar-novel-filter input::placeholder {
-  color: var(--color-text-disabled);
+  color: var(--color-sidebar-disabled);
 }
 
 .sidebar .novel-list {
@@ -811,37 +726,4 @@
   grid-column: 1 / -1;
   min-height: 0;
   width: 100%;
-}
-
-@media (max-width: 1180px) {
-  .app-shell {
-    grid-template-columns: 232px minmax(0, 1fr);
-  }
-
-  .app-shell.sidebar-collapsed {
-    grid-template-columns: 64px minmax(0, 1fr);
-  }
-
-  .topbar {
-    align-items: center;
-    flex-direction: row;
-  }
-
-  .topbar-actions {
-    justify-content: flex-end;
-    width: auto;
-  }
-
-  .rewrite-ab-model-progress {
-    grid-template-columns: minmax(170px, .75fr) minmax(180px, 1.15fr) minmax(230px, 1fr);
-  }
-
-  .rewrite-ab-model-progress-track {
-    grid-column: 2;
-  }
-
-  .rewrite-ab-model-progress-meta {
-    grid-column: 3;
-    justify-content: flex-end;
-  }
 }

@@ -24,6 +24,11 @@
   --color-ink: #10151d;
   --color-ink-muted: #1a2230;
   --color-ink-border: #2b3648;
+  --color-sidebar-text: #e6ecf3;
+  --color-sidebar-muted: #aeb9c7;
+  --color-sidebar-disabled: #657284;
+  --color-sidebar-border: #2b3648;
+  --color-sidebar-surface: #1a2230;
   --color-paper: #fbfdff;
   --color-success: #1e7a3c;
   --color-success-soft: #e2f4e5;

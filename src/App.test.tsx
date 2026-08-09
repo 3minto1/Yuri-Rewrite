@@ -2330,12 +2330,76 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("heading", { name: "章节" })).toBeInTheDocument();
   });
 
+  it("keeps the portal novel menu in the sidebar keyboard order", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+
+    const trigger = screen.getByRole("button", { name: "打开《测试小说》菜单" });
+    expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("menu", { name: "《测试小说》操作" });
+    const deleteAction = within(menu).getByRole("menuitem", { name: "删除当前小说" });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(trigger).toHaveAttribute("aria-controls", menu.id);
+    await waitFor(() => expect(deleteAction).toHaveFocus());
+
+    fireEvent.keyDown(deleteAction, { key: "Escape" });
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.queryByRole("menu", { name: "《测试小说》操作" })).not.toBeInTheDocument();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(trigger);
+    const deleteForTab = await screen.findByRole("menuitem", { name: "删除当前小说" });
+    await waitFor(() => expect(deleteForTab).toHaveFocus());
+    fireEvent.keyDown(deleteForTab, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "第二本" })).toHaveFocus();
+
+    fireEvent.click(trigger);
+    const deleteForShiftTab = await screen.findByRole("menuitem", { name: "删除当前小说" });
+    await waitFor(() => expect(deleteForShiftTab).toHaveFocus());
+    fireEvent.keyDown(deleteForShiftTab, { key: "Tab", shiftKey: true });
+    expect(screen.getByRole("button", { name: "测试小说" })).toHaveFocus();
+
+    fireEvent.click(trigger);
+    await screen.findByRole("menuitem", { name: "删除当前小说" });
+    fireEvent.mouseDown(screen.getByRole("heading", { name: "测试小说" }));
+    expect(screen.queryByRole("menu", { name: "《测试小说》操作" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "测试小说" })).not.toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
+    fireEvent.click(trigger);
+    const deleteFromSettings = await screen.findByRole("menuitem", { name: "删除当前小说" });
+    await waitFor(() => expect(deleteFromSettings).toHaveFocus());
+    fireEvent.keyDown(deleteFromSettings, { key: "Escape" });
+    expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
+  });
+
+  it("lets the delete dialog take focus and restores the novel menu trigger", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    const trigger = screen.getByRole("button", { name: "打开《测试小说》菜单" });
+
+    fireEvent.click(trigger);
+    const deleteAction = await screen.findByRole("menuitem", { name: "删除当前小说" });
+    await waitFor(() => expect(deleteAction).toHaveFocus());
+    fireEvent.click(deleteAction);
+
+    const dialog = screen.getByRole("dialog", { name: "确认删除小说" });
+    const closeButton = within(dialog).getByRole("button", { name: "关闭删除小说确认框" });
+    await waitFor(() => expect(closeButton).toHaveFocus());
+    fireEvent.click(closeButton);
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
   it("requires explicit confirmation and describes novel deletion scope", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
 
     fireEvent.click(screen.getByRole("button", { name: "打开《测试小说》菜单" }));
-    fireEvent.click(screen.getByRole("button", { name: "删除当前小说" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除当前小说" }));
 
     const dialog = screen.getByRole("dialog", { name: "确认删除小说" });
     expect(within(dialog).getByText("该小说生成的审查警告日志")).toBeInTheDocument();
@@ -2348,7 +2412,7 @@ describe("App feature behavior", () => {
     expect(mocks.invoke).not.toHaveBeenCalledWith("delete_novel", expect.anything());
 
     fireEvent.click(screen.getByRole("button", { name: "打开《测试小说》菜单" }));
-    fireEvent.click(screen.getByRole("button", { name: "删除当前小说" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除当前小说" }));
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
     await waitFor(() =>

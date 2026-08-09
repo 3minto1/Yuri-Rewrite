@@ -200,8 +200,8 @@
 
 .menu-trigger {
   background: transparent;
-  border-color: var(--color-ink-border);
-  color: var(--color-surface-muted);
+  border-color: var(--color-sidebar-border);
+  color: var(--color-sidebar-text);
 }
 
 .context-menu {

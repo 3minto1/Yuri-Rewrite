@@ -151,6 +151,13 @@ const sidebarPreferenceKey = "yuri-rewrite.sidebar.collapsed";
 const legacyWorkspaceSidebarPreferenceKey = "yuri-rewrite.sidebar.workspace-collapsed";
 const estimateCollapsedPreferenceKey = "yuri-rewrite.task-estimate-collapsed";
 const qualityIgnoreKeyPrefix = "yuri-rewrite.qualityIgnored.v1.";
+const sidebarFocusableSelector = [
+  "button:not(:disabled)",
+  "input:not(:disabled)",
+  "select:not(:disabled)",
+  "a[href]",
+  '[tabindex]:not([tabindex="-1"])'
+].join(",");
 const resetAppSettings: AppSettings = {
   export_dir: null,
   core_prompt: "",
@@ -416,6 +423,15 @@ function readSidebarCollapsedPreference() {
   }
 }
 
+function focusAdjacentSidebarControl(trigger: HTMLElement, direction: -1 | 1) {
+  const sidebar = trigger.closest<HTMLElement>(".sidebar");
+  if (!sidebar) return;
+  const controls = Array.from(sidebar.querySelectorAll<HTMLElement>(sidebarFocusableSelector));
+  const triggerIndex = controls.indexOf(trigger);
+  if (triggerIndex < 0) return;
+  controls[triggerIndex + direction]?.focus();
+}
+
 export default function App() {
   const {
     novels, setNovels, detail, setDetail, selectedChapterId, setSelectedChapterId,
@@ -434,10 +450,19 @@ export default function App() {
   const [novelMenuPos, setNovelMenuPos] = useState<{ top: number; left: number } | null>(null);
   const novelListRef = useRef<HTMLDivElement>(null);
   const novelMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const novelMenuActionRef = useRef<HTMLButtonElement | null>(null);
   const novelListScrollTimerRef = useRef<number | null>(null);
+  const closeNovelMenu = useCallback((restoreTriggerFocus = false) => {
+    const trigger = novelMenuTriggerRef.current;
+    setOpenNovelMenuId("");
+    setNovelMenuPos(null);
+    if (restoreTriggerFocus && trigger) {
+      window.requestAnimationFrame(() => trigger.focus());
+    }
+  }, []);
   const handleNovelListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     if (openNovelMenuId) {
-      setOpenNovelMenuId("");
+      closeNovelMenu();
     }
     const element = event.currentTarget;
     element.classList.add("scrolling");
@@ -447,7 +472,7 @@ export default function App() {
     novelListScrollTimerRef.current = window.setTimeout(() => {
       element.classList.remove("scrolling");
     }, 800);
-  }, [openNovelMenuId]);
+  }, [closeNovelMenu, openNovelMenuId]);
   useEffect(() => {
     novelListRef.current?.classList.remove("scrolling");
     if (novelListScrollTimerRef.current !== null) {
@@ -459,10 +484,15 @@ export default function App() {
       novelMenuTriggerRef.current = null;
     }
   }, [openNovelMenuId]);
+  useEffect(() => {
+    if (!openNovelMenuId || !novelMenuPos) return undefined;
+    const focusFrame = window.requestAnimationFrame(() => novelMenuActionRef.current?.focus());
+    return () => window.cancelAnimationFrame(focusFrame);
+  }, [novelMenuPos, openNovelMenuId]);
   const handleNovelMenuToggle = useCallback((event: React.MouseEvent<HTMLButtonElement>, novel: Novel) => {
     const button = event.currentTarget;
     if (openNovelMenuId === novel.id) {
-      setOpenNovelMenuId("");
+      closeNovelMenu();
       return;
     }
     const rect = button.getBoundingClientRect();
@@ -473,23 +503,24 @@ export default function App() {
       left: Math.max(8, rect.right - menuWidth)
     });
     novelMenuTriggerRef.current = button;
-  }, [openNovelMenuId]);
+  }, [closeNovelMenu, openNovelMenuId]);
   useEffect(() => {
     if (!openNovelMenuId) return;
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setOpenNovelMenuId("");
+        event.preventDefault();
+        closeNovelMenu(true);
       }
     };
     const handleResize = () => {
-      setOpenNovelMenuId("");
+      closeNovelMenu();
     };
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
       const menuEl = document.querySelector(".context-menu--novel-portal");
       const trigger = novelMenuTriggerRef.current;
       if (menuEl && !menuEl.contains(target) && trigger && !trigger.contains(target)) {
-        setOpenNovelMenuId("");
+        closeNovelMenu();
       }
     };
     window.addEventListener("resize", handleResize);
@@ -500,7 +531,7 @@ export default function App() {
       window.removeEventListener("keydown", handleEscape);
       document.removeEventListener("mousedown", handleClickOutside);
     };
-  }, [openNovelMenuId]);
+  }, [closeNovelMenu, openNovelMenuId]);
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
   const [logSummaries, setLogSummaries] = useState<AiLogSummary[]>([]);
@@ -1040,6 +1071,7 @@ export default function App() {
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
+      if (openNovelMenuId) return;
       if (novelPendingDeletion && busy !== "delete-novel") {
         setNovelPendingDeletion(null);
         return;
@@ -1051,7 +1083,7 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView, busy, novelPendingDeletion, pendingActiveView, pendingNovelSettingsActiveView, requestActiveView]);
+  }, [activeView, busy, novelPendingDeletion, openNovelMenuId, pendingActiveView, pendingNovelSettingsActiveView, requestActiveView]);
 
   useEffect(() => {
     const profile = selectedProfile;
@@ -1622,7 +1654,8 @@ export default function App() {
       showNotice("当前任务运行或暂停中，不能删除小说。");
       return;
     }
-    setOpenNovelMenuId("");
+    novelMenuTriggerRef.current?.focus();
+    closeNovelMenu();
     setNovelPendingDeletion(novel);
   }
 
@@ -2871,6 +2904,9 @@ export default function App() {
                 <button
                   className="icon-button menu-trigger"
                   aria-label={`打开《${novel.title}》菜单`}
+                  aria-haspopup="menu"
+                  aria-expanded={openNovelMenuId === novel.id}
+                  aria-controls={`novel-context-menu-${novel.id}`}
                   onClick={(event) => handleNovelMenuToggle(event, novel)}
                   disabled={processingTaskActive}
                 >
@@ -2883,10 +2919,33 @@ export default function App() {
           </div>
           {openNovelMenuId && novelMenuPos && novelMenuNovel && createPortal(
             <div
+              id={`novel-context-menu-${openNovelMenuId}`}
               className="context-menu context-menu--novel-portal"
+              role="menu"
+              aria-label={`《${novelMenuNovel.title}》操作`}
               style={{ top: novelMenuPos.top, left: novelMenuPos.left }}
             >
-              <button onClick={() => deleteNovel(novelMenuNovel)} disabled={busy === "delete-novel" || processingTaskActive}>
+              <button
+                ref={novelMenuActionRef}
+                role="menuitem"
+                onClick={() => deleteNovel(novelMenuNovel)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeNovelMenu(true);
+                    return;
+                  }
+                  if (event.key === "Tab") {
+                    const trigger = novelMenuTriggerRef.current;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeNovelMenu();
+                    if (trigger) focusAdjacentSidebarControl(trigger, event.shiftKey ? -1 : 1);
+                  }
+                }}
+                disabled={busy === "delete-novel" || processingTaskActive}
+              >
                 <Trash2 size={15} />
                 删除当前小说
               </button>
