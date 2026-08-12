@@ -146,8 +146,8 @@ export function TokenStatsPage(props: TokenStatsPageProps) {
       {report && (
         <div className="token-overview">
           <div><span>总请求次数</span><strong>{fullNumber(report.requests)}</strong></div>
-          <div><span>输入 Token</span><strong>{fullNumber(report.input_tokens)}</strong></div>
-          <div><span>输出 Token</span><strong>{fullNumber(report.output_tokens)}</strong></div>
+          <div className="token-overview-input"><span>输入 Token</span><strong>{fullNumber(report.input_tokens)}</strong></div>
+          <div className="token-overview-output"><span>输出 Token</span><strong>{fullNumber(report.output_tokens)}</strong></div>
           <div><span>总 Token</span><strong>{fullNumber(report.input_tokens + report.output_tokens)}</strong></div>
         </div>
       )}
@@ -159,8 +159,8 @@ export function TokenStatsPage(props: TokenStatsPageProps) {
               <div className="token-model-header-actions">
                 <div className="token-model-totals">
                   <span>请求 <b>{fullNumber(model.requests)}</b></span>
-                  <span>输入 <b>{fullNumber(model.input_tokens)}</b></span>
-                  <span>输出 <b>{fullNumber(model.output_tokens)}</b></span>
+                  <span className="token-total-input">输入 <b className="token-color-preserved">{fullNumber(model.input_tokens)}</b></span>
+                  <span className="token-total-output">输出 <b className="token-color-preserved">{fullNumber(model.output_tokens)}</b></span>
                   <span>合计 <b>{fullNumber(model.input_tokens + model.output_tokens)}</b></span>
                 </div>
                 <button

@@ -128,6 +128,7 @@ pub fn run() {
             list_model_profiles,
             test_model_profile,
             diagnose_model_profile,
+            discover_models,
             estimate_job_cost,
             list_ai_log_days,
             list_ai_logs,

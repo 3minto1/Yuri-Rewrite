@@ -5,7 +5,7 @@ import { ScrollablePanel } from "../common/ScrollablePanel";
 import { StatusBadge } from "../common/StatusBadge";
 
 export const CHAPTER_VIRTUALIZATION_THRESHOLD = 300;
-const CHAPTER_ROW_HEIGHT = 76;
+const CHAPTER_ROW_HEIGHT = 52;
 
 type ChapterListProps = {
   chapters: Chapter[];

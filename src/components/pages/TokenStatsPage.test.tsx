@@ -42,6 +42,11 @@ describe("TokenStatsPage", () => {
     expect(screen.getAllByText("1,200")).toHaveLength(2);
     expect(screen.getByRole("img", { name: "每日 API 请求次数" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "每日输入和输出 Token" })).toBeInTheDocument();
+    expect(screen.getByText("输入 Token").closest("div")).toHaveClass("token-overview-input");
+    expect(screen.getByText("输出 Token").closest("div")).toHaveClass("token-overview-output");
+    const tokenChart = screen.getByRole("img", { name: "每日输入和输出 Token" });
+    expect(tokenChart.querySelector(".input-token-bar")).toBeInTheDocument();
+    expect(tokenChart.querySelector(".output-token-bar")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "删除 主力模型 Token 统计" }));
     expect(onDeleteModel).toHaveBeenCalledWith("p1", "主力模型", "deepseek-v4-pro");
     fireEvent.click(screen.getByRole("button", { name: "统计" }));

@@ -94,8 +94,8 @@ pub(crate) async fn generate_anthropic(
     })
 }
 
-fn anthropic_messages_endpoint(base: &str) -> String {
-    let normalized = base.trim_end_matches('/');
+pub(crate) fn anthropic_messages_endpoint(base: &str) -> String {
+    let normalized = base.trim().trim_end_matches('/');
     if normalized.ends_with("/v1/messages") || normalized.ends_with("/messages") {
         normalized.to_string()
     } else if normalized.ends_with("/v1") {
@@ -105,7 +105,26 @@ fn anthropic_messages_endpoint(base: &str) -> String {
     }
 }
 
-fn anthropic_request(request: RequestBuilder, base: &str, api_key: &str) -> RequestBuilder {
+pub(crate) fn anthropic_models_endpoint(base: &str) -> String {
+    let normalized = base.trim().trim_end_matches('/');
+    if let Some(api_base) = normalized.strip_suffix("/v1/messages") {
+        return format!("{api_base}/v1/models");
+    }
+    if let Some(api_base) = normalized.strip_suffix("/messages") {
+        return format!("{api_base}/models");
+    }
+    if normalized.ends_with("/v1") {
+        format!("{normalized}/models")
+    } else {
+        format!("{normalized}/v1/models")
+    }
+}
+
+pub(crate) fn anthropic_request(
+    request: RequestBuilder,
+    base: &str,
+    api_key: &str,
+) -> RequestBuilder {
     let request = request
         .header("anthropic-version", "2023-06-01")
         .header("x-api-key", api_key.trim());
@@ -263,6 +282,56 @@ mod tests {
         assert_eq!(
             anthropic_messages_endpoint("https://example.com/v1/messages"),
             "https://example.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_models_endpoint("https://api.anthropic.com/v1/messages"),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            anthropic_models_endpoint("https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic/v1/models"
+        );
+    }
+
+    #[test]
+    fn model_discovery_auth_matches_generation_auth() {
+        let client = reqwest::Client::new();
+        let official = anthropic_request(
+            client.get("https://api.anthropic.com/v1/models"),
+            "https://api.anthropic.com",
+            "secret",
+        )
+        .build()
+        .expect("official request");
+        assert_eq!(
+            official
+                .headers()
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("secret")
+        );
+        assert!(official.headers().get("authorization").is_none());
+
+        let compatible = anthropic_request(
+            client.get("https://example.com/anthropic/v1/models"),
+            "https://example.com/anthropic",
+            "secret",
+        )
+        .build()
+        .expect("compatible request");
+        assert_eq!(
+            compatible
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            compatible
+                .headers()
+                .get("anthropic-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2023-06-01")
         );
     }
 

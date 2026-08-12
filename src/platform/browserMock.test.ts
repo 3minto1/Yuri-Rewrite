@@ -3,6 +3,7 @@ import type {
   AppSettings,
   Chapter,
   ModelDiagnosis,
+  ModelDiscoveryResult,
   NovelDetail,
   RewriteAbApplyResult,
   RewriteAbChapterDetail,
@@ -39,6 +40,17 @@ describe("browser test mode", () => {
     }) as ModelDiagnosis;
     expect(diagnosis.status).toBe("ok");
     expect(diagnosis.checks).toHaveLength(3);
+
+    for (const provider of ["openai-compatible", "anthropic", "gemini"]) {
+      const discovery = await invokeBrowserMock("discover_models", {
+        input: {
+          provider,
+          base_url: "https://example.com/v1",
+          api_key: "browser-key"
+        }
+      }) as ModelDiscoveryResult;
+      expect(discovery.models.length).toBeGreaterThan(0);
+    }
   });
 
   it("supports the complete multi-model A/B candidate lifecycle without changing formal rewrites before apply", async () => {

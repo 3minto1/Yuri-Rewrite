@@ -12,11 +12,7 @@ pub(crate) async fn generate_gemini(
     user: &str,
     prefer_json_output: bool,
 ) -> Result<ModelOutput, ModelResponseError> {
-    let base = if profile.base_url.trim().is_empty() {
-        "https://generativelanguage.googleapis.com/v1beta".to_string()
-    } else {
-        profile.base_url.trim().trim_end_matches('/').to_string()
-    };
+    let base = gemini_api_base(&profile.base_url);
     let endpoint = format!("{}/models/{}:generateContent", base, profile.model.trim());
     let mut payload = json!({
         "contents": [
@@ -85,6 +81,25 @@ pub(crate) async fn generate_gemini(
     })
 }
 
+pub(crate) fn gemini_api_base(base: &str) -> String {
+    let normalized = base.trim().trim_end_matches('/');
+    if normalized.is_empty() {
+        return "https://generativelanguage.googleapis.com/v1beta".to_string();
+    }
+    if let Some((api_base, _)) = normalized.split_once("/models/") {
+        return api_base.to_string();
+    }
+    normalized
+        .strip_suffix("/models")
+        .unwrap_or(normalized)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub(crate) fn gemini_models_endpoint(base: &str) -> String {
+    format!("{}/models", gemini_api_base(base))
+}
+
 fn apply_top_p(payload: &mut serde_json::Value, top_p: f64) {
     if top_p < 1.0 {
         payload["generationConfig"]["topP"] = json!(top_p);
@@ -104,5 +119,19 @@ mod tests {
         let mut restricted_payload = json!({ "generationConfig": {} });
         apply_top_p(&mut restricted_payload, 0.9);
         assert_eq!(restricted_payload["generationConfig"]["topP"], json!(0.9));
+    }
+
+    #[test]
+    fn normalizes_model_and_generation_urls_to_the_api_base() {
+        assert_eq!(
+            gemini_models_endpoint("https://generativelanguage.googleapis.com/v1beta/models"),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+        assert_eq!(
+            gemini_models_endpoint(
+                "https://example.com/v1beta/models/gemini-2.5-pro:generateContent"
+            ),
+            "https://example.com/v1beta/models"
+        );
     }
 }

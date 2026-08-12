@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { emptyProfile } from "../../config/modelRecommendations";
@@ -14,13 +14,14 @@ describe("ModelConfig", () => {
         setDraft={vi.fn()}
         selectedProfile={undefined}
         selectedProfileId=""
-        suggestions={[]}
+        discoveredModels={null}
         suggestionsOpen={false}
         busy=""
         processing={false}
         savedApiKeyMask="********"
         onSuggestionsOpenChange={vi.fn()}
         onCreate={vi.fn()}
+        onDiscover={vi.fn()}
         onDiagnose={vi.fn()}
         onSave={vi.fn()}
       />
@@ -46,6 +47,13 @@ describe("ModelConfig", () => {
     const obfuscationGroup = screen.getByRole("radiogroup", { name: "提示词模糊" });
     expect(within(obfuscationGroup).getByRole("radio", { name: "关闭" })).toBeChecked();
     expect(within(obfuscationGroup).getByRole("radio", { name: "开启" })).not.toBeChecked();
+    const apiKey = screen.getByLabelText("API Key");
+    const modelName = screen.getByRole("combobox", { name: "模型名" });
+    const modelRow = modelName.closest(".model-discovery-row");
+    expect(apiKey.compareDocumentPosition(modelName) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(modelRow as HTMLElement).getByRole("button", { name: "连接并获取模型" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "选择账号可见模型" })).not.toBeInTheDocument();
+    expect(modelName.closest(".model-name-control")).not.toHaveClass("has-options");
   });
 
   it("keeps prompt obfuscation off by default and allows enabling it", () => {
@@ -57,13 +65,14 @@ describe("ModelConfig", () => {
           setDraft={setDraft}
           selectedProfile={undefined}
           selectedProfileId=""
-          suggestions={[]}
+          discoveredModels={null}
           suggestionsOpen={false}
           busy=""
           processing={false}
           savedApiKeyMask="********"
           onSuggestionsOpenChange={() => undefined}
           onCreate={() => undefined}
+          onDiscover={() => undefined}
           onDiagnose={() => undefined}
           onSave={() => undefined}
         />
@@ -96,13 +105,14 @@ describe("ModelConfig", () => {
           setDraft={setDraft}
           selectedProfile={undefined}
           selectedProfileId=""
-          suggestions={[]}
+          discoveredModels={null}
           suggestionsOpen={false}
           busy=""
           processing={false}
           savedApiKeyMask="********"
           onSuggestionsOpenChange={() => undefined}
           onCreate={() => undefined}
+          onDiscover={() => undefined}
           onDiagnose={() => undefined}
           onSave={() => undefined}
         />
@@ -116,5 +126,82 @@ describe("ModelConfig", () => {
 
     expect(screen.getByDisplayValue("https://api.deepseek.com/anthropic")).toBeInTheDocument();
     expect(screen.getByText(/自动调用 Messages 接口/)).toBeInTheDocument();
+  });
+
+  it("searches discovered models, selects with the keyboard and preserves a manual value", async () => {
+    function Harness() {
+      const [draft, setDraft] = useState({ ...emptyProfile, model: "manual-model" });
+      const [open, setOpen] = useState(false);
+      return (
+        <ModelConfig
+          draft={draft}
+          setDraft={setDraft}
+          selectedProfile={undefined}
+          selectedProfileId=""
+          discoveredModels={[
+            { id: "alpha-model", display_name: "Alpha", owner: "Account" },
+            { id: "beta-model", display_name: "Beta", owner: "Account" },
+            { id: "gamma-model", display_name: "Gamma", owner: "Account" }
+          ]}
+          suggestionsOpen={open}
+          busy=""
+          processing={false}
+          savedApiKeyMask="********"
+          onSuggestionsOpenChange={setOpen}
+          onCreate={() => undefined}
+          onDiscover={() => undefined}
+          onDiagnose={() => undefined}
+          onSave={() => undefined}
+        />
+      );
+    }
+
+    render(<Harness />);
+    expect(screen.getByRole("combobox", { name: "模型名" }).closest(".model-name-control")).toHaveClass("has-options");
+    expect(screen.getByDisplayValue("manual-model")).toBeInTheDocument();
+    expect(screen.getByText(/当前手工模型不在账号可见列表中/)).toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: "选择账号可见模型" });
+    fireEvent.click(trigger);
+    const search = screen.getByRole("textbox", { name: "搜索账号可见模型" });
+    await waitFor(() => expect(search).toHaveFocus());
+    fireEvent.change(search, { target: { value: "beta" } });
+    expect(screen.getByRole("option", { name: /Beta/ })).toBeInTheDocument();
+    fireEvent.keyDown(search, { key: "Enter" });
+    expect(screen.getByDisplayValue("beta-model")).toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("closes the discovered model list with Escape and restores trigger focus", async () => {
+    function Harness() {
+      const [draft, setDraft] = useState(emptyProfile);
+      const [open, setOpen] = useState(false);
+      return (
+        <ModelConfig
+          draft={draft}
+          setDraft={setDraft}
+          selectedProfile={undefined}
+          selectedProfileId=""
+          discoveredModels={[{ id: "remote-model" }]}
+          suggestionsOpen={open}
+          busy=""
+          processing={false}
+          savedApiKeyMask="********"
+          onSuggestionsOpenChange={setOpen}
+          onCreate={() => undefined}
+          onDiscover={() => undefined}
+          onDiagnose={() => undefined}
+          onSave={() => undefined}
+        />
+      );
+    }
+
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "选择账号可见模型" });
+    fireEvent.click(trigger);
+    const search = screen.getByRole("textbox", { name: "搜索账号可见模型" });
+    await waitFor(() => expect(search).toHaveFocus());
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "账号可见模型" })).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
   });
 });

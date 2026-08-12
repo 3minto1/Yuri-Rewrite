@@ -1,4 +1,4 @@
-import { AppSettingsView } from "../Settings/AppSettings";
+import { AppSettingsView, type SettingsTab } from "../Settings/AppSettings";
 import type { AppSettings, ModelProfile } from "../../types";
 
 type SettingsPageProps = {
@@ -18,6 +18,8 @@ type SettingsPageProps = {
   onParallelismChange: (value: 1 | 3 | 6 | 10 | 25 | 50) => void;
   onToggleAutoContinue: () => void;
   onDeleteLocalData: () => void;
+  activeTab: SettingsTab;
+  onTabChange: (tab: SettingsTab) => void;
 };
 
 export function SettingsPage(props: SettingsPageProps) {
@@ -39,6 +41,8 @@ export function SettingsPage(props: SettingsPageProps) {
       onParallelismChange={props.onParallelismChange}
       onToggleAutoContinue={props.onToggleAutoContinue}
       onDeleteLocalData={props.onDeleteLocalData}
+      activeTab={props.activeTab}
+      onTabChange={props.onTabChange}
     />
   );
 }

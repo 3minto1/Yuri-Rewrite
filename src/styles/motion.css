@@ -78,7 +78,7 @@
 }
 
 .brand-button:hover:not(:disabled) svg {
-  filter: drop-shadow(0 0 12px rgb(45 212 216 / 50%));
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--color-brand) 56%, transparent));
 }
 
 /* --- Sidebar collapse/expand --- */

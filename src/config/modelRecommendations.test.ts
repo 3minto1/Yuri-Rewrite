@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   emptyProfile,
-  getModelSuggestions,
   getProviderBaseUrl,
   getThinkingModeSupport,
   normalizeThinkingMode
@@ -11,36 +10,6 @@ describe("model recommendations", () => {
   it("uses stable novel-rewrite sampling defaults", () => {
     expect(emptyProfile.temperature).toBe(0.7);
     expect(emptyProfile.top_p).toBe(1);
-  });
-
-  it("prefers provider URL matching before model-name matching", () => {
-    const suggestions = getModelSuggestions({
-      ...emptyProfile,
-      base_url: "https://api.deepseek.com/v1",
-      model: "gpt-5"
-    });
-    expect(suggestions[0]?.model).toBe("deepseek-v4-pro");
-  });
-
-  it("falls back to model-name matching for compatible proxies", () => {
-    const suggestions = getModelSuggestions({
-      ...emptyProfile,
-      base_url: "https://proxy.example.com/v1",
-      model: "glm-5"
-    });
-    expect(suggestions.some((item) => item.model === "glm-5")).toBe(true);
-  });
-
-  it("includes the official Doubao Seed 2.1 models", () => {
-    const suggestions = getModelSuggestions({
-      ...emptyProfile,
-      base_url: "https://ark.cn-beijing.volces.com/api/v3",
-      model: ""
-    });
-    expect(suggestions.slice(0, 2)).toEqual([
-      { label: "Doubao Seed 2.1 Pro", model: "doubao-seed-2-1-pro-260628" },
-      { label: "Doubao Seed 2.1 Turbo", model: "doubao-seed-2-1-turbo-260628" }
-    ]);
   });
 
   it("maps supported services between OpenAI and Anthropic endpoints", () => {

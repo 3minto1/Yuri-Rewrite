@@ -1,7 +1,8 @@
-import { ArrowLeft, Bot, FolderOpen, Gauge, HelpCircle, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { ArrowLeft, FolderOpen, HelpCircle, Trash2 } from "lucide-react";
 import { modelProfileDisplayName, modelProfileTitle } from "../../config/modelProfileDisplay";
 import type { AppSettings, ModelProfile } from "../../types";
+
+export type SettingsTab = "models" | "tasks" | "data";
 
 type AppSettingsViewProps = {
   settings: AppSettings;
@@ -20,39 +21,18 @@ type AppSettingsViewProps = {
   onParallelismChange: (value: 1 | 3 | 6 | 10 | 25 | 50) => void;
   onToggleAutoContinue: () => void;
   onDeleteLocalData: () => void;
+  activeTab: SettingsTab;
+  onTabChange: (tab: SettingsTab) => void;
 };
 
 export function AppSettingsView(props: AppSettingsViewProps) {
-  const { settings, profiles, busy, processing, autoContinueSettingBusy, allowPausedTaskAdjustments = false, onBack, onChooseExportDir, onClearExportDir, onToggleReview, onReviewProfileChange, onAnalysisProfileChange, onBatchSizeChange, onParallelismChange, onToggleAutoContinue, onDeleteLocalData } = props;
+  const { settings, profiles, busy, processing, autoContinueSettingBusy, allowPausedTaskAdjustments = false, onBack, onChooseExportDir, onClearExportDir, onToggleReview, onReviewProfileChange, onAnalysisProfileChange, onBatchSizeChange, onParallelismChange, onToggleAutoContinue, onDeleteLocalData, activeTab } = props;
   const adjustmentDisabled = processing && !allowPausedTaskAdjustments;
   const batchSize = settings.chapter_batch_size ?? 30;
   const maxParallelism = batchSize === 100 ? 50 : batchSize === 50 ? 25 : 10;
-  type SettingsTab = "models" | "tasks" | "data";
-  const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
-    try {
-      const saved = window.localStorage.getItem("yuri-rewrite.settings-tab");
-      if (saved === "models" || saved === "tasks" || saved === "data") return saved;
-    } catch {
-      // Keep the recommended first tab when storage is unavailable.
-    }
-    return "models";
-  });
-  const selectTab = (tab: SettingsTab) => {
-    setActiveTab(tab);
-    try {
-      window.localStorage.setItem("yuri-rewrite.settings-tab", tab);
-    } catch {
-      // The tab still changes for this session.
-    }
-  };
   return (
-    <div className="page-panel">
-      <div className="page-heading"><h2>设置</h2><div className="panel-actions"><button onClick={onBack}><ArrowLeft size={16} />返回</button></div></div>
-      <div className="settings-tabs app-settings-tabs" role="tablist" aria-label="应用设置分类">
-        <button type="button" role="tab" aria-label="模型与复检" aria-selected={activeTab === "models"} className={activeTab === "models" ? "active" : ""} onClick={() => selectTab("models")}><Bot size={18} aria-hidden="true" /><span><strong>模型与复检</strong><small>分析与审查模型</small></span></button>
-        <button type="button" role="tab" aria-label="任务与并发" aria-selected={activeTab === "tasks"} className={activeTab === "tasks" ? "active" : ""} onClick={() => selectTab("tasks")}><Gauge size={18} aria-hidden="true" /><span><strong>任务与并发</strong><small>执行方式与速度</small></span></button>
-        <button type="button" role="tab" aria-label="文件与数据" aria-selected={activeTab === "data"} className={activeTab === "data" ? "active" : ""} onClick={() => selectTab("data")}><FolderOpen size={18} aria-hidden="true" /><span><strong>文件与数据</strong><small>导出与本地数据</small></span></button>
-      </div>
+    <div className="page-panel settings-editor-page">
+      <div className="page-heading"><div><span className="page-eyebrow">APPLICATION SETTINGS</span><h2>设置</h2><p>{activeTab === "models" ? "模型与复检" : activeTab === "tasks" ? "任务与并发" : "文件与数据"}</p></div><div className="panel-actions"><button onClick={onBack}><ArrowLeft size={16} />返回</button></div></div>
       <div className="app-settings-tab-panel" role="tabpanel">
       {activeTab === "data" && (<>
       <section className="settings-section">

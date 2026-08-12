@@ -15,11 +15,7 @@ pub(crate) async fn generate_openai_compatible(
 ) -> Result<ModelOutput, ModelResponseError> {
     let base = profile.base_url.trim().trim_end_matches('/');
     let model = normalize_model_name(base, &profile.model);
-    let endpoint = if base.ends_with("/chat/completions") {
-        base.to_string()
-    } else {
-        format!("{}/chat/completions", base)
-    };
+    let endpoint = openai_chat_endpoint(base);
     let mut payload = json!({
         "model": model,
         "temperature": profile.temperature,
@@ -121,6 +117,24 @@ pub(crate) async fn generate_openai_compatible(
     })
 }
 
+pub(crate) fn openai_chat_endpoint(base: &str) -> String {
+    let normalized = base.trim().trim_end_matches('/');
+    if normalized.ends_with("/chat/completions") {
+        normalized.to_string()
+    } else {
+        format!("{normalized}/chat/completions")
+    }
+}
+
+pub(crate) fn openai_models_endpoint(base: &str) -> String {
+    let normalized = base.trim().trim_end_matches('/');
+    let api_base = normalized
+        .strip_suffix("/chat/completions")
+        .unwrap_or(normalized)
+        .trim_end_matches('/');
+    format!("{api_base}/models")
+}
+
 fn apply_top_p(payload: &mut serde_json::Value, top_p: f64) {
     if top_p < 1.0 {
         payload["top_p"] = json!(top_p);
@@ -140,5 +154,17 @@ mod tests {
         let mut restricted_payload = json!({});
         apply_top_p(&mut restricted_payload, 0.9);
         assert_eq!(restricted_payload["top_p"], json!(0.9));
+    }
+
+    #[test]
+    fn model_endpoint_reuses_the_chat_api_base() {
+        assert_eq!(
+            openai_models_endpoint("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            openai_models_endpoint("https://example.com/openai/v1/"),
+            "https://example.com/openai/v1/models"
+        );
     }
 }

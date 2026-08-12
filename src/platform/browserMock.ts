@@ -11,6 +11,8 @@ import type {
   Job,
   JobEstimate,
   ModelDiagnosis,
+  ModelDiscoveryInput,
+  ModelDiscoveryResult,
   ModelProfile,
   ModelProfileInput,
   NameMappingConsistencyReport,
@@ -561,6 +563,39 @@ export async function invokeBrowserMock(
           { name: "JSON 输出", status: "ok", message: "浏览器测试 JSON 正常。" }
         ]
       } satisfies ModelDiagnosis;
+    case "discover_models": {
+      const input = args?.input as ModelDiscoveryInput;
+      if (!input?.base_url?.trim()) throw new Error("请先填写 Base URL。");
+      if (!input.api_key?.trim() && !input.profile_id) {
+        throw new Error("请先填写 API Key，或选择一个已保存凭据的模型配置。");
+      }
+      const byProvider: Record<string, ModelDiscoveryResult> = {
+        "openai-compatible": {
+          models: [
+            { id: "browser-chat-pro", display_name: "Browser Chat Pro", owner: "browser-account" },
+            { id: "browser-chat-lite", display_name: "Browser Chat Lite", owner: "browser-account" }
+          ],
+          warnings: []
+        },
+        anthropic: {
+          models: [
+            { id: "browser-claude-opus", display_name: "Browser Claude Opus", owner: "Anthropic" },
+            { id: "browser-claude-sonnet", display_name: "Browser Claude Sonnet", owner: "Anthropic" }
+          ],
+          warnings: []
+        },
+        gemini: {
+          models: [
+            { id: "browser-gemini-pro", display_name: "Browser Gemini Pro", owner: "Google" },
+            { id: "browser-gemini-flash", display_name: "Browser Gemini Flash", owner: "Google" }
+          ],
+          warnings: []
+        }
+      };
+      const result = byProvider[input.provider];
+      if (!result) throw new Error("不支持当前 Provider，无法自动获取模型。");
+      return result;
+    }
     case "list_ai_log_days":
       return recentLogDays(typeof args?.novelId === "string" ? args.novelId : null);
     case "list_ai_log_summaries_by_date": {

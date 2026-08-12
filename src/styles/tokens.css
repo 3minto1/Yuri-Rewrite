@@ -1,49 +1,58 @@
 /* tokens — split from styles.css (visual redesign P2). Do not edit styles.css directly; edit the layer files. */
 
 :root {
-  --color-bg: #f6f8fa;
+  --color-bg: #f3f5f7;
   --color-surface: #ffffff;
-  --color-surface-muted: #eef1f5;
+  --color-surface-muted: #e9edf2;
   --color-surface-raised: #ffffff;
-  --color-text: #1c2330;
-  --color-text-muted: #5b6472;
-  --color-text-disabled: #9aa3af;
-  --color-border: #dde3ea;
-  --color-border-strong: #c3ccd8;
-  --color-brand: #0e8fa8;
-  --color-brand-hover: #0b7d94;
-  --color-brand-active: #096b80;
-  --color-brand-soft: #e2f3f7;
-  --color-brand-2: #2f6bff;
-  --color-brand-2-hover: #2459e0;
-  --color-brand-2-active: #1d4bc4;
-  --gradient-brand: linear-gradient(135deg, #0e8fa8, #2f6bff);
-  --glow-brand: 0 0 0 1px rgb(14 143 168 / 18%), 0 4px 14px rgb(14 143 168 / 18%);
-  --color-accent-rose: #c2507a;
-  --color-accent-rose-soft: #f9e8f0;
-  --color-ink: #10151d;
-  --color-ink-muted: #1a2230;
-  --color-ink-border: #2b3648;
-  --color-sidebar-text: #e6ecf3;
-  --color-sidebar-muted: #aeb9c7;
-  --color-sidebar-disabled: #657284;
-  --color-sidebar-border: #2b3648;
-  --color-sidebar-surface: #1a2230;
-  --color-paper: #fbfdff;
-  --color-success: #1e7a3c;
-  --color-success-soft: #e2f4e5;
-  --color-progress: #1773b8;
-  --color-progress-soft: #e3f0f9;
-  --color-warning: #9a6724;
-  --color-warning-soft: #fff3dc;
-  --color-danger: #c0453a;
-  --color-danger-soft: #fde8e6;
-  --color-neutral: #5f6875;
-  --color-neutral-soft: #eceff3;
+  --color-surface-subtle: #f7f9fb;
+  --color-text: #172033;
+  --color-text-muted: #667085;
+  --color-text-disabled: #98a2b3;
+  --color-border: #d6dce5;
+  --color-border-strong: #b8c2cf;
+  --color-brand: #1f4b7a;
+  --color-brand-hover: #183d65;
+  --color-brand-active: #12314f;
+  --color-brand-soft: #e8f0f8;
+  --color-brand-2: #4779a8;
+  --color-brand-2-hover: #38678f;
+  --color-brand-2-active: #2c5578;
+  --color-brand-2-soft: #edf3f8;
+  --gradient-brand: linear-gradient(135deg, #1f4b7a 0%, #315f8e 58%, #4779a8 100%);
+  --gradient-brand-soft: linear-gradient(135deg, #e8f0f8 0%, #edf3f8 100%);
+  --glow-brand: 0 0 0 1px rgb(31 75 122 / 14%), 0 8px 22px rgb(31 75 122 / 16%);
+  --color-accent-rose: #1f4b7a;
+  --color-accent-rose-soft: #e8f0f8;
+  --color-ink: #111923;
+  --color-ink-muted: #182431;
+  --color-ink-border: #334252;
+  --color-sidebar-text: #edf2f7;
+  --color-sidebar-muted: #aebac7;
+  --color-sidebar-disabled: #6f7d8b;
+  --color-sidebar-border: #334252;
+  --color-sidebar-surface: #182431;
+  --color-sidebar-active: #24384b;
+  --color-paper: #fdfefe;
+  --color-paper-rewrite: #f6f9fc;
+  --color-success: #277a53;
+  --color-success-soft: #e7f5ee;
+  --color-progress: #4779a8;
+  --color-progress-soft: #e8f0f8;
+  --color-token-input: #2f6ea5;
+  --color-token-input-soft: #e6f0f8;
+  --color-token-output: #b56314;
+  --color-token-output-soft: #fff0dd;
+  --color-warning: #9a641d;
+  --color-warning-soft: #fff2d9;
+  --color-danger: #c53f45;
+  --color-danger-soft: #fde9ea;
+  --color-neutral: #667085;
+  --color-neutral-soft: #e9edf2;
   --radius-sm: 6px;
-  --radius-control: 8px;
-  --radius-panel: 12px;
-  --radius-dialog: 14px;
+  --radius-control: 6px;
+  --radius-panel: 8px;
+  --radius-dialog: 12px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -53,9 +62,10 @@
   --dur-fast: 120ms;
   --dur: 200ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --shadow-menu: 0 12px 34px rgb(16 21 29 / 12%);
-  --shadow-panel: 0 12px 28px rgb(28 35 48 / 7%);
-  --shadow-dialog: 0 24px 60px rgb(16 21 29 / 22%);
+  --shadow-menu: 0 16px 38px rgb(23 32 51 / 18%);
+  --shadow-panel: 0 8px 24px rgb(23 32 51 / 7%);
+  --shadow-raised: 0 14px 34px rgb(23 32 51 / 11%);
+  --shadow-dialog: 0 28px 70px rgb(17 25 35 / 24%);
   color: var(--color-text);
   background: var(--color-bg);
   font-family:
@@ -65,50 +75,66 @@
 }
 
 :root[data-theme="dark"] {
-  --color-bg: #0b0f14;
-  --color-surface: #121924;
-  --color-surface-muted: #0f1520;
-  --color-surface-raised: #182233;
-  --color-text: #e6ecf3;
-  --color-text-muted: #93a1b3;
-  --color-text-disabled: #556170;
-  --color-border: #22303f;
-  --color-border-strong: #2f4256;
-  --color-brand: #2dd4d8;
-  --color-brand-hover: #45e0e3;
-  --color-brand-active: #6cebee;
-  --color-brand-soft: #123a3e;
-  --color-brand-2: #5b8cff;
-  --color-brand-2-hover: #759fff;
-  --color-brand-2-active: #93b4ff;
-  --gradient-brand: linear-gradient(135deg, #2dd4d8, #5b8cff);
-  --glow-brand: 0 0 12px rgb(45 212 216 / 25%), 0 0 32px rgb(91 140 255 / 12%);
-  --color-accent-rose: #e08aae;
-  --color-accent-rose-soft: #3d1f2e;
-  --color-ink: #05080c;
-  --color-ink-muted: #0a0f16;
-  --color-ink-border: #1c2735;
-  --color-paper: #10161f;
-  --color-success: #7fdcb0;
-  --color-success-soft: #173a2c;
-  --color-progress: #63b3e8;
-  --color-progress-soft: #12293a;
-  --color-warning: #d6ae6e;
-  --color-warning-soft: #3a2d16;
-  --color-danger: #f2a7ae;
-  --color-danger-soft: #3d2226;
-  --color-neutral: #9aa7b5;
-  --color-neutral-soft: #1d2836;
-  --shadow-menu: 0 14px 36px rgb(0 0 0 / 36%);
-  --shadow-panel: 0 16px 30px rgb(0 0 0 / 22%);
-  --shadow-dialog: 0 28px 70px rgb(0 0 0 / 48%);
+  --color-bg: #10151c;
+  --color-surface: #171e27;
+  --color-surface-muted: #202a35;
+  --color-surface-raised: #202a35;
+  --color-surface-subtle: #131a22;
+  --color-text: #e7ecf2;
+  --color-text-muted: #9da8b5;
+  --color-text-disabled: #667382;
+  --color-border: #2b3745;
+  --color-border-strong: #435264;
+  --color-brand: #6ea0d2;
+  --color-brand-hover: #82b0dc;
+  --color-brand-active: #9bc0e3;
+  --color-brand-soft: #20364c;
+  --color-brand-2: #8ab1d8;
+  --color-brand-2-hover: #9fc0df;
+  --color-brand-2-active: #b5cfe7;
+  --color-brand-2-soft: #253b50;
+  --gradient-brand: linear-gradient(135deg, #376c9f 0%, #4f82b3 58%, #6ea0d2 100%);
+  --gradient-brand-soft: linear-gradient(135deg, #20364c 0%, #253b50 100%);
+  --glow-brand: 0 0 0 1px rgb(110 160 210 / 18%), 0 10px 28px rgb(110 160 210 / 16%);
+  --color-accent-rose: #6ea0d2;
+  --color-accent-rose-soft: #20364c;
+  --color-ink: #0b1016;
+  --color-ink-muted: #111923;
+  --color-ink-border: #2b3745;
+  --color-sidebar-text: #eef3f8;
+  --color-sidebar-muted: #a9b6c4;
+  --color-sidebar-disabled: #647282;
+  --color-sidebar-border: #2b3745;
+  --color-sidebar-surface: #131b24;
+  --color-sidebar-active: #20364c;
+  --color-paper: #151c24;
+  --color-paper-rewrite: #19232d;
+  --color-success: #7ed2a8;
+  --color-success-soft: #18362a;
+  --color-progress: #8ab1d8;
+  --color-progress-soft: #20364c;
+  --color-token-input: #78add9;
+  --color-token-input-soft: #20384c;
+  --color-token-output: #f0ad63;
+  --color-token-output-soft: #49321d;
+  --color-warning: #e1b36b;
+  --color-warning-soft: #3a2b16;
+  --color-danger: #f08f96;
+  --color-danger-soft: #432126;
+  --color-neutral: #9da8b5;
+  --color-neutral-soft: #202a35;
+  --shadow-menu: 0 18px 42px rgb(0 0 0 / 42%);
+  --shadow-panel: 0 12px 30px rgb(0 0 0 / 24%);
+  --shadow-raised: 0 18px 42px rgb(0 0 0 / 32%);
+  --shadow-dialog: 0 30px 76px rgb(0 0 0 / 54%);
   color-scheme: dark;
 }
 
 /* Dark theme surface and component overrides */
 :root[data-theme="dark"] body {
   background:
-    linear-gradient(180deg, rgb(11 15 20 / 94%), rgb(8 11 16 / 98%)),
+    radial-gradient(circle at 78% -12%, rgb(110 160 210 / 7%), transparent 34%),
+    linear-gradient(180deg, rgb(16 21 28 / 96%), rgb(11 16 22 / 99%)),
     var(--color-bg);
 }
 
@@ -124,8 +150,8 @@
 
 :root[data-theme="dark"] .app-shell {
   background:
-    radial-gradient(circle at 22% 0%, rgb(45 212 216 / 7%), transparent 34%),
-    radial-gradient(circle at 90% 110%, rgb(91 140 255 / 6%), transparent 40%),
+    radial-gradient(circle at 22% 0%, rgb(110 160 210 / 6%), transparent 34%),
+    radial-gradient(circle at 90% 110%, rgb(71 121 168 / 6%), transparent 40%),
     linear-gradient(180deg, var(--color-bg) 0%, var(--color-bg) 100%);
 }
 
@@ -146,7 +172,7 @@
 :root[data-theme="dark"] .app-menu-item.active {
   background: var(--gradient-brand);
   border-color: transparent;
-  color: #06272b;
+  color: #ffffff;
   box-shadow: var(--glow-brand);
 }
 
@@ -175,7 +201,7 @@
 
 :root[data-theme="dark"] .workspace {
   background:
-    radial-gradient(720px 320px at 85% -8%, rgb(45 212 216 / 6%), transparent 70%),
+    radial-gradient(720px 320px at 85% -8%, rgb(110 160 210 / 6%), transparent 70%),
     var(--color-bg);
 }
 
@@ -195,7 +221,7 @@
 :root[data-theme="dark"] .estimate-panel,
 :root[data-theme="dark"] .chapter-list-panel {
   background:
-    linear-gradient(180deg, rgb(255 255 255 / 4%), rgb(255 255 255 / 2%)),
+    linear-gradient(135deg, rgb(110 160 210 / 4%), rgb(71 121 168 / 3%)),
     var(--color-surface);
   border-color: var(--color-border);
   box-shadow: var(--shadow-panel);
@@ -223,8 +249,18 @@
 }
 
 :root[data-theme="dark"] .estimate-grid strong,
-:root[data-theme="dark"] .token-model-totals b {
+:root[data-theme="dark"] .token-model-totals b:not(.token-color-preserved) {
   color: var(--color-text);
+}
+
+:root[data-theme="dark"] .token-overview-input strong,
+:root[data-theme="dark"] .token-total-input b {
+  color: var(--color-token-input);
+}
+
+:root[data-theme="dark"] .token-overview-output strong,
+:root[data-theme="dark"] .token-total-output b {
+  color: var(--color-token-output);
 }
 
 :root[data-theme="dark"] .setting-row,
@@ -297,7 +333,7 @@
 
 :root[data-theme="dark"] .chapter-item.active {
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--color-brand-soft) 82%, var(--color-brand-soft)), var(--color-surface-raised) 72%);
+    linear-gradient(90deg, color-mix(in srgb, var(--color-brand-soft) 88%, var(--color-surface)), color-mix(in srgb, var(--color-brand-2-soft) 58%, var(--color-surface-raised)) 72%);
   border-color: var(--color-brand);
   box-shadow:
     inset 3px 0 0 var(--color-brand),

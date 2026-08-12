@@ -16,6 +16,8 @@ import type {
   JobEstimate,
   LocalDataDeletionResult,
   ModelDiagnosis,
+  ModelDiscoveryInput,
+  ModelDiscoveryResult,
   ModelProfile,
   ModelProfileInput,
   NameMappingConsistencyReport,
@@ -56,6 +58,7 @@ type CommandMap = {
   delete_model_profile: { args: { profileId: string }; result: void };
   delete_local_data: { args: { confirmationPhrase: string }; result: LocalDataDeletionResult };
   diagnose_model_profile: { args: { profileId: string }; result: ModelDiagnosis };
+  discover_models: { args: { input: ModelDiscoveryInput }; result: ModelDiscoveryResult };
   list_ai_log_days: { args: { novelId: string | null }; result: AiLogDaySummary[] };
   list_ai_log_summaries_by_date: {
     args: { novelId: string | null; date: string; cursor?: AiLogCursor | null; limit?: number };

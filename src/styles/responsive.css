@@ -57,3 +57,19 @@
     padding-right: 14px;
   }
 }
+
+/* Editor shell responsive overrides */
+@media (max-width: 1120px) {
+  .workspace-dashboard-body { grid-template-columns: minmax(0, 1fr) 284px; }
+  .workspace-chapter-surface { padding: 12px; }
+  .workspace-model-summary strong { max-width: 180px; }
+  .task-center-section { padding-left: 11px; padding-right: 11px; }
+  .settings-editor-page > .page-heading,
+  .model-management-page > .page-heading { margin-left: -14px; margin-right: -14px; }
+}
+
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 64px 208px minmax(0, 1fr); }
+  .app-shell.sidebar-collapsed { grid-template-columns: 64px 0 minmax(0, 1fr); }
+  .workspace-dashboard-body { grid-template-columns: minmax(0, 1fr) 272px; }
+}

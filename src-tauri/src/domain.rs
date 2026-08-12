@@ -174,6 +174,29 @@ pub(crate) struct ModelProfileInput {
     pub(crate) api_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ModelDiscoveryInput {
+    pub(crate) profile_id: Option<String>,
+    pub(crate) provider: String,
+    pub(crate) base_url: String,
+    pub(crate) api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveredModel {
+    pub(crate) id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub(crate) struct ModelDiscoveryResult {
+    pub(crate) models: Vec<DiscoveredModel>,
+    pub(crate) warnings: Vec<String>,
+}
+
 fn default_top_p() -> f64 {
     1.0
 }

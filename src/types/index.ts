@@ -154,6 +154,24 @@ export type ProfileDraft = {
 
 export type ModelProfileInput = Omit<ProfileDraft, "api_key"> & { api_key?: string };
 
+export type ModelDiscoveryInput = {
+  profile_id?: string;
+  provider: string;
+  base_url: string;
+  api_key?: string;
+};
+
+export type DiscoveredModel = {
+  id: string;
+  display_name?: string;
+  owner?: string;
+};
+
+export type ModelDiscoveryResult = {
+  models: DiscoveredModel[];
+  warnings: string[];
+};
+
 export type Job = {
   id: string;
   novel_id: string;

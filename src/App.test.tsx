@@ -177,6 +177,15 @@ function installDefaultCommands() {
       return { id: "job-auto-batch", novel_id: "novel-1", job_type: "auto_batch", status: "completed", current_chapter: 1, total_chapters: 1, message: "当前批次完成" };
     }
     if (command === "save_model_profile") return profile;
+    if (command === "discover_models") {
+      return {
+        models: [
+          { id: "remote-alpha", display_name: "Remote Alpha", owner: "test-account" },
+          { id: "remote-beta", display_name: "Remote Beta", owner: "test-account" }
+        ],
+        warnings: []
+      };
+    }
     if (command === "delete_local_data") return { warnings: [] };
     if (command === "set_auto_continue_enabled") {
       return { ...settings, auto_continue_enabled: Boolean((args as { enabled?: boolean })?.enabled) };
@@ -199,6 +208,10 @@ function installDefaultCommands() {
     if (command === "export_novel") return { path: "C:/exports/test.txt" };
     return undefined;
   });
+}
+
+function openMoreItem(name: string | RegExp) {
+  fireEvent.click(screen.getByRole("button", { name }));
 }
 
 describe("App feature behavior", () => {
@@ -269,20 +282,25 @@ describe("App feature behavior", () => {
     expect(container.querySelector(".app-shell")).toHaveClass("sidebar-collapsed");
   });
 
-  it("shows the full estimate by default and remembers an explicit collapse", async () => {
-    const firstRender = render(<App />);
-    await screen.findByRole("heading", { name: "测试小说" });
-    expect(screen.getByLabelText("任务预估")).toHaveTextContent("全文规模");
-    const trigger = screen.getByRole("button", { name: "隐藏任务预估详情" });
-    fireEvent.click(trigger);
-    expect(screen.getByLabelText("任务预估")).not.toHaveTextContent("全文规模");
-    expect(window.localStorage.getItem("yuri-rewrite.task-estimate-collapsed")).toBe("true");
-
-    firstRender.unmount();
+  it("keeps every data and system action directly available in the lower activity rail", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    expect(screen.getByRole("button", { name: "展开任务预估详情" })).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByLabelText("任务预估")).not.toHaveTextContent("全文规模");
+    expect(screen.getByRole("button", { name: "日志" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Token统计" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "帮助" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "GitHub" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "更多" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "更多功能" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the full estimate visible even when an obsolete collapse preference exists", async () => {
+    window.localStorage.setItem("yuri-rewrite.task-estimate-collapsed", "true");
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    expect(screen.getByLabelText("任务预估")).toHaveTextContent("全文规模");
+    expect(screen.getByLabelText("任务预估")).toHaveTextContent("历史字符");
+    expect(screen.queryByRole("button", { name: /任务预估详情/ })).not.toBeInTheDocument();
   });
 
   it("filters a bounded novel list without changing persisted data", async () => {
@@ -540,7 +558,7 @@ describe("App feature behavior", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    fireEvent.click(screen.getByRole("button", { name: /检查更新/ }));
+    openMoreItem(/检查更新/);
     expect(await screen.findByRole("button", { name: "下载并安装最新版" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "下载并安装最新版" }));
     expect(screen.getByRole("dialog", { name: "安装 Yuri Rewrite v0.3.11" })).toBeInTheDocument();
@@ -603,7 +621,7 @@ describe("App feature behavior", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    fireEvent.click(screen.getByRole("button", { name: /检查更新/ }));
+    openMoreItem(/检查更新/);
     fireEvent.click(await screen.findByRole("button", { name: "下载并安装最新版" }));
     fireEvent.click(screen.getByRole("button", { name: "下载并安装" }));
     expect(await screen.findByText(/自动下载失败/)).toBeInTheDocument();
@@ -691,6 +709,7 @@ describe("App feature behavior", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "工作台" }));
     fireEvent.click(screen.getByRole("button", { name: "设定" }));
     fireEvent.change(screen.getAllByLabelText("原别名")[0], {
       target: { value: "小明" }
@@ -731,6 +750,7 @@ describe("App feature behavior", () => {
     fireEvent.click(within(screen.getByRole("dialog", { name: "基本设定尚未保存" })).getByRole("button", { name: "不保存退出" }));
     expect(screen.getByRole("heading", { name: expectedHeading })).toBeInTheDocument();
 
+    if (expectedHeading === "设置") fireEvent.click(screen.getByRole("button", { name: "工作台" }));
     fireEvent.click(screen.getByRole("button", { name: "设定" }));
     expect(screen.getByLabelText("主角姓名（必填）")).toHaveValue("林明");
   });
@@ -962,11 +982,16 @@ describe("App feature behavior", () => {
     render(<App />);
 
     const dialog = await screen.findByRole("dialog", { name: "快速上手" });
-    expect(within(dialog).getByText(/建议先处理一个批次/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/2–3 个模型的 A\/B 改写/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/不会进入正式改写稿或 TXT/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/模型安全策略拦截后也可调整设置再继续/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: /首次配置/ })).toBeInTheDocument();
+    expect(within(dialog).getByText(/连接并获取模型/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/准备 → 分析 → 改写 → 对比/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/必须点击“应用所选”/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/左下角直接提供 AI 日志、Token 统计/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/不会覆盖用户主动暂停/)).toBeInTheDocument();
     expect(within(dialog).queryByText(/com\.local\.yurirewrite/)).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(within(dialog).getByRole("heading", { name: "快速上手" })).toHaveFocus();
+    });
   });
 
   it("restores the last selected rewrite model from app settings", async () => {
@@ -1184,6 +1209,34 @@ describe("App feature behavior", () => {
     fireEvent.click(within(modelPanel as HTMLElement).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("save_model_profile", expect.objectContaining({ input: expect.objectContaining({ api_key: "replacement-secret" }) })));
     await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("********"));
+  });
+
+  it("discovers models from an unsaved draft without saving and invalidates stale results", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "测试小说" });
+    fireEvent.click(screen.getByRole("button", { name: "管理模型" }));
+    const modelPanel = screen.getByRole("heading", { name: "模型管理" }).closest("section") as HTMLElement;
+    fireEvent.click(within(modelPanel).getByRole("button", { name: "新建" }));
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "draft-secret" } });
+    fireEvent.click(within(modelPanel).getByRole("button", { name: "连接并获取模型" }));
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("discover_models", {
+      input: {
+        profile_id: undefined,
+        provider: "openai-compatible",
+        base_url: "https://api.openai.com/v1",
+        api_key: "draft-secret"
+      }
+    }));
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "save_model_profile")).toBe(false);
+    expect(await screen.findByRole("listbox", { name: "账号可见模型" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Remote Alpha/ })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://changed.example.com/v1" }
+    });
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "账号可见模型" })).not.toBeInTheDocument());
+    expect(screen.queryByText(/已获取 2 个账号可见模型；/)).not.toBeInTheDocument();
   });
 
   it("locks conflicting controls while an auto job is active", async () => {
@@ -1502,7 +1555,7 @@ describe("App feature behavior", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    openMoreItem("Token统计");
     expect(await screen.findByRole("heading", { name: "Token 统计" })).toBeInTheDocument();
     expect(screen.getAllByText("test-model").length).toBeGreaterThan(0);
     expect(mocks.invoke).toHaveBeenCalledWith("get_token_usage_stats", expect.objectContaining({
@@ -1561,7 +1614,7 @@ describe("App feature behavior", () => {
     try {
       render(<App />);
       await screen.findByRole("heading", { name: "测试小说" });
-      fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+      openMoreItem("Token统计");
       expect(await screen.findByText("test-model")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "删除 测试模型 Token 统计" }));
 
@@ -1616,7 +1669,7 @@ describe("App feature behavior", () => {
     try {
       render(<App />);
       await screen.findByRole("heading", { name: "测试小说" });
-      fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+      openMoreItem("Token统计");
       expect(await screen.findByText("test-model")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "删除 测试模型 Token 统计" }));
 
@@ -1633,7 +1686,7 @@ describe("App feature behavior", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    openMoreItem("Token统计");
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("get_token_usage_stats", {
       startDate: "2026-05-24",
       endDate: "2026-06-22"
@@ -1641,7 +1694,7 @@ describe("App feature behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
 
     vi.setSystemTime(new Date("2026-06-23T00:10:00+08:00"));
-    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    openMoreItem("Token统计");
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("get_token_usage_stats", {
       startDate: "2026-05-25",
       endDate: "2026-06-23"
@@ -1651,7 +1704,7 @@ describe("App feature behavior", () => {
   it("refreshes token statistics once at task terminal state instead of on every progress event", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    fireEvent.click(screen.getByRole("button", { name: "Token统计" }));
+    openMoreItem("Token统计");
     await waitFor(() => expect(
       mocks.invoke.mock.calls.filter(([command]) => command === "get_token_usage_stats")
     ).toHaveLength(1));
@@ -1711,7 +1764,8 @@ describe("App feature behavior", () => {
     expect(container.querySelector(".topbar")).not.toBeNull();
 
     for (const pageName of ["对比", "日志", "Token统计", "设置"]) {
-      fireEvent.click(screen.getByRole("button", { name: pageName }));
+      if (pageName === "日志" || pageName === "Token统计") openMoreItem(pageName);
+      else fireEvent.click(screen.getByRole("button", { name: pageName }));
       await waitFor(() => expect(container.querySelector(".topbar")).toBeNull());
       fireEvent.click(screen.getByRole("button", { name: "返回" }));
       await waitFor(() => expect(container.querySelector(".topbar")).not.toBeNull());
@@ -1929,7 +1983,7 @@ describe("App feature behavior", () => {
       batchId: "batch-1"
     });
     expect(screen.getByRole("button", { name: "TXT" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    openMoreItem("日志");
     await screen.findByText("第一批日志内容");
     fireEvent.click(screen.getByRole("button", { name: "展开详情" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("get_ai_log_detail", { logId: "log-1" }));
@@ -2066,7 +2120,7 @@ describe("App feature behavior", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    openMoreItem("日志");
 
     await screen.findByText("今天的完整日志");
     fireEvent.click(screen.getByRole("button", { name: /2026-06-27.*1/ }));
@@ -2113,7 +2167,7 @@ describe("App feature behavior", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "测试小说" });
-    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    openMoreItem("日志");
     await screen.findByText("预览 1");
 
     for (const logId of ["log-1", "log-2", "log-3", "log-4"]) {
@@ -2123,7 +2177,7 @@ describe("App feature behavior", () => {
     expect(screen.getByRole("button", { name: "重新加载详情" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "工作台" }));
-    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    openMoreItem("日志");
     await screen.findByText("预览 1");
     fireEvent.click(screen.getAllByRole("button", { name: "展开详情" })[0]);
     await screen.findByText("完整 log-1");
@@ -2294,7 +2348,7 @@ describe("App feature behavior", () => {
 
   it.each([
     ["设置", () => fireEvent.click(screen.getByRole("button", { name: "设置" })), "设置"],
-    ["日志", () => fireEvent.click(screen.getByRole("button", { name: "日志" })), "AI 调用日志"],
+    ["日志", () => openMoreItem("日志"), "AI 调用日志"],
     ["品牌返回", () => fireEvent.click(screen.getByRole("button", { name: /Yuri Rewrite/ })), "章节"],
     ["Esc 返回", () => fireEvent.keyDown(window, { key: "Escape" }), "章节"]
   ])("guards unsaved compare edits before app-level navigation: %s", async (_label, triggerNavigation, expectedHeading) => {
@@ -2370,11 +2424,13 @@ describe("App feature behavior", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
     expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
-    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "工作台" }));
+    const restoredTrigger = screen.getByRole("button", { name: "打开《测试小说》菜单" });
+    fireEvent.click(restoredTrigger);
     const deleteFromSettings = await screen.findByRole("menuitem", { name: "删除当前小说" });
     await waitFor(() => expect(deleteFromSettings).toHaveFocus());
     fireEvent.keyDown(deleteFromSettings, { key: "Escape" });
-    expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "测试小说" })).toBeInTheDocument();
   });
 
   it("lets the delete dialog take focus and restores the novel menu trigger", async () => {

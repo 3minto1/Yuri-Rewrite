@@ -2,19 +2,16 @@ import {
   ArrowLeft,
   BookOpen,
   ChartNoAxesCombined,
-  CheckCircle2,
   ChevronDown,
   ClipboardList,
   Download,
   FilePlus2,
+  FolderOpen,
+  Gauge,
   GitCompareArrows,
-  Github,
-  HelpCircle,
+  Library,
   Loader2,
   MoreHorizontal,
-  Moon,
-  PanelLeftClose,
-  PanelLeftOpen,
   Pause,
   Play,
   RefreshCw,
@@ -23,7 +20,6 @@ import {
   Settings,
   Sparkles,
   Square,
-  Sun,
   Bot,
   House,
   Trash2,
@@ -31,6 +27,9 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ActivityRail } from "./components/Layout/ActivityRail";
+import { ContextPanel } from "./components/Layout/ContextPanel";
+import { contextKindForView, type ActiveView } from "./components/Layout/navigation";
 import { CompareView } from "./components/Compare/CompareView";
 import { RewriteAbStartDialog } from "./components/Compare/RewriteAbStartDialog";
 import { RewriteAbView } from "./components/Compare/RewriteAbView";
@@ -46,15 +45,18 @@ import { CoreSettingsPage } from "./components/pages/CoreSettingsPage";
 import { ChapterRulesPage } from "./components/pages/ChapterRulesPage";
 import { LogsPage } from "./components/pages/LogsPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
+import type { SettingsTab } from "./components/Settings/AppSettings";
 import { TokenStatsPage } from "./components/pages/TokenStatsPage";
 import { BatchPanel } from "./components/Workspace/BatchPanel";
 import { ChapterList } from "./components/Workspace/ChapterList";
 import { ModelConfig } from "./components/Workspace/ModelConfig";
 import { NameMappingCleanupDialog } from "./components/Workspace/NameMappingCleanupDialog";
 import { TaskEstimate } from "./components/Workspace/TaskEstimate";
+import { TaskCenter } from "./components/Workspace/TaskCenter";
+import { WorkspaceDashboard } from "./components/Workspace/WorkspaceDashboard";
+import type { WorkflowStep } from "./components/Workspace/WorkflowStepper";
 import {
   emptyProfile as defaultProfile,
-  getModelSuggestions as detectModelSuggestions,
   normalizeThinkingMode
 } from "./config/modelRecommendations";
 import { modelProfileDisplayName } from "./config/modelProfileDisplay";
@@ -83,6 +85,7 @@ import type {
   DiagnosisStatus,
   Job,
   JobEstimate,
+  DiscoveredModel,
   ModelDiagnosis,
   ModelProfile,
   NameMappingConsistencyReport,
@@ -91,7 +94,6 @@ import type {
   NovelDetail,
   NovelSettings,
   NovelSettingsDraft,
-  ProfileDraft,
   TokenUsageReport,
   UpdateCheckResult,
   UpdateProgress
@@ -104,34 +106,7 @@ import {
   isAutomaticPauseKind
 } from "./autoContinue";
 
-type ModelSuggestion = {
-  label: string;
-  model: string;
-};
-
-type ModelSuggestionGroup = {
-  id: string;
-  baseTerms: string[];
-  modelTerms: string[];
-  models: ModelSuggestion[];
-};
-
 type ThemeMode = "light" | "dark";
-type ActiveView = "workspace" | "models" | "compare" | "rewrite-ab" | "novel-settings" | "core-settings" | "chapter-rules" | "logs" | "token-stats" | "settings";
-
-
-const emptyProfile: ProfileDraft = {
-  name: "OpenAI 兼容接口",
-  provider: "openai-compatible",
-  base_url: "https://api.openai.com/v1",
-  model: "请填写模型名",
-  temperature: 0.7,
-  top_p: 1,
-  thinking_mode: "auto",
-  prompt_obfuscation_enabled: false,
-  api_key: ""
-};
-
 const emptyNovelSettings: NovelSettingsDraft = {
   protagonist_name: "",
   protagonist_aliases: "",
@@ -149,7 +124,7 @@ const quickStartSeenKey = "yuri-rewrite.quick-start-seen";
 const themePreferenceKey = "yuri-rewrite.theme";
 const sidebarPreferenceKey = "yuri-rewrite.sidebar.collapsed";
 const legacyWorkspaceSidebarPreferenceKey = "yuri-rewrite.sidebar.workspace-collapsed";
-const estimateCollapsedPreferenceKey = "yuri-rewrite.task-estimate-collapsed";
+const settingsTabPreferenceKey = "yuri-rewrite.settings-tab";
 const qualityIgnoreKeyPrefix = "yuri-rewrite.qualityIgnored.v1.";
 const sidebarFocusableSelector = [
   "button:not(:disabled)",
@@ -177,154 +152,6 @@ function configuredOptionalNameSources(settingsValue: NovelSettingsDraft): Set<s
       .map((value) => value.split(/->|=>|→/, 1)[0].trim())
       .filter(Boolean)
   );
-}
-
-const modelSuggestionGroups: ModelSuggestionGroup[] = [
-  {
-    id: "deepseek",
-    baseTerms: ["deepseek"],
-    modelTerms: ["deepseek"],
-    models: [
-      { label: "DeepSeek V4 Pro", model: "deepseek-v4-pro" },
-      { label: "DeepSeek V4 Flash", model: "deepseek-v4-flash" }
-    ]
-  },
-  {
-    id: "volcengine",
-    baseTerms: ["volcengine", "volces", "ark.cn-"],
-    modelTerms: ["doubao-", "seed-"],
-    models: [
-      { label: "Doubao Seed 2.1 Pro", model: "doubao-seed-2-1-pro-260628" },
-      { label: "Doubao Seed 2.1 Turbo", model: "doubao-seed-2-1-turbo-260628" },
-      { label: "Doubao Seed 2.0 Pro", model: "doubao-seed-2-0-pro-260215" },
-      { label: "Doubao Seed 2.0 Lite", model: "doubao-seed-2-0-lite-260428" },
-      { label: "Doubao Seed 2.0 Mini", model: "doubao-seed-2-0-mini-260428" },
-      { label: "Doubao Seed 2.0 Code", model: "doubao-seed-2-0-code-preview-260215" },
-      { label: "Doubao 1.5 Pro 32K", model: "doubao-1-5-pro-32k-250115" },
-      { label: "Doubao 1.5 Pro 256K", model: "doubao-1-5-pro-256k-250115" },
-      { label: "Doubao 1.5 Lite 32K", model: "doubao-1-5-lite-32k-250115" },
-      { label: "Doubao 1.5 Thinking Pro", model: "doubao-1-5-thinking-pro-250415" },
-      { label: "Doubao 1.5 Vision Pro", model: "doubao-1-5-vision-pro-250328" }
-    ]
-  },
-  {
-    id: "openai",
-    baseTerms: ["api.openai.com", "openai.azure.com"],
-    modelTerms: ["gpt-", "o3", "o4"],
-    models: [
-      { label: "GPT-5.2", model: "gpt-5.2" },
-      { label: "GPT-5.2 Pro", model: "gpt-5.2-pro" },
-      { label: "GPT-5.1", model: "gpt-5.1" },
-      { label: "GPT-5", model: "gpt-5" },
-      { label: "GPT-5 Mini", model: "gpt-5-mini" },
-      { label: "GPT-5 Nano", model: "gpt-5-nano" },
-      { label: "o3 Pro", model: "o3-pro" },
-      { label: "o3", model: "o3" },
-      { label: "GPT-4.1", model: "gpt-4.1" },
-      { label: "GPT-4.1 Mini", model: "gpt-4.1-mini" },
-      { label: "GPT-4o Mini", model: "gpt-4o-mini" }
-    ]
-  },
-  {
-    id: "zhipu",
-    baseTerms: ["bigmodel", "zhipu", "z.ai", "智谱"],
-    modelTerms: ["glm-"],
-    models: [
-      { label: "GLM-5.2", model: "glm-5.2" },
-      { label: "GLM-5.1", model: "glm-5.1" },
-      { label: "GLM-5", model: "glm-5" },
-      { label: "GLM-5 Turbo", model: "glm-5-turbo" },
-      { label: "GLM-4.7", model: "glm-4.7" },
-      { label: "GLM-4.6", model: "glm-4.6" },
-      { label: "GLM-4.5", model: "glm-4.5" },
-      { label: "GLM-4.5 Air", model: "glm-4.5-air" },
-      { label: "GLM-4 Plus", model: "glm-4-plus" },
-      { label: "GLM-4 Flash", model: "glm-4-flash" }
-    ]
-  },
-  {
-    id: "kimi",
-    baseTerms: ["moonshot", "kimi"],
-    modelTerms: ["moonshot", "kimi"],
-    models: [
-      { label: "Kimi K2.6", model: "kimi-k2.6" },
-      { label: "Kimi K2.5", model: "kimi-k2.5" },
-      { label: "Moonshot V1 128K", model: "moonshot-v1-128k" },
-      { label: "Moonshot V1 32K", model: "moonshot-v1-32k" },
-      { label: "Moonshot V1 8K", model: "moonshot-v1-8k" }
-    ]
-  },
-  {
-    id: "minimax",
-    baseTerms: ["minimax"],
-    modelTerms: ["minimax", "m2-her"],
-    models: [
-      { label: "MiniMax M3", model: "MiniMax-M3" },
-      { label: "MiniMax M2.7", model: "MiniMax-M2.7" },
-      { label: "MiniMax M2.7 Highspeed", model: "MiniMax-M2.7-highspeed" },
-      { label: "MiniMax M2.5", model: "MiniMax-M2.5" },
-      { label: "MiniMax M2.5 Highspeed", model: "MiniMax-M2.5-highspeed" },
-      { label: "MiniMax M2.1", model: "MiniMax-M2.1" },
-      { label: "MiniMax M2.1 Highspeed", model: "MiniMax-M2.1-highspeed" },
-      { label: "MiniMax M2", model: "MiniMax-M2" },
-      { label: "M2-her", model: "M2-her" }
-    ]
-  },
-  {
-    id: "mimo",
-    baseTerms: ["xiaomimimo", "mimo.xiaomi", "mimo.mi.com", "mimo"],
-    modelTerms: ["mimo-"],
-    models: [
-      { label: "MiMo V2.5 Pro", model: "mimo-v2.5-pro" },
-      { label: "MiMo V2.5", model: "mimo-v2.5" },
-      { label: "MiMo V2 Flash", model: "mimo-v2-flash" }
-    ]
-  },
-  {
-    id: "siliconflow",
-    baseTerms: ["siliconflow"],
-    modelTerms: ["qwen/", "thudm/", "deepseek-ai/", "moonshotai/", "minimaxai/", "zai-org/", "bytedance-seed/", "internlm/", "mistralai/", "openai/"],
-    models: [
-      { label: "DeepSeek V3.2", model: "deepseek-ai/DeepSeek-V3.2" },
-      { label: "DeepSeek V3.2 Exp", model: "deepseek-ai/DeepSeek-V3.2-Exp" },
-      { label: "DeepSeek V3.1 Terminus", model: "deepseek-ai/DeepSeek-V3.1-Terminus" },
-      { label: "DeepSeek V3.1", model: "deepseek-ai/DeepSeek-V3.1" },
-      { label: "DeepSeek R1", model: "deepseek-ai/DeepSeek-R1" },
-      { label: "Qwen3.6 27B", model: "Qwen/Qwen3.6-27B" },
-      { label: "Qwen3.5 122B A10B", model: "Qwen/Qwen3.5-122B-A10B" },
-      { label: "Qwen3.5 35B A3B", model: "Qwen/Qwen3.5-35B-A3B" },
-      { label: "Qwen3.5 27B", model: "Qwen/Qwen3.5-27B" },
-      { label: "Qwen3 Coder 480B A35B", model: "Qwen/Qwen3-Coder-480B-A35B-Instruct" },
-      { label: "Qwen3 Coder 30B A3B", model: "Qwen/Qwen3-Coder-30B-A3B-Instruct" },
-      { label: "Kimi K2.6", model: "moonshotai/Kimi-K2.6" },
-      { label: "Kimi K2 Instruct 0905", model: "moonshotai/Kimi-K2-Instruct-0905" },
-      { label: "GLM-5.1", model: "zai-org/GLM-5.1" },
-      { label: "GLM-4.5 Air", model: "zai-org/GLM-4.5-Air" },
-      { label: "MiniMax M2.5", model: "MiniMaxAI/MiniMax-M2.5" },
-      { label: "MiniMax M2", model: "MiniMaxAI/MiniMax-M2" },
-      { label: "GPT OSS 120B", model: "openai/gpt-oss-120b" },
-      { label: "Seed OSS 36B Instruct", model: "ByteDance-Seed/Seed-OSS-36B-Instruct" }
-    ]
-  },
-  {
-    id: "claude",
-    baseTerms: ["anthropic", "claude"],
-    modelTerms: ["claude-"],
-    models: [
-      { label: "Claude Opus 4.8", model: "claude-opus-4-8" },
-      { label: "Claude Sonnet 4.6", model: "claude-sonnet-4-6" },
-      { label: "Claude Haiku 4.5", model: "claude-haiku-4-5-20251001" }
-    ]
-  }
-];
-
-function getModelSuggestions(profile: ProfileDraft) {
-  const baseHint = profile.base_url.toLowerCase();
-  const modelHint = profile.model.toLowerCase();
-  const baseMatched = modelSuggestionGroups.find((group) => group.baseTerms.some((term) => baseHint.includes(term)));
-  if (baseMatched) return baseMatched.models;
-  const modelMatched = modelSuggestionGroups.find((group) => group.modelTerms.some((term) => modelHint.includes(term)));
-  return modelMatched?.models ?? [];
 }
 
 const statusText: Record<string, string> = {
@@ -423,8 +250,18 @@ function readSidebarCollapsedPreference() {
   }
 }
 
+function readSettingsTabPreference(): SettingsTab {
+  try {
+    const stored = window.localStorage.getItem(settingsTabPreferenceKey);
+    if (stored === "models" || stored === "tasks" || stored === "data") return stored;
+  } catch {
+    // Use the first category when local preferences are unavailable.
+  }
+  return "models";
+}
+
 function focusAdjacentSidebarControl(trigger: HTMLElement, direction: -1 | 1) {
-  const sidebar = trigger.closest<HTMLElement>(".sidebar");
+  const sidebar = trigger.closest<HTMLElement>(".context-panel");
   if (!sidebar) return;
   const controls = Array.from(sidebar.querySelectorAll<HTMLElement>(sidebarFocusableSelector));
   const triggerIndex = controls.indexOf(trigger);
@@ -452,6 +289,7 @@ export default function App() {
   const novelMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const novelMenuActionRef = useRef<HTMLButtonElement | null>(null);
   const novelListScrollTimerRef = useRef<number | null>(null);
+  const quickStartTitleRef = useRef<HTMLHeadingElement | null>(null);
   const closeNovelMenu = useCallback((restoreTriggerFocus = false) => {
     const trigger = novelMenuTriggerRef.current;
     setOpenNovelMenuId("");
@@ -534,6 +372,7 @@ export default function App() {
   }, [closeNovelMenu, openNovelMenuId]);
   const [openModelMenu, setOpenModelMenu] = useState(false);
   const [openModelSuggestions, setOpenModelSuggestions] = useState(false);
+  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[] | null>(null);
   const [logSummaries, setLogSummaries] = useState<AiLogSummary[]>([]);
   const [logDetails, setLogDetails] = useState<Record<string, AiLog>>({});
   const [logDetailLoadingIds, setLogDetailLoadingIds] = useState<Set<string>>(() => new Set());
@@ -547,12 +386,12 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>({});
   const [corePromptDraft, setCorePromptDraft] = useState("");
   const [jobEstimate, setJobEstimate] = useState<JobEstimate | null>(null);
-  const [estimateCollapsed, setEstimateCollapsed] = useState(() => readBooleanPreference(estimateCollapsedPreferenceKey, false));
   const [modelDiagnosis, setModelDiagnosis] = useState<ModelDiagnosis | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => readInitialTheme());
   const [novelPendingDeletion, setNovelPendingDeletion] = useState<Novel | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("workspace");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsedPreference);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(readSettingsTabPreference);
   const [novelFilter, setNovelFilter] = useState("");
   const [compareDirty, setCompareDirty] = useState(false);
   const [pendingActiveView, setPendingActiveView] = useState<ActiveView | null>(null);
@@ -735,11 +574,6 @@ export default function App() {
   const rewriteAbProgressRunning = job?.job_type === "rewrite_ab" && job.status === "running";
   const rewriteAbRunning = busy === "rewrite-ab" || rewriteAbProgressRunning;
 
-  const detectedModelSuggestions = useMemo(
-    () => detectModelSuggestions(profileDraft),
-    [profileDraft.provider, profileDraft.base_url, profileDraft.model]
-  );
-
   const hasCompleteNovelSettings = Boolean(
     detail?.settings?.protagonist_name?.trim() && detail.settings.bust?.trim() && detail.settings.body_type?.trim()
   );
@@ -751,6 +585,11 @@ export default function App() {
     setSidebarCollapsed(next);
     try { window.localStorage.setItem(sidebarPreferenceKey, String(next)); } catch { /* Keep the session state. */ }
   }, [sidebarCollapsed]);
+
+  const selectSettingsTab = useCallback((tab: SettingsTab) => {
+    setSettingsTab(tab);
+    try { window.localStorage.setItem(settingsTabPreferenceKey, tab); } catch { /* Keep the session state. */ }
+  }, []);
 
   const filteredNovels = useMemo(() => {
     const query = novelFilter.trim().toLocaleLowerCase();
@@ -1014,8 +853,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (detectedModelSuggestions.length === 0) setOpenModelSuggestions(false);
-  }, [detectedModelSuggestions.length]);
+    setDiscoveredModels(null);
+    setOpenModelSuggestions(false);
+  }, [profileDraft.id, profileDraft.provider, profileDraft.base_url, profileDraft.api_key]);
 
   useEffect(() => {
     setCorePromptDraft(settings.core_prompt ?? "");
@@ -1777,6 +1617,50 @@ export default function App() {
       const label = result.status === "ok" ? "诊断通过" : result.status === "warning" ? "诊断有警告" : "诊断失败";
       showNotice(label);
     } catch (error) {
+      showNotice(String(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function discoverProfileModels() {
+    const provider = profileDraft.provider.trim();
+    const baseUrl = profileDraft.base_url.trim();
+    const profileId = profileDraft.id && selectedProfileId === profileDraft.id
+      ? profileDraft.id
+      : undefined;
+    const draftApiKey = profileDraft.api_key.trim();
+    const hasStoredKey = Boolean(profileId && selectedProfile?.has_api_key);
+    if (!provider) {
+      showNotice("请先选择 Provider。");
+      return;
+    }
+    if (!baseUrl) {
+      showNotice("请先填写 Base URL。");
+      return;
+    }
+    if ((!draftApiKey || draftApiKey === savedApiKeyMask) && !hasStoredKey) {
+      showNotice("请先填写 API Key，或选择一个已保存凭据的模型配置。");
+      return;
+    }
+    setBusy("discover-models");
+    setNotice("");
+    try {
+      const result = await invoke("discover_models", {
+        input: {
+          profile_id: profileId,
+          provider,
+          base_url: baseUrl,
+          api_key: draftApiKey && draftApiKey !== savedApiKeyMask ? draftApiKey : undefined
+        }
+      });
+      setDiscoveredModels(result.models);
+      setOpenModelSuggestions(true);
+      const warningText = result.warnings.length > 0 ? ` ${result.warnings.join(" ")}` : "";
+      showNotice(`已获取 ${result.models.length} 个账号可见模型。${warningText}`);
+    } catch (error) {
+      setDiscoveredModels(null);
+      setOpenModelSuggestions(false);
       showNotice(String(error));
     } finally {
       setBusy("");
@@ -2817,6 +2701,43 @@ export default function App() {
     setShowQuickStart(false);
   }
 
+  const contextKind = contextKindForView(activeView);
+  const selectedBatchChapters = selectedBatch && detail
+    ? detail.chapters.filter((chapter) => chapter.index >= selectedBatch.start_chapter && chapter.index <= selectedBatch.end_chapter)
+    : [];
+  const batchAnalysisComplete = selectedBatchChapters.length > 0
+    && selectedBatchChapters.every((chapter) => chapter.analysis_status === "completed");
+  const batchRewriteComplete = selectedBatchChapters.length > 0
+    && selectedBatchChapters.every((chapter) => chapter.rewrite_status === "completed" && chapter.rewrite_text?.trim());
+  const preparationComplete = Boolean(detail && selectedProfileId && hasCompleteNovelSettings && !selectedNovelPendingSplit);
+  const workflowSteps: WorkflowStep[] = [
+    {
+      id: "prepare",
+      label: "准备",
+      description: preparationComplete ? "模型与设定已就绪" : "完成模型、设定与分章",
+      status: preparationComplete ? "complete" : "current"
+    },
+    {
+      id: "analysis",
+      label: "分析",
+      description: batchAnalysisComplete ? "当前批次分析完成" : "提取原著信息与一致性资产",
+      status: batchAnalysisComplete ? "complete" : preparationComplete ? "current" : "pending"
+    },
+    {
+      id: "rewrite",
+      label: "改写",
+      description: batchRewriteComplete ? "当前批次改写完成" : "根据设定生成正式改写稿",
+      status: batchRewriteComplete ? "complete" : batchAnalysisComplete ? "current" : "pending"
+    },
+    {
+      id: "compare",
+      label: "对比",
+      description: batchRewriteComplete ? "检查差异并导出结果" : "完成改写后进入",
+      status: batchRewriteComplete ? "current" : "pending"
+    }
+  ];
+  const taskActiveOnRail = Boolean(job && job.status === "running" && job.job_type !== "rewrite_ab");
+
   return (
     <main className={`${dragActive ? "app-shell drag-active" : "app-shell"}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       {dragActive && (
@@ -2828,348 +2749,91 @@ export default function App() {
           </div>
         </div>
       )}
-      <aside className="sidebar">
-        <div className="sidebar-brand-row">
-          <button className="brand brand-button" onClick={() => requestActiveView("workspace")} title="返回工作台">
-            <Sparkles size={22} />
-            <div>
-              <strong>Yuri Rewrite</strong>
-              <span>本地小说分析与改写</span>
+      <ActivityRail
+        activeView={activeView}
+        contextCollapsed={sidebarCollapsed}
+        theme={theme}
+        canCompare={Boolean(detail && !selectedNovelPendingSplit)}
+        canOpenRewriteAb={Boolean(detail && !selectedNovelPendingSplit && !openingRewriteAbRuns)}
+        rewriteAbBusy={openingRewriteAbRuns || rewriteAbRunning}
+        rewriteAbProgress={rewriteAbProgressRunning && job?.candidate_total ? `${job.candidate_completed ?? 0}/${job.candidate_total}` : undefined}
+        rewriteAbRunning={rewriteAbProgressRunning}
+        taskProgress={taskActiveOnRail ? jobProgressPercent : undefined}
+        hasAvailableUpdate={hasAvailableUpdate}
+        updateBusy={busy === "check-updates" || busy === "download-update"}
+        systemBusy={busy !== ""}
+        onNavigate={requestActiveView}
+        onOpenRewriteAb={() => void openExistingRewriteAbRun()}
+        onToggleContext={toggleSidebar}
+        onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+        onOpenHelp={() => setShowQuickStart(true)}
+        onCheckUpdates={checkForUpdates}
+        onOpenGithub={openGithubRepository}
+        onOpenTokenStats={openTokenStats}
+      />
+      <div className="sidebar editor-context-sidebar"><ContextPanel
+        collapsed={sidebarCollapsed}
+        title={contextKind === "novel" ? "项目" : contextKind === "models" ? "模型" : contextKind === "settings" ? "设置" : "数据"}
+        subtitle={contextKind === "novel" ? (detail?.novel.title ?? "选择一本小说") : undefined}
+      >
+        {browserMockEnabled && <span className="browser-mock-badge" title="使用内存测试数据，不会访问本地数据库或模型服务">浏览器测试模式</span>}
+        {contextKind === "novel" && <>
+          <button className="context-import-button action-primary" onClick={importTxt} disabled={busy === "import" || processingTaskActive}>
+            {busy === "import" ? <Loader2 className="spin" size={17} /> : <FilePlus2 size={17} />}导入 TXT
+          </button>
+          <section className="context-section context-novel-section">
+            <div className="context-section-label"><span>小说</span><small>{novels.length}</small></div>
+            {novels.length > 4 && <label className="context-filter"><Search size={15} /><input type="search" aria-label="筛选小说" placeholder="筛选小说" value={novelFilter} onChange={(event) => { setNovelFilter(event.target.value); setOpenNovelMenuId(""); }} /></label>}
+            <div className="novel-list" ref={novelListRef} onScroll={handleNovelListScroll}>
+              {filteredNovels.map((novel) => <div className="novel-row" key={novel.id}>
+                <button className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"} onClick={() => requestActiveView("workspace", () => { void loadNovel(novel.id); })} disabled={(autoRunState === "running" || autoRunState === "stopping" || ["analysis", "rewrite", "rewrite-ab", "auto-batch"].includes(busy)) && detail?.novel.id !== novel.id}>
+                  <BookOpen size={16} /><span>{novel.title}</span>{autoRunRecoveries.some((recovery) => recovery.novel_id === novel.id) && <small className="novel-recovery-badge">未完成</small>}
+                </button>
+                <button className="icon-button menu-trigger" aria-label={`打开《${novel.title}》菜单`} aria-haspopup="menu" aria-expanded={openNovelMenuId === novel.id} aria-controls={`novel-context-menu-${novel.id}`} onClick={(event) => handleNovelMenuToggle(event, novel)} disabled={processingTaskActive}><MoreHorizontal size={17} /></button>
+              </div>)}
+              {novels.length === 0 && <p className="context-empty">尚未导入小说。</p>}
+              {novels.length > 0 && filteredNovels.length === 0 && <p className="context-empty">没有匹配的小说。</p>}
             </div>
-          </button>
-          <button type="button" className="icon-button sidebar-collapse-toggle" aria-label={sidebarCollapsed ? "展开侧栏" : "折叠侧栏"} title={sidebarCollapsed ? "展开侧栏" : "折叠侧栏"} onClick={toggleSidebar}>
-            {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
-          </button>
-        </div>
-
-        {browserMockEnabled && <span className="browser-mock-badge sidebar-copy" title="使用内存测试数据，不会访问本地数据库或模型服务">浏览器测试模式</span>}
-
-        <button className="primary-action sidebar-action" title="导入 TXT" onClick={importTxt} disabled={busy === "import" || processingTaskActive}>
-          {busy === "import" ? <Loader2 className="spin" size={18} /> : <FilePlus2 size={18} />}
-          <span className="sidebar-nav-label">导入 TXT</span>
-        </button>
-
-        <div className="side-section nav-section sidebar-primary-nav">
-          <div className="section-label">工作流</div>
-          <button className={activeView === "workspace" ? "nav-button active" : "nav-button"} title="工作台" onClick={() => requestActiveView("workspace")}>
-            <House size={17} /><span className="sidebar-nav-label">工作台</span>
-          </button>
-          <button className={activeView === "compare" ? "nav-button active" : "nav-button"} title="对比" onClick={() => requestActiveView("compare")} disabled={!detail || selectedNovelPendingSplit}>
-            <GitCompareArrows size={17} /><span className="sidebar-nav-label">对比</span>
-          </button>
-          <button className={activeView === "rewrite-ab" ? "nav-button active" : "nav-button"} title="A/B 实验" onClick={() => void openExistingRewriteAbRun()} disabled={!detail || selectedNovelPendingSplit || openingRewriteAbRuns} aria-label={rewriteAbProgressRunning && job?.candidate_total ? `A/B 实验，运行中，候选 ${job.candidate_completed ?? 0}/${job.candidate_total}` : "A/B 实验"}>
-            {openingRewriteAbRuns || rewriteAbRunning ? <Loader2 className="spin" size={17} /> : <GitCompareArrows size={17} />}
-            <span className="sidebar-nav-label">A/B 实验</span>
-            {rewriteAbProgressRunning && job?.candidate_total ? <span className="ab-menu-progress">{job.candidate_completed ?? 0}/{job.candidate_total}</span> : null}
-          </button>
-        </div>
-
-        <div className="side-section">
-          <div className="section-label">小说</div>
-          {novels.length > 4 && (
-            <label className="sidebar-novel-filter">
-              <Search size={15} aria-hidden="true" />
-              <input
-                type="search"
-                aria-label="筛选小说"
-                placeholder="筛选小说"
-                value={novelFilter}
-                onChange={(event) => {
-                  setNovelFilter(event.target.value);
-                  setOpenNovelMenuId("");
-                }}
-              />
-            </label>
-          )}
-          <div
-            className="novel-list"
-            ref={novelListRef}
-            onScroll={handleNovelListScroll}
-          >
-            {filteredNovels.map((novel) => (
-              <div className="novel-row" key={novel.id}>
-                <button
-                  className={detail?.novel.id === novel.id ? "novel-item active" : "novel-item"}
-                  onClick={() => requestActiveView("workspace", () => {
-                    void loadNovel(novel.id);
-                  })}
-                  disabled={(autoRunState === "running" || autoRunState === "stopping" || ["analysis", "rewrite", "rewrite-ab", "auto-batch"].includes(busy)) && detail?.novel.id !== novel.id}
-                >
-                  <BookOpen size={16} />
-                  <span>{novel.title}</span>
-                  {autoRunRecoveries.some((recovery) => recovery.novel_id === novel.id) && (
-                    <small className="novel-recovery-badge">未完成</small>
-                  )}
-                </button>
-                <button
-                  className="icon-button menu-trigger"
-                  aria-label={`打开《${novel.title}》菜单`}
-                  aria-haspopup="menu"
-                  aria-expanded={openNovelMenuId === novel.id}
-                  aria-controls={`novel-context-menu-${novel.id}`}
-                  onClick={(event) => handleNovelMenuToggle(event, novel)}
-                  disabled={processingTaskActive}
-                >
-                  <MoreHorizontal size={17} />
-                </button>
-              </div>
-            ))}
-            {novels.length === 0 && <p className="muted">尚未导入小说。</p>}
-            {novels.length > 0 && filteredNovels.length === 0 && <p className="muted sidebar-novel-empty">没有匹配的小说。</p>}
+          </section>
+          <section className="context-section">
+            <div className="context-section-label">改写模型</div>
+            <ModelProfiles profiles={profiles} selectedProfileId={selectedProfileId} menuOpen={openModelMenu} processing={adjustableWhilePaused} busy={busy} onSelect={selectModelProfile} onMenuOpenChange={setOpenModelMenu} onDelete={deleteSelectedModelProfile} />
+            <button className="context-link" onClick={() => requestActiveView("models")}><Bot size={16} />打开模型列表</button>
+          </section>
+          <section className="context-section context-tools">
+            <div className="context-section-label">小说工具</div>
+            <button className={activeView === "workspace" && workspaceSection === "main" ? "context-link active" : "context-link"} onClick={() => requestActiveView("workspace", () => setWorkspaceSection("main"))} disabled={!detail}><BookOpen size={16} />章节</button>
+            <button className={activeView === "workspace" && workspaceSection === "canon" ? "context-link active" : "context-link"} onClick={() => requestActiveView("workspace", () => setWorkspaceSection("canon"))} disabled={!detail}><Library size={16} />一致性资产</button>
+            <button className={activeView === "novel-settings" ? "context-link active" : "context-link"} onClick={openNovelSettings} disabled={!detail}><Settings size={16} />设定</button>
+            <button className={activeView === "core-settings" ? "context-link active" : "context-link"} onClick={() => requestActiveView("core-settings")}><Sparkles size={16} />核心设定</button>
+            <button className={activeView === "chapter-rules" ? "context-link active" : "context-link"} onClick={openChapterRules} disabled={!detail}><BookOpen size={16} />章节规则</button>
+          </section>
+        </>}
+        {contextKind === "models" && <section className="context-section context-model-list">
+          <button className="context-import-button action-primary" onClick={createNewModelProfile} disabled={adjustableWhilePaused}><Bot size={16} />新建模型</button>
+          <div className="context-section-label"><span>配置列表</span><small>{profiles.length}</small></div>
+          <div className="context-list-scroll">
+            {profiles.map((profile) => <button key={profile.id} className={profile.id === selectedProfileId ? "context-list-item active" : "context-list-item"} onClick={() => selectModelProfile(profile.id)} disabled={adjustableWhilePaused}><strong>{modelProfileDisplayName(profile)}</strong><small>{profile.provider}</small></button>)}
           </div>
-          {openNovelMenuId && novelMenuPos && novelMenuNovel && createPortal(
-            <div
-              id={`novel-context-menu-${openNovelMenuId}`}
-              className="context-menu context-menu--novel-portal"
-              role="menu"
-              aria-label={`《${novelMenuNovel.title}》操作`}
-              style={{ top: novelMenuPos.top, left: novelMenuPos.left }}
-            >
-              <button
-                ref={novelMenuActionRef}
-                role="menuitem"
-                onClick={() => deleteNovel(novelMenuNovel)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    closeNovelMenu(true);
-                    return;
-                  }
-                  if (event.key === "Tab") {
-                    const trigger = novelMenuTriggerRef.current;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    closeNovelMenu();
-                    if (trigger) focusAdjacentSidebarControl(trigger, event.shiftKey ? -1 : 1);
-                  }
-                }}
-                disabled={busy === "delete-novel" || processingTaskActive}
-              >
-                <Trash2 size={15} />
-                删除当前小说
-              </button>
-            </div>,
-            document.body
-          )}
-        </div>
-
-        <div className="side-section">
-          <div className="section-label">改写模型</div>
-          <ModelProfiles
-            profiles={profiles}
-            selectedProfileId={selectedProfileId}
-            menuOpen={openModelMenu}
-            processing={adjustableWhilePaused}
-            busy={busy}
-            onSelect={selectModelProfile}
-            onMenuOpenChange={setOpenModelMenu}
-            onDelete={deleteSelectedModelProfile}
-          />
-        </div>
-
-        <div className="side-section nav-section sidebar-novel-nav">
-          <div className="section-label">小说配置</div>
-          <button className={activeView === "novel-settings" ? "nav-button active" : "nav-button"} title="设定" onClick={openNovelSettings} disabled={!detail}>
-            <Settings size={17} /><span className="sidebar-nav-label">设定</span>
-          </button>
-          <button className={activeView === "core-settings" ? "nav-button active" : "nav-button"} title="核心设定" onClick={() => requestActiveView("core-settings")}>
-            <Sparkles size={17} /><span className="sidebar-nav-label">核心设定</span>
-          </button>
-          <button className={activeView === "chapter-rules" ? "nav-button active" : "nav-button"} title="章节规则" onClick={openChapterRules} disabled={!detail}>
-            <BookOpen size={17} /><span className="sidebar-nav-label">章节规则</span>
-          </button>
-        </div>
-
-        <div className="side-section nav-section sidebar-system-nav">
-          <div className="section-label">数据与系统</div>
-          <button className={activeView === "models" ? "nav-button active" : "nav-button"} title="管理模型" onClick={() => requestActiveView("models")}>
-            <Bot size={17} /><span className="sidebar-nav-label">管理模型</span>
-          </button>
-          <button
-            className={activeView === "logs" ? "nav-button active" : "nav-button"}
-            title="日志"
-            onClick={() => requestActiveView("logs")}
-          >
-            <ClipboardList size={17} />
-            <span className="sidebar-nav-label">日志</span>
-          </button>
-          <button
-            className={activeView === "token-stats" ? "nav-button active" : "nav-button"}
-            title="Token 统计"
-            onClick={openTokenStats}
-            disabled={busy !== ""}
-          >
-            <ChartNoAxesCombined size={17} />
-            <span className="sidebar-nav-label">Token统计</span>
-          </button>
-          <button className={activeView === "settings" ? "nav-button active" : "nav-button"} title="设置" onClick={() => requestActiveView("settings")}>
-            <Settings size={17} /><span className="sidebar-nav-label">设置</span>
-          </button>
-          <button className="nav-button" title="帮助" onClick={() => setShowQuickStart(true)}>
-            <HelpCircle size={17} /><span className="sidebar-nav-label">帮助</span>
-          </button>
-        </div>
-
-        <div className="sidebar-spacer" />
-
-        <button
-          className="nav-button theme-toggle-button"
-          type="button"
-          aria-pressed={theme === "dark"}
-          title={theme === "dark" ? "切换到日间模式" : "切换到夜间模式"}
-          onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
-        >
-          {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-          <span className="sidebar-nav-label">{theme === "dark" ? "日间模式" : "夜间模式"}</span>
-        </button>
-
-        <button className="nav-button" title="GitHub" onClick={openGithubRepository} disabled={busy !== ""}>
-          <Github size={17} /><span className="sidebar-nav-label">GitHub</span>
-        </button>
-        <button className="nav-button update-menu-item" title="检查更新" onClick={checkForUpdates} disabled={busy !== ""}>
-          {busy === "check-updates" || busy === "download-update" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-          <span className="sidebar-nav-label">检查更新</span>
-          {hasAvailableUpdate && <span className="update-dot" aria-label="发现新版本" />}
-        </button>
-      </aside>
+          <button className="context-danger-link" onClick={() => void deleteSelectedModelProfile()} disabled={!selectedProfileId || Boolean(busy) || processingTaskActive}><Trash2 size={16} />删除当前模型</button>
+        </section>}
+        {contextKind === "settings" && <section className="context-section context-settings-nav" role="tablist" aria-label="应用设置分类">
+          <button role="tab" aria-label="模型与复检" aria-selected={settingsTab === "models"} className={settingsTab === "models" ? "context-link active" : "context-link"} onClick={() => selectSettingsTab("models")}><Bot size={17} /><span><strong>模型与复检</strong><small>分析与审查模型</small></span></button>
+          <button role="tab" aria-label="任务与并发" aria-selected={settingsTab === "tasks"} className={settingsTab === "tasks" ? "context-link active" : "context-link"} onClick={() => selectSettingsTab("tasks")}><Gauge size={17} /><span><strong>任务与并发</strong><small>执行方式与速度</small></span></button>
+          <button role="tab" aria-label="文件与数据" aria-selected={settingsTab === "data"} className={settingsTab === "data" ? "context-link active" : "context-link"} onClick={() => selectSettingsTab("data")}><FolderOpen size={17} /><span><strong>文件与数据</strong><small>导出与本地数据</small></span></button>
+        </section>}
+        {contextKind === "data" && <section className="context-section context-data-nav">
+          <button className={activeView === "logs" ? "context-link active" : "context-link"} onClick={() => requestActiveView("logs")}><ClipboardList size={17} />AI 日志</button>
+          <button className={activeView === "token-stats" ? "context-link active" : "context-link"} onClick={openTokenStats} disabled={busy !== ""}><ChartNoAxesCombined size={17} />Token统计</button>
+        </section>}
+      </ContextPanel></div>
+      {openNovelMenuId && novelMenuPos && novelMenuNovel && createPortal(
+        <div id={`novel-context-menu-${openNovelMenuId}`} className="context-menu context-menu--novel-portal" role="menu" aria-label={`《${novelMenuNovel.title}》操作`} style={{ top: novelMenuPos.top, left: novelMenuPos.left }}>
+          <button ref={novelMenuActionRef} role="menuitem" onClick={() => deleteNovel(novelMenuNovel)} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeNovelMenu(true); return; } if (event.key === "Tab") { const trigger = novelMenuTriggerRef.current; event.preventDefault(); event.stopPropagation(); closeNovelMenu(); if (trigger) focusAdjacentSidebarControl(trigger, event.shiftKey ? -1 : 1); } }} disabled={busy === "delete-novel" || processingTaskActive}><Trash2 size={15} />删除当前小说</button>
+        </div>, document.body
+      )}
 
       <section className="workspace">
-        {activeView === "workspace" && (
-        <header className="topbar">
-          <div>
-            <h1>{detail?.novel.title ?? "工作台"}</h1>
-            <p>{detail ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}` : "导入 TXT 后开始分析和改写"}</p>
-          </div>
-          {activeView === "workspace" && (
-            <div className="topbar-actions">
-              {autoRunState !== "idle" && (
-                <>
-                  <button
-                    className="task-control-warning"
-                    onClick={autoContinuePending
-                      ? pauseAnalyzeRewriteAll
-                      : autoRunState === "paused"
-                        ? () => void continueAnalyzeRewrite()
-                        : pauseAnalyzeRewriteAll}
-                    disabled={autoControlBusy || autoRunState === "stopping"}
-                    title={autoContinuePending
-                      ? "取消本次自动继续并保持暂停"
-                      : autoRunState === "paused"
-                        ? "继续一键分析改写"
-                        : "暂停一键分析改写"}
-                  >
-                    {autoControlBusy || autoRunState === "stopping" ? (
-                      <Loader2 className="spin" size={17} />
-                    ) : autoContinuePending ? (
-                      <Pause size={17} />
-                    ) : autoRunState === "paused" ? (
-                      <Play size={17} />
-                    ) : (
-                      <Pause size={17} />
-                    )}
-                    {autoContinuePending
-                      ? `保持暂停 (${autoContinueSeconds}s)`
-                      : autoRunState === "paused"
-                        ? "继续"
-                        : "暂停"}
-                  </button>
-                  <button className="task-control-danger" onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy} title="终止一键分析改写">
-                    {autoControlBusy ? <Loader2 className="spin" size={17} /> : <Square size={17} />}
-                    终止
-                  </button>
-                </>
-              )}
-              <div className="split-button task-primary-split" ref={autoRunMenuRef}>
-                <button
-                  className="split-button-main action-primary"
-                  aria-label="一键分析改写"
-                  onClick={() => void runAnalyzeRewriteAll()}
-                  disabled={!detail || !selectedProfileId || busy !== "" || autoRunState !== "idle"}
-                  title="AI自动分析改写全文，耗时较久"
-                >
-                  {busy === "auto" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-                  全文一键
-                </button>
-                <button
-                  className="split-button-toggle action-primary"
-                  aria-label="一键分析改写选项"
-                  aria-expanded={autoRunMenuOpen}
-                  onClick={() => setAutoRunMenuOpen((open) => !open)}
-                  disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-                  title="更多一键分析改写选项"
-                >
-                  <ChevronDown size={16} />
-                </button>
-                {autoRunMenuOpen && selectedBatch && (
-                  <div className="split-button-menu" role="menu">
-                    <button
-                      role="menuitem"
-                      onClick={() => void runAnalyzeRewriteAll(selectedBatch.id)}
-                    >
-                      从当前批次开始一键分析改写
-                    </button>
-                  </div>
-                )}
-              </div>
-              <button
-                className="action-primary"
-                aria-label="一键分析改写当前批次"
-                onClick={() => void runAnalyzeRewriteCurrentBatch()}
-                disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-                title="AI自动分析并改写当前选中批次"
-              >
-                {busy === "auto-batch" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-                当前批次一键
-              </button>
-              <div className="task-secondary-group">
-                <button
-                  onClick={() => runJob("analysis")}
-                  disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-                >
-                  {busy === "analysis" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
-                  分析
-                </button>
-                <div className="split-button rewrite-task-split">
-                  <button
-                    className="split-button-main"
-                    onClick={() => runJob("rewrite")}
-                    disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-                  >
-                    {busy === "rewrite" ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-                    改写
-                  </button>
-                  <button
-                    className="split-button-toggle"
-                    type="button"
-                    aria-label="改写选项"
-                    aria-expanded={rewriteMenuOpen}
-                    onClick={() => setRewriteMenuOpen((open) => !open)}
-                    disabled={!detail || !selectedBatch || busy !== "" || autoRunState !== "idle"}
-                  >
-                    <ChevronDown size={15} />
-                  </button>
-                  {rewriteMenuOpen && (
-                    <div className="split-button-menu" role="menu">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setRewriteMenuOpen(false);
-                          openRewriteAbDialog();
-                        }}
-                      >
-                        A/B 改写当前批次
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </header>
-        )}
-
         {displayedNotice && (
           <div className="notice notice-panel">
             <span>{displayedNotice}</span>
@@ -3241,94 +2905,6 @@ export default function App() {
             </div>
           </div>
         )}
-        {job && job.job_type !== "rewrite_ab" && activeView === "workspace" && (
-          <div className={`job-strip status-container status-${getStatusTone(job.status)}`}>
-            <CheckCircle2 size={17} />
-            <div className="job-content">
-              <span className="job-summary">
-                <span>{jobTypeText[job.job_type] ?? job.job_type}</span>
-                <StatusBadge status={job.status} label={statusText[job.status] ?? job.status} />
-                <span>
-                  {job.job_type === "rewrite_ab" && job.candidate_total
-                    ? `候选 ${job.candidate_completed ?? 0}/${job.candidate_total}${job.candidate_slot ? ` · 当前 ${job.candidate_slot}` : ""}`
-                    : `${job.current_chapter}/${job.total_chapters}`}
-                  {` · ${job.message}`}
-                </span>
-                {autoContinuePending ? ` · 将在 ${autoContinueSeconds} 秒后自动继续` : ""}
-                {job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running"
-                  ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}`
-                  : ""}
-              </span>
-              {["analysis", "rewrite", "rewrite_ab", "auto", "auto_batch"].includes(job.job_type) && (
-                <>
-                  <div className="job-progress-row" aria-label={`任务进度 ${jobProgressPercent}%`}>
-                    <div className="job-progress-bar">
-                      <div className="job-progress-fill" style={{ width: `${jobProgressPercent}%` }} />
-                    </div>
-                    <strong>{jobProgressPercent}%</strong>
-                  </div>
-                  {job.shard_total !== undefined && job.shard_total > 0 && (
-                    <div className="job-stage-progress">
-                      <div className="job-stage-summary">
-                        <span>
-                          第 {job.batch_index ?? "—"}/{job.batch_total ?? job.total_chapters} 批
-                          {job.phase ? ` · ${jobPhaseText[job.phase] ?? job.phase}` : ""}
-                          {job.chapter_total !== undefined
-                            ? ` · 章节 ${job.chapter_completed ?? 0}/${job.chapter_total}`
-                            : ""}
-                          {` · 分片 ${job.shard_completed ?? 0}/${job.shard_total}`}
-                        </span>
-                        <div
-                          className="job-stage-bar"
-                          aria-label={
-                            job.chapter_total !== undefined
-                              ? `当前阶段章节进度 ${job.chapter_completed ?? 0}/${job.chapter_total}`
-                              : `当前阶段分片进度 ${job.shard_completed ?? 0}/${job.shard_total}`
-                          }
-                        >
-                          <div
-                            className="job-stage-fill"
-                            style={{
-                              width: `${Math.round(
-                                job.chapter_total
-                                  ? ((job.chapter_completed ?? 0) / job.chapter_total) * 100
-                                  : ((job.shard_completed ?? 0) / job.shard_total) * 100
-                              )}%`
-                            }}
-                          />
-                        </div>
-                      </div>
-                      {job.active_shards && job.active_shards.length > 0 && (
-                        <div className="job-active-shards">
-                          {job.active_shards.slice(0, 3).map((shard) => (
-                            <span key={`${shard.index}-${shard.phase}`}>
-                              {`${shard.index}/${shard.total} 第${shard.start_chapter}${shard.end_chapter === shard.start_chapter ? "" : `-${shard.end_chapter}`}章（${jobPhaseText[shard.phase] ?? shard.phase}）`}
-                            </span>
-                          ))}
-                          {job.active_shards.length > 3 && <span>另有 {job.active_shards.length - 3} 个处理中</span>}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {["auto", "auto_batch"].includes(job.job_type) && job.status === "paused" && selectedRecoverySummary && (
-                    <div className="job-recovery-summary">{selectedRecoverySummary}</div>
-                  )}
-                </>
-              )}
-            </div>
-            {["completed", "failed", "paused", "terminated", "ready", "partial"].includes(job.status) && (
-              <button
-                className="icon-button job-strip-close"
-                type="button"
-                aria-label="关闭任务提示"
-                onClick={() => setJob(null)}
-              >
-                <X size={15} />
-              </button>
-            )}
-          </div>
-        )}
-
         {activeView === "logs" && (
           <LogsPage
             logs={logSummaries}
@@ -3422,6 +2998,8 @@ export default function App() {
             onParallelismChange={setRewriteParallelism}
             onToggleAutoContinue={() => void toggleAutoContinue()}
             onDeleteLocalData={() => setShowDeleteLocalDataDialog(true)}
+            activeTab={settingsTab}
+            onTabChange={selectSettingsTab}
           />
         )}
 
@@ -3432,13 +3010,14 @@ export default function App() {
               setDraft={setProfileDraft}
               selectedProfile={selectedProfile}
               selectedProfileId={selectedProfileId}
-              suggestions={detectedModelSuggestions}
+              discoveredModels={discoveredModels}
               suggestionsOpen={openModelSuggestions}
               busy={busy}
               processing={adjustableWhilePaused}
               savedApiKeyMask={savedApiKeyMask}
               onSuggestionsOpenChange={setOpenModelSuggestions}
               onCreate={createNewModelProfile}
+              onDiscover={discoverProfileModels}
               onDiagnose={diagnoseProfile}
               onSave={saveProfile}
               standalone
@@ -3489,31 +3068,12 @@ export default function App() {
 
         {activeView === "workspace" && (
           <>
-          {detail && !selectedNovelPendingSplit && (
-            <BatchPanel
-              batches={detail.batches}
-              selectedBatch={selectedBatch}
-              selectedBatchId={selectedBatchId}
-              onSelect={setSelectedBatchId}
-              onOpenCanon={() => setWorkspaceSection("canon")}
-            />
-          )}
-          {detail && !selectedNovelPendingSplit && jobEstimate && (
-            <TaskEstimate
-              estimate={jobEstimate}
-              collapsed={estimateCollapsed}
-              onToggle={() => {
-                const next = !estimateCollapsed;
-                setEstimateCollapsed(next);
-                try { window.localStorage.setItem(estimateCollapsedPreferenceKey, String(next)); } catch { /* Keep the session state. */ }
-              }}
-              formatNumber={formatNumber}
-              formatSeconds={formatSeconds}
-            />
-          )}
           {workspaceSection === "main" ? (
-            <div className="content-grid workspace-main-grid workspace-chapter-grid">
-              {selectedNovelPendingSplit ? (
+            <WorkspaceDashboard
+              title={detail?.novel.title ?? "工作台"}
+              meta={detail ? `${detail.chapters.length} 章 · ${detail.novel.encoding} · ${statusText[detail.novel.status] ?? detail.novel.status}` : "导入 TXT 后开始分析和改写"}
+              modelName={selectedProfile ? modelProfileDisplayName(selectedProfile) : "尚未选择"}
+              chapters={selectedNovelPendingSplit ? (
                 <section className="panel pending-split-panel">
                   <div>
                     <h2>尚未生成章节</h2>
@@ -3546,7 +3106,20 @@ export default function App() {
                       : undefined}
                 />
               )}
-            </div>
+              taskCenter={<TaskCenter
+                steps={workflowSteps}
+                batchControl={detail && !selectedNovelPendingSplit ? <BatchPanel batches={detail.batches} selectedBatch={selectedBatch} selectedBatchId={selectedBatchId} onSelect={setSelectedBatchId} onOpenCanon={() => setWorkspaceSection("canon")} showCanonButton={false} /> : <p className="context-empty">生成章节后可选择批次。</p>}
+                suggestedAction={!detail ? <button className="action-primary task-suggested-action" onClick={importTxt}><FilePlus2 size={17} />导入第一本小说</button> : !selectedProfileId ? <button className="action-primary task-suggested-action" onClick={() => requestActiveView("models")}><Bot size={17} />配置模型</button> : !hasCompleteNovelSettings ? <button className="action-primary task-suggested-action" onClick={openNovelSettings}><Settings size={17} />完成小说设定</button> : selectedNovelPendingSplit ? <button className="action-primary task-suggested-action" onClick={openChapterRules}><BookOpen size={17} />生成章节</button> : !batchAnalysisComplete ? <button className="action-primary task-suggested-action" onClick={() => runJob("analysis")} disabled={!selectedBatch || busy !== "" || autoRunState !== "idle"}><Play size={17} />分析当前批次</button> : !batchRewriteComplete ? <button className="action-primary task-suggested-action" onClick={() => runJob("rewrite")} disabled={!selectedBatch || busy !== "" || autoRunState !== "idle"}><RefreshCw size={17} />改写当前批次</button> : <button className="action-primary task-suggested-action" onClick={() => requestActiveView("compare")}><GitCompareArrows size={17} />进入对比</button>}
+                runningTask={(job && job.job_type !== "rewrite_ab") || autoRunState !== "idle" ? <div className={`task-running-card job-strip status-container status-${getStatusTone(job?.status ?? (autoRunState === "paused" ? "paused" : "running"))}`}>
+                  {job && <><div className="task-running-heading"><span>{jobTypeText[job.job_type] ?? job.job_type}</span><StatusBadge status={job.status} label={statusText[job.status] ?? job.status} />{["completed", "failed", "paused", "terminated", "ready", "partial"].includes(job.status) && <button className="icon-button" aria-label="关闭任务提示" onClick={() => setJob(null)}><X size={14} /></button>}</div><p>{job.message}{autoContinuePending ? ` · ${autoContinueSeconds} 秒后自动继续` : ""}{job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running" ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}` : ""}</p><div className="job-progress-row" aria-label={`任务进度 ${jobProgressPercent}%`}><div className="job-progress-bar"><div className="job-progress-fill" style={{ width: `${jobProgressPercent}%` }} /></div><strong>{jobProgressPercent}%</strong></div>{job.shard_total !== undefined && job.shard_total > 0 && <div className="task-stage-meta">第 {job.batch_index ?? "—"}/{job.batch_total ?? job.total_chapters} 批{job.phase ? ` · ${jobPhaseText[job.phase] ?? job.phase}` : ""} · 章节 {job.chapter_completed ?? 0}/{job.chapter_total ?? 0} · 分片 {job.shard_completed ?? 0}/{job.shard_total}</div>}{job.active_shards && job.active_shards.length > 0 && <div className="job-active-shards">{job.active_shards.slice(0, 3).map((shard) => <span key={`${shard.index}-${shard.phase}`}>{`${shard.index}/${shard.total} 第${shard.start_chapter}${shard.end_chapter === shard.start_chapter ? "" : `-${shard.end_chapter}`}章（${jobPhaseText[shard.phase] ?? shard.phase}）`}</span>)}{job.active_shards.length > 3 && <span>另有 {job.active_shards.length - 3} 个处理中</span>}</div>}{selectedRecoverySummary && job.status === "paused" && <div className="job-recovery-summary">{selectedRecoverySummary}</div>}</>}
+                  {autoRunState !== "idle" && <div className="task-control-row"><button className="task-control-warning" onClick={autoContinuePending ? pauseAnalyzeRewriteAll : autoRunState === "paused" ? () => void continueAnalyzeRewrite() : pauseAnalyzeRewriteAll} disabled={autoControlBusy || autoRunState === "stopping"}>{autoControlBusy ? <Loader2 className="spin" size={15} /> : autoRunState === "paused" ? <Play size={15} /> : <Pause size={15} />}{autoContinuePending ? `保持暂停 (${autoContinueSeconds}s)` : autoRunState === "paused" ? "继续" : "暂停"}</button><button className="task-control-danger" onClick={terminateAnalyzeRewriteAll} disabled={autoControlBusy}><Square size={15} />终止</button></div>}
+                </div> : undefined}
+                automaticActions={<><div className="split-button task-primary-split" ref={autoRunMenuRef}><button className="split-button-main action-primary" aria-label="一键分析改写" onClick={() => void runAnalyzeRewriteAll()} disabled={!detail || !selectedProfileId || busy !== "" || autoRunState !== "idle"}><Sparkles size={16} />全文一键</button><button className="split-button-toggle action-primary" aria-label="一键分析改写选项" aria-expanded={autoRunMenuOpen} onClick={() => setAutoRunMenuOpen((open) => !open)} disabled={!selectedBatch || busy !== "" || autoRunState !== "idle"}><ChevronDown size={15} /></button>{autoRunMenuOpen && selectedBatch && <div className="split-button-menu" role="menu"><button role="menuitem" onClick={() => void runAnalyzeRewriteAll(selectedBatch.id)}>从当前批次开始一键分析改写</button></div>}</div><button className="action-primary" aria-label="一键分析改写当前批次" onClick={() => void runAnalyzeRewriteCurrentBatch()} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}><Sparkles size={16} />当前批次一键</button></>}
+                manualActions={<><button onClick={() => runJob("analysis")} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}><Play size={16} />分析</button><div className="split-button rewrite-task-split"><button className="split-button-main" onClick={() => runJob("rewrite")} disabled={!detail || !selectedProfileId || !selectedBatch || busy !== "" || autoRunState !== "idle"}><RefreshCw size={16} />改写</button><button className="split-button-toggle" type="button" aria-label="改写选项" aria-expanded={rewriteMenuOpen} onClick={() => setRewriteMenuOpen((open) => !open)} disabled={!detail || !selectedBatch || busy !== "" || autoRunState !== "idle"}><ChevronDown size={15} /></button>{rewriteMenuOpen && <div className="split-button-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setRewriteMenuOpen(false); openRewriteAbDialog(); }}>A/B 改写当前批次</button></div>}</div></>}
+                experimentAction={<button onClick={openRewriteAbDialog} disabled={!detail || !selectedBatch || busy !== "" || autoRunState !== "idle"}><GitCompareArrows size={16} />A/B 改写当前批次</button>}
+                estimate={detail && !selectedNovelPendingSplit && jobEstimate ? <TaskEstimate estimate={jobEstimate} formatNumber={formatNumber} formatSeconds={formatSeconds} /> : undefined}
+              />}
+            />
           ) : (
             <section className="panel canon-workspace-page">
               <div className="panel-heading">
@@ -3758,19 +3331,41 @@ export default function App() {
         </Modal>
       )}
       {showQuickStart && (
-        <Modal className="quickstart-dialog" labelledBy="quickstart-title" onRequestClose={closeQuickStart}>
+        <Modal
+          className="quickstart-dialog"
+          labelledBy="quickstart-title"
+          onRequestClose={closeQuickStart}
+          initialFocusRef={quickStartTitleRef}
+        >
             <div className="quickstart-content">
-              <h2 id="quickstart-title">快速上手</h2>
-              <ol>
-                <li>点击导入 TXT，软件会自动识别章节，并按批次整理。</li>
-            <li>从侧栏进入“管理模型”，填写 Base URL、模型 ID 和 API Key，保存后点击诊断模型。</li>
-                <li>进入设定，填写主角原名、改写后姓名、身材体型、改写模式和额外要求。</li>
-                <li>建议先处理一个批次：点击分析，再点击改写，确认效果稳定后再使用一键分析改写。</li>
-            <li>当前批次可从“改写”选项启动 2–3 个模型的 A/B 改写；候选经确认应用前不会进入正式改写稿或 TXT，返回工作台后可通过侧栏“A/B 实验”继续查看候选和进度。</li>
-                <li>改写复检默认开启，会增加请求数、等待时间和 token 消耗；如需优先速度，可在设置中关闭。</li>
-                <li>一键分析改写会按批次连续处理；运行中可暂停、继续或终止，限流、网络中断或模型安全策略拦截后也可调整设置再继续。</li>
-                <li>改写完成后进入对比页面，可搜索、查看差异并导出 TXT；导出只包含已完成改写的章节。</li>
-              </ol>
+              <h2 id="quickstart-title" ref={quickStartTitleRef} tabIndex={-1}>快速上手</h2>
+              <div className="quickstart-sections">
+                <section>
+                  <h3><span>1</span>首次配置</h3>
+                  <p>在左侧全局功能栏打开“管理模型”，依次填写 Base URL 和 API Key，再点击“连接并获取模型”。选择或手工填写模型 ID 后保存，并运行“诊断模型”确认生成能力。</p>
+                  <p>打开“设置”，可在上下文栏切换“模型与复检、任务与并发、文件与数据”；改写复检默认开启，会增加请求、等待时间和 Token 消耗。</p>
+                </section>
+                <section>
+                  <h3><span>2</span>准备小说</h3>
+                  <p>回到工作台，从小说上下文栏导入 TXT。软件会识别章节并生成批次；格式特殊时，先从“章节规则”预览并调整分章。</p>
+                  <p>进入“设定”填写主角原名、改写后姓名、体型、改写模式和额外要求；“核心设定”用于所有小说共享的最高优先级改写要求。</p>
+                </section>
+                <section>
+                  <h3><span>3</span>使用任务中心</h3>
+                  <p>工作台右侧任务中心按“准备 → 分析 → 改写 → 对比”显示当前状态，并提供唯一的建议下一步。首次使用建议先处理一个批次，确认结果后再运行“全文一键”。</p>
+                  <p>任务运行时可在原位查看进度、暂停、继续或终止；任务预估始终显示请求数、耗时、并发和历史调用数据。</p>
+                </section>
+                <section>
+                  <h3><span>4</span>A/B、对比与导出</h3>
+                  <p>任务中心可启动当前批次的 2–3 模型 A/B 改写；通过全局功能栏“A/B 实验”随时返回，逐章选择后必须点击“应用所选”，正式改写稿才会更新。</p>
+                  <p>进入“对比”可搜索、检查差异、编辑正式改写稿并手动导出 TXT；导出只包含已完成且非空的正式改写章节，不包含未应用的 A/B 候选。</p>
+                </section>
+                <section>
+                  <h3><span>5</span>数据与任务恢复</h3>
+                  <p>全局功能栏左下角直接提供 AI 日志、Token 统计、帮助、检查更新和 GitHub。日志和 Token 统计相互独立，清空日志不会删除 Token 历史。</p>
+                  <p>限流、网络中断、模型安全策略拦截等非主动暂停可在调整模型或设定后继续；开启“自动继续”后会自动恢复这类暂停，但不会覆盖用户主动暂停。</p>
+                </section>
+              </div>
               <button className="dialog-primary quickstart-confirm" onClick={closeQuickStart}>
                 确定
               </button>
