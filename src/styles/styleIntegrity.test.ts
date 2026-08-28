@@ -55,8 +55,36 @@ describe("style layer integrity", () => {
 
   it("keeps danger and diff semantics independent from the brand palette", () => {
     expect(components).toMatch(/\.status-danger\s*\{[^}]*--status-color: var\(--color-danger\);/s);
+    expect(views).toMatch(/\.log-item\.error\s*\{[^}]*border-color: var\(--color-danger\);/s);
+    expect(views).toMatch(/\.log-day-tabs button\.active\s*\{[^}]*border-color: var\(--color-brand\);/s);
     expect(views).toMatch(/\.diff-removed\s*\{[^}]*background: var\(--color-danger-soft\);/s);
     expect(views).toMatch(/\.diff-added\s*\{[^}]*background: var\(--color-success-soft\);/s);
+  });
+
+  it("uses the Windows UI font stack and supported numeric weights", () => {
+    const styles = [tokens, base, layout, components, views, responsive, motion].join("\n");
+    const numericWeights = Array.from(styles.matchAll(/font-weight\s*:\s*(\d+)/g), (match) => Number(match[1]));
+    const fontFamilies = Array.from(styles.matchAll(/font-family\s*:\s*([^;]+);/g), (match) => match[1].trim());
+
+    expect(tokens).toContain(
+      '--font-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",',
+    );
+    expect(numericWeights.every((weight) => [400, 500, 600, 700].includes(weight))).toBe(true);
+    expect(fontFamilies.every((family) => family === "var(--font-ui)" || family === "inherit")).toBe(true);
+    expect(styles).not.toMatch(new RegExp(`\\b${["Int", "er"].join("")}\\b`));
+  });
+
+  it("does not reintroduce obsolete accent or plum activity colors", () => {
+    const styles = [tokens, base, layout, components, views, responsive, motion].join("\n");
+    const obsoleteAccent = ["accent", "rose"].join("-");
+    const obsoleteTooltip = ["#211c", "26"].join("");
+    const obsoleteDotBorder = ["#211a", "29"].join("");
+
+    expect(styles).not.toContain(obsoleteAccent);
+    expect(styles).not.toContain(obsoleteTooltip);
+    expect(styles).not.toContain(obsoleteDotBorder);
+    expect(layout).toMatch(/\.activity-tooltip\{[^}]*background:var\(--color-ink-muted\);/s);
+    expect(layout).toMatch(/\.activity-progress-dot,[^{]+\{[^}]*border:2px solid var\(--color-ink\);/s);
   });
 
   it("keeps quick start on a plain surface without decorative artwork", () => {

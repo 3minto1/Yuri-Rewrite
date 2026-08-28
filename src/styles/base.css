@@ -43,7 +43,7 @@ button {
   padding: 0 12px;
   box-shadow: 0 1px 0 color-mix(in srgb, var(--color-text) 4%, transparent);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 button:hover:not(:disabled) {
@@ -103,7 +103,7 @@ textarea {
 }
 
 pre {
-  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-family: inherit;
   line-height: 1.7;
   margin: 0;
   overflow: auto;
@@ -137,7 +137,7 @@ label {
   flex-direction: column;
   font-size: 12px;
   gap: 5px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .muted {

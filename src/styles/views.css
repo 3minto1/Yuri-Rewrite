@@ -23,7 +23,7 @@
 }
 
 .log-item.error {
-  border-color: var(--color-accent-rose);
+  border-color: var(--color-danger);
 }
 
 .log-item header {
@@ -52,7 +52,7 @@
 
 .log-item pre {
   color: var(--color-border);
-  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-family: inherit;
   font-size: 12px;
   line-height: 1.55;
   max-height: 150px;
@@ -86,7 +86,7 @@
   font-size: 22px;
   margin: 0;
   color: var(--color-text);
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .log-day-tabs {
@@ -109,8 +109,8 @@
 }
 
 .log-day-tabs button.active {
-  border-color: var(--color-accent-rose);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent-rose) 18%, transparent);
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-brand) 18%, transparent);
 }
 
 .log-day-tabs button strong {
@@ -505,7 +505,7 @@
   font-size: 16px;
   letter-spacing: 0;
   margin: 0;
-  font-weight: 780;
+  font-weight: 700;
 }
 
 .estimate-heading-actions {
@@ -564,7 +564,7 @@
 .estimate-grid strong {
   color: var(--color-text);
   font-size: 13px;
-  font-weight: 720;
+  font-weight: 700;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -780,7 +780,7 @@
   color: var(--color-text);
   display: block;
   font-size: 14px;
-  font-weight: 680;
+  font-weight: 700;
   line-height: 20px;
   max-width: 100%;
   min-height: 20px;
@@ -886,7 +886,7 @@
   display: flex;
   flex: 1 1 auto;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   justify-content: flex-start;
   min-height: 34px;
   min-width: 260px;
@@ -908,7 +908,7 @@
   color: var(--color-danger);
   display: inline-flex;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   justify-content: center;
   line-height: 1;
   min-width: 19px;
@@ -949,7 +949,7 @@
 .compare-quality-header p {
   color: var(--color-text-muted);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   margin: 4px 0 0;
 }
 
@@ -1290,7 +1290,7 @@
   letter-spacing: 0;
   margin: 0;
   color: var(--color-text);
-  font-weight: 760;
+  font-weight: 700;
 }
 
 .compare-pane-actions {
@@ -1374,7 +1374,7 @@
 }
 
 .rewrite-ab-model-fields legend {
-  font-weight: 750;
+  font-weight: 700;
   padding: 0 5px;
 }
 
@@ -1691,7 +1691,7 @@
 .token-overview strong {
   font-size: 22px;
   color: var(--color-ink);
-  font-weight: 780;
+  font-weight: 700;
 }
 
 .token-overview-input {
@@ -1941,7 +1941,7 @@ mark.search-match.active-search-match {
   background: #ffc65a;
   color: inherit;
   text-decoration: underline #a9650d 1px;
-  text-decoration-color: var(--color-accent-rose);
+  text-decoration-color: var(--color-brand);
 }
 
 .compare-grid {
@@ -2036,7 +2036,7 @@ mark.search-match.active-search-match {
     linear-gradient(180deg, color-mix(in srgb, var(--color-surface-raised) 70%, transparent), color-mix(in srgb, var(--color-paper) 92%, transparent)),
     var(--color-paper);
   color: var(--color-text);
-  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  font-family: inherit;
   line-height: 1.86;
   padding: 20px;
 }
@@ -2098,7 +2098,7 @@ mark.search-match.active-search-match {
   color: var(--color-brand);
   display: block;
   font-size: 9px;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: .13em;
   margin-bottom: 3px;
 }
