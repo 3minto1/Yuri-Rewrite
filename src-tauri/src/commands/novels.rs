@@ -107,7 +107,7 @@ fn restore_staged_files(staged: &StagedNovelFiles, database_error: String) -> St
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn import_txt(file_path: String, state: State<AppState>) -> Result<Novel, String> {
     let bytes = fs::read(&file_path).map_err(to_string)?;
     let (_, encoding) = decode_text(&bytes);
@@ -150,7 +150,7 @@ pub(crate) fn list_novels(state: State<AppState>) -> Result<Vec<Novel>, String> 
     Ok(rows)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn get_novel_detail(
     novel_id: String,
     state: State<AppState>,
@@ -178,7 +178,7 @@ pub(crate) fn get_novel_detail(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn delete_novel(novel_id: String, state: State<AppState>) -> Result<(), String> {
     if state.active_tasks.novel_is_active(&novel_id)?
         || state

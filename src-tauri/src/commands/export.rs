@@ -4,7 +4,7 @@ use rusqlite::params;
 use std::{fs, path::PathBuf};
 use tauri::State;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn export_novel(
     novel_id: String,
     format: String,

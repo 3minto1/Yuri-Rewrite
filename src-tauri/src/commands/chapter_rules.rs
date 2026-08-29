@@ -25,7 +25,7 @@ pub(crate) fn get_chapter_rule(
     load_chapter_rule(&conn, &novel_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn preview_chapter_rule(
     novel_id: String,
     rule: ChapterRule,
@@ -49,7 +49,7 @@ pub(crate) fn preview_chapter_rule(
     ))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn save_chapter_rule_and_split(
     novel_id: String,
     rule: ChapterRule,
@@ -90,7 +90,7 @@ pub(crate) fn save_chapter_rule_and_split(
     .ok_or_else(|| "章节规则未能随重新分章一并保存。".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn split_novel_with_builtin_rule(
     novel_id: String,
     split_long_chapters: Option<bool>,

@@ -60,7 +60,7 @@ pub(crate) fn set_auto_continue_enabled(
     load_app_settings(&conn)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn save_app_settings(
     settings: AppSettings,
     state: State<AppState>,

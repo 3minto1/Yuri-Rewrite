@@ -435,6 +435,7 @@ export default function App() {
   const batchUpdateJobIdRef = useRef("");
   const latestAppliedBatchIndexRef = useRef(-1);
   const batchUpdateNeedsFullRefreshRef = useRef(false);
+  const loadNovelRequestIdRef = useRef(0);
   const logRequestIdRef = useRef(0);
   const logDetailGenerationRef = useRef(0);
   const logDetailLoadingIdsRef = useRef(new Set<string>());
@@ -963,27 +964,31 @@ export default function App() {
   }, [refreshJobEstimate]);
 
   async function refreshAll() {
-    const [novelRows, profileRows, appSettings, recoveryRows] = await Promise.all([
-      invoke("list_novels"),
-      invoke("list_model_profiles"),
-      invoke("get_app_settings"),
-      invoke("list_auto_run_recoveries")
-    ]);
-    setNovels(novelRows);
-    setProfiles(profileRows);
-    setSettings(appSettings);
-    setAutoRunRecoveries(recoveryRows);
-    const currentProfileIsValid = selectedProfileId && profileRows.some((profile) => profile.id === selectedProfileId);
-    const savedProfileId = appSettings.selected_profile_id ?? "";
-    const savedProfileIsValid = savedProfileId && profileRows.some((profile) => profile.id === savedProfileId);
-    if (!currentProfileIsValid) {
-      setSelectedProfileId(savedProfileIsValid ? savedProfileId : profileRows[0]?.id ?? "");
-    }
-    if (!detail && novelRows[0]) {
-      const firstRecoveryNovel = recoveryRows.find((recovery) => novelRows.some((novel) => novel.id === recovery.novel_id));
-      await loadNovel(firstRecoveryNovel?.novel_id ?? novelRows[0].id, { recoveries: recoveryRows });
-    } else if (detail) {
-      applyRecoveryForNovel(detail.novel.id, recoveryRows);
+    try {
+      const [novelRows, profileRows, appSettings, recoveryRows] = await Promise.all([
+        invoke("list_novels"),
+        invoke("list_model_profiles"),
+        invoke("get_app_settings"),
+        invoke("list_auto_run_recoveries")
+      ]);
+      setNovels(novelRows);
+      setProfiles(profileRows);
+      setSettings(appSettings);
+      setAutoRunRecoveries(recoveryRows);
+      const currentProfileIsValid = selectedProfileId && profileRows.some((profile) => profile.id === selectedProfileId);
+      const savedProfileId = appSettings.selected_profile_id ?? "";
+      const savedProfileIsValid = savedProfileId && profileRows.some((profile) => profile.id === savedProfileId);
+      if (!currentProfileIsValid) {
+        setSelectedProfileId(savedProfileIsValid ? savedProfileId : profileRows[0]?.id ?? "");
+      }
+      if (!detail && novelRows[0]) {
+        const firstRecoveryNovel = recoveryRows.find((recovery) => novelRows.some((novel) => novel.id === recovery.novel_id));
+        await loadNovel(firstRecoveryNovel?.novel_id ?? novelRows[0].id, { recoveries: recoveryRows });
+      } else if (detail) {
+        applyRecoveryForNovel(detail.novel.id, recoveryRows);
+      }
+    } catch (error) {
+      showNotice(`启动加载失败：${String(error)}`, 15000);
     }
   }
 
@@ -1012,19 +1017,22 @@ export default function App() {
     }
   }
 
-  async function loadNovel(
+  function applyNovelDetail(
     novelId: string,
-    options: { preserveBatchId?: string; preserveChapterId?: string; recoveries?: AutoRunRecovery[] } = {}
+    next: NovelDetail,
+    options: {
+      preserveBatchId?: string;
+      preserveChapterId?: string;
+      recoveries?: AutoRunRecovery[];
+      applyRecovery?: boolean;
+    } = {}
   ) {
-    if ((autoRunState === "running" || autoRunState === "stopping") && detail?.novel.id !== novelId) {
-      showNotice("当前任务运行或暂停中，不能切换小说。请先完成或终止任务。");
-      return;
-    }
-    const next = await invoke("get_novel_detail", { novelId });
     batchUpdateNeedsFullRefreshRef.current = false;
     latestAppliedBatchIndexRef.current = -1;
     setDetail(next);
-    const recovery = (options.recoveries ?? autoRunRecoveries).find((item) => item.novel_id === novelId);
+    const recovery = options.applyRecovery === false
+      ? undefined
+      : (options.recoveries ?? autoRunRecoveries).find((item) => item.novel_id === novelId);
     const recoveryBatchId = recovery?.job?.job_type === "auto_batch" ? recovery.summary?.batch_id : undefined;
     const nextChapterId =
       options.preserveChapterId && next.chapters.some((chapter) => chapter.id === options.preserveChapterId)
@@ -1053,10 +1061,34 @@ export default function App() {
       : emptyNovelSettings;
     setNovelSettingsDraft(nextSettingsDraft);
     setSavedNovelSettingsDraft(nextSettingsDraft);
+    if (options.applyRecovery !== false) {
+      applyRecoveryForNovel(novelId, options.recoveries);
+    }
+  }
+
+  async function loadNovel(
+    novelId: string,
+    options: { preserveBatchId?: string; preserveChapterId?: string; recoveries?: AutoRunRecovery[] } = {}
+  ) {
+    if ((autoRunState === "running" || autoRunState === "stopping") && detail?.novel.id !== novelId) {
+      showNotice("当前任务运行或暂停中，不能切换小说。请先完成或终止任务。");
+      return;
+    }
+    const requestId = ++loadNovelRequestIdRef.current;
+    let next: NovelDetail;
+    try {
+      next = await invoke("get_novel_detail", { novelId });
+    } catch (error) {
+      if (requestId === loadNovelRequestIdRef.current) {
+        showNotice(`加载小说失败：${String(error)}`);
+      }
+      return;
+    }
+    if (requestId !== loadNovelRequestIdRef.current) return;
+    applyNovelDetail(novelId, next, options);
     setOpenNovelMenuId("");
     setWorkspaceSection("main");
     setActiveView("workspace");
-    applyRecoveryForNovel(novelId, options.recoveries);
   }
 
   async function drainNovelBatchUpdates() {
@@ -1094,6 +1126,25 @@ export default function App() {
           setDetail(next);
         } catch {
           batchUpdateNeedsFullRefreshRef.current = true;
+        }
+      }
+      if (batchUpdateNeedsFullRefreshRef.current) {
+        batchUpdateNeedsFullRefreshRef.current = false;
+        const currentNovelId = detailRef.current?.novel.id;
+        if (currentNovelId) {
+          try {
+            const next = await invoke("get_novel_detail", { novelId: currentNovelId });
+            if (detailRef.current?.novel.id === currentNovelId) {
+              applyNovelDetail(currentNovelId, next, {
+                preserveBatchId: selectedBatchIdRef.current,
+                preserveChapterId: selectedChapterIdRef.current,
+                applyRecovery: false
+              });
+            }
+          } catch (error) {
+            batchUpdateNeedsFullRefreshRef.current = true;
+            showNotice(`章节增量更新失败，且全量刷新也未成功：${String(error)}`);
+          }
         }
       }
     } finally {

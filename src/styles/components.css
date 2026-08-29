@@ -1202,12 +1202,12 @@
 .dialog-danger {
   background: var(--color-danger);
   border-color: var(--color-danger);
-  color: #fff;
+  color: var(--color-danger-contrast);
 }
 
 .dialog-danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-danger) 88%, var(--color-text));
-  border-color: color-mix(in srgb, var(--color-danger) 88%, var(--color-text));
+  background: color-mix(in srgb, var(--color-danger) 88%, var(--color-danger-contrast));
+  border-color: color-mix(in srgb, var(--color-danger) 88%, var(--color-danger-contrast));
 }
 
 .delete-novel-dialog {

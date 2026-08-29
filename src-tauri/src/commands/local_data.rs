@@ -232,7 +232,7 @@ fn validate_deletion_request(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn delete_local_data(
     confirmation_phrase: String,
     state: State<AppState>,

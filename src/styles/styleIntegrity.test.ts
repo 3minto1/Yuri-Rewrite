@@ -130,6 +130,12 @@ describe("style layer integrity", () => {
     expect(layout).toMatch(/\.workspace-chapter-surface\s*\{[^}]*background: var\(--color-content\);/s);
   });
 
+  it("keeps destructive dialogs readable in both themes", () => {
+    expect(tokens).toContain("--color-danger-contrast: #ffffff;");
+    expect(tokens).toMatch(/:root\[data-theme="dark"\]\s*\{[^}]*--color-danger-contrast: #2b120c;/s);
+    expect(components).toMatch(/\.dialog-danger\s*\{[^}]*color: var\(--color-danger-contrast\);/s);
+  });
+
   it("keeps status badges quiet with color only in the dot and abnormal text", () => {
     expect(components).toMatch(/\.status-badge\s*\{[^}]*background: transparent;[^}]*border: 0;/s);
     expect(components).toMatch(/\.status-badge-dot\s*\{[^}]*background: var\(--status-color, var\(--color-text-muted\)\);/s);

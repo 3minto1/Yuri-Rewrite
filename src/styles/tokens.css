@@ -49,6 +49,7 @@
   --color-warning-soft: #f3e9cd;
   --color-danger: #a53c34;
   --color-danger-soft: #f4e0d8;
+  --color-danger-contrast: #ffffff;
   --color-neutral: #7c7260;
   --color-neutral-soft: #ece7d7;
   --color-highlight: #f0dc96;
@@ -121,6 +122,7 @@
   --color-warning-soft: #352c15;
   --color-danger: #d68a7c;
   --color-danger-soft: #3b251e;
+  --color-danger-contrast: #2b120c;
   --color-neutral: #a59b85;
   --color-neutral-soft: #322d21;
   --color-highlight: #554620;
