@@ -517,10 +517,8 @@ pub(crate) fn build_compact_rewrite_rule_pack(settings: &NovelSettings) -> Strin
 
 硬性规则：
 {}
-
-{}
-
-8. {}"#,
+8. {}
+9. {}"#,
         setting_lines.join("\n"),
         render_rewrite_hard_rules(),
         CLEANUP_RULE,
