@@ -9,7 +9,6 @@ import {
   FolderOpen,
   Gauge,
   GitCompareArrows,
-  Library,
   Loader2,
   MoreHorizontal,
   Pause,
@@ -635,6 +634,17 @@ export default function App() {
       window.localStorage.setItem(themePreferenceKey, theme);
     } catch {
       // Theme is a local display preference; storage failures should not block the app.
+    }
+    // Keep the native window chrome (title bar) in the same theme as the content.
+    if (!browserMockEnabled) {
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          await getCurrentWindow().setTheme(theme);
+        } catch {
+          // Theme sync is cosmetic; environments without a window (browser/dev) can ignore it.
+        }
+      })();
     }
   }, [theme]);
 
@@ -2778,7 +2788,7 @@ export default function App() {
       >
         {browserMockEnabled && <span className="browser-mock-badge" title="使用内存测试数据，不会访问本地数据库或模型服务">浏览器测试模式</span>}
         {contextKind === "novel" && <>
-          <button className="context-import-button action-primary" onClick={importTxt} disabled={busy === "import" || processingTaskActive}>
+          <button className="context-import-button secondary-button" onClick={importTxt} disabled={busy === "import" || processingTaskActive}>
             {busy === "import" ? <Loader2 className="spin" size={17} /> : <FilePlus2 size={17} />}导入 TXT
           </button>
           <section className="context-section context-novel-section">
@@ -2798,19 +2808,19 @@ export default function App() {
           <section className="context-section">
             <div className="context-section-label">改写模型</div>
             <ModelProfiles profiles={profiles} selectedProfileId={selectedProfileId} menuOpen={openModelMenu} processing={adjustableWhilePaused} busy={busy} onSelect={selectModelProfile} onMenuOpenChange={setOpenModelMenu} onDelete={deleteSelectedModelProfile} />
-            <button className="context-link" onClick={() => requestActiveView("models")}><Bot size={16} />打开模型列表</button>
+            <button className="context-link" onClick={() => requestActiveView("models")}>打开模型列表</button>
           </section>
           <section className="context-section context-tools">
             <div className="context-section-label">小说工具</div>
-            <button className={activeView === "workspace" && workspaceSection === "main" ? "context-link active" : "context-link"} onClick={() => requestActiveView("workspace", () => setWorkspaceSection("main"))} disabled={!detail}><BookOpen size={16} />章节</button>
-            <button className={activeView === "workspace" && workspaceSection === "canon" ? "context-link active" : "context-link"} onClick={() => requestActiveView("workspace", () => setWorkspaceSection("canon"))} disabled={!detail}><Library size={16} />一致性资产</button>
-            <button className={activeView === "novel-settings" ? "context-link active" : "context-link"} onClick={openNovelSettings} disabled={!detail}><Settings size={16} />设定</button>
-            <button className={activeView === "core-settings" ? "context-link active" : "context-link"} onClick={() => requestActiveView("core-settings")}><Sparkles size={16} />核心设定</button>
-            <button className={activeView === "chapter-rules" ? "context-link active" : "context-link"} onClick={openChapterRules} disabled={!detail}><BookOpen size={16} />章节规则</button>
+            <button className={activeView === "workspace" && workspaceSection === "main" ? "context-link active" : "context-link"} onClick={() => requestActiveView("workspace", () => setWorkspaceSection("main"))} disabled={!detail}>章节</button>
+            <button className={activeView === "workspace" && workspaceSection === "canon" ? "context-link active" : "context-link"} onClick={() => requestActiveView("workspace", () => setWorkspaceSection("canon"))} disabled={!detail}>一致性资产</button>
+            <button className={activeView === "novel-settings" ? "context-link active" : "context-link"} onClick={openNovelSettings} disabled={!detail}>设定</button>
+            <button className={activeView === "core-settings" ? "context-link active" : "context-link"} onClick={() => requestActiveView("core-settings")}>核心设定</button>
+            <button className={activeView === "chapter-rules" ? "context-link active" : "context-link"} onClick={openChapterRules} disabled={!detail}>章节规则</button>
           </section>
         </>}
         {contextKind === "models" && <section className="context-section context-model-list">
-          <button className="context-import-button action-primary" onClick={createNewModelProfile} disabled={adjustableWhilePaused}><Bot size={16} />新建模型</button>
+          <button className="context-import-button secondary-button" onClick={createNewModelProfile} disabled={adjustableWhilePaused}><Bot size={16} />新建模型</button>
           <div className="context-section-label"><span>配置列表</span><small>{profiles.length}</small></div>
           <div className="context-list-scroll">
             {profiles.map((profile) => <button key={profile.id} className={profile.id === selectedProfileId ? "context-list-item active" : "context-list-item"} onClick={() => selectModelProfile(profile.id)} disabled={adjustableWhilePaused}><strong>{modelProfileDisplayName(profile)}</strong><small>{profile.provider}</small></button>)}
@@ -3107,8 +3117,7 @@ export default function App() {
                 />
               )}
               taskCenter={<TaskCenter
-                steps={workflowSteps}
-                batchControl={detail && !selectedNovelPendingSplit ? <BatchPanel batches={detail.batches} selectedBatch={selectedBatch} selectedBatchId={selectedBatchId} onSelect={setSelectedBatchId} onOpenCanon={() => setWorkspaceSection("canon")} showCanonButton={false} /> : <p className="context-empty">生成章节后可选择批次。</p>}
+                steps={workflowSteps}                batchControl={detail && !selectedNovelPendingSplit ? <BatchPanel batches={detail.batches} selectedBatch={selectedBatch} selectedBatchId={selectedBatchId} onSelect={setSelectedBatchId} onOpenCanon={() => setWorkspaceSection("canon")} showCanonButton={false} /> : <p className="context-empty">生成章节后可选择批次。</p>}
                 suggestedAction={!detail ? <button className="action-primary task-suggested-action" onClick={importTxt}><FilePlus2 size={17} />导入第一本小说</button> : !selectedProfileId ? <button className="action-primary task-suggested-action" onClick={() => requestActiveView("models")}><Bot size={17} />配置模型</button> : !hasCompleteNovelSettings ? <button className="action-primary task-suggested-action" onClick={openNovelSettings}><Settings size={17} />完成小说设定</button> : selectedNovelPendingSplit ? <button className="action-primary task-suggested-action" onClick={openChapterRules}><BookOpen size={17} />生成章节</button> : !batchAnalysisComplete ? <button className="action-primary task-suggested-action" onClick={() => runJob("analysis")} disabled={!selectedBatch || busy !== "" || autoRunState !== "idle"}><Play size={17} />分析当前批次</button> : !batchRewriteComplete ? <button className="action-primary task-suggested-action" onClick={() => runJob("rewrite")} disabled={!selectedBatch || busy !== "" || autoRunState !== "idle"}><RefreshCw size={17} />改写当前批次</button> : <button className="action-primary task-suggested-action" onClick={() => requestActiveView("compare")}><GitCompareArrows size={17} />进入对比</button>}
                 runningTask={(job && job.job_type !== "rewrite_ab") || autoRunState !== "idle" ? <div className={`task-running-card job-strip status-container status-${getStatusTone(job?.status ?? (autoRunState === "paused" ? "paused" : "running"))}`}>
                   {job && <><div className="task-running-heading"><span>{jobTypeText[job.job_type] ?? job.job_type}</span><StatusBadge status={job.status} label={statusText[job.status] ?? job.status} />{["completed", "failed", "paused", "terminated", "ready", "partial"].includes(job.status) && <button className="icon-button" aria-label="关闭任务提示" onClick={() => setJob(null)}><X size={14} /></button>}</div><p>{job.message}{autoContinuePending ? ` · ${autoContinueSeconds} 秒后自动继续` : ""}{job.job_type === "auto" && autoRemainingSeconds !== null && job.status === "running" ? ` · 预计剩余 ${formatSeconds(autoRemainingSeconds)}` : ""}</p><div className="job-progress-row" aria-label={`任务进度 ${jobProgressPercent}%`}><div className="job-progress-bar"><div className="job-progress-fill" style={{ width: `${jobProgressPercent}%` }} /></div><strong>{jobProgressPercent}%</strong></div>{job.shard_total !== undefined && job.shard_total > 0 && <div className="task-stage-meta">第 {job.batch_index ?? "—"}/{job.batch_total ?? job.total_chapters} 批{job.phase ? ` · ${jobPhaseText[job.phase] ?? job.phase}` : ""} · 章节 {job.chapter_completed ?? 0}/{job.chapter_total ?? 0} · 分片 {job.shard_completed ?? 0}/{job.shard_total}</div>}{job.active_shards && job.active_shards.length > 0 && <div className="job-active-shards">{job.active_shards.slice(0, 3).map((shard) => <span key={`${shard.index}-${shard.phase}`}>{`${shard.index}/${shard.total} 第${shard.start_chapter}${shard.end_chapter === shard.start_chapter ? "" : `-${shard.end_chapter}`}章（${jobPhaseText[shard.phase] ?? shard.phase}）`}</span>)}{job.active_shards.length > 3 && <span>另有 {job.active_shards.length - 3} 个处理中</span>}</div>}{selectedRecoverySummary && job.status === "paused" && <div className="job-recovery-summary">{selectedRecoverySummary}</div>}</>}
@@ -3119,6 +3128,25 @@ export default function App() {
                 experimentAction={<button onClick={openRewriteAbDialog} disabled={!detail || !selectedBatch || busy !== "" || autoRunState !== "idle"}><GitCompareArrows size={16} />A/B 改写当前批次</button>}
                 estimate={detail && !selectedNovelPendingSplit && jobEstimate ? <TaskEstimate estimate={jobEstimate} formatNumber={formatNumber} formatSeconds={formatSeconds} /> : undefined}
               />}
+              statusBar={<>
+                <span>{selectedProfile ? modelProfileDisplayName(selectedProfile) : "未选择模型"}</span>
+                <i className="workspace-status-sep" aria-hidden="true" />
+                <span>{selectedBatch ? `第 ${selectedBatch.batch_index} 批` : "未选择批次"}</span>
+                <i className="workspace-status-sep" aria-hidden="true" />
+                <span>{jobEstimate ? `并发 ${jobEstimate.parallelism} · 复检 ${jobEstimate.review_enabled ? "开" : "关"}` : "暂无预估"}</span>
+                <i className="workspace-status-spacer" aria-hidden="true" />
+                <span className={`workspace-status-state tone-${getStatusTone(autoRunState !== "idle" ? (autoRunState === "paused" ? "paused" : "running") : job?.status ?? "idle")}`}>
+                  {autoRunState === "running"
+                    ? "一键任务运行中"
+                    : autoRunState === "paused"
+                      ? "一键任务已暂停"
+                      : autoRunState === "stopping"
+                        ? "正在停止任务"
+                        : job
+                          ? `${jobTypeText[job.job_type] ?? "任务"} · ${statusText[job.status] ?? job.status}`
+                          : "就绪"}
+                </span>
+              </>}
             />
           ) : (
             <section className="panel canon-workspace-page">

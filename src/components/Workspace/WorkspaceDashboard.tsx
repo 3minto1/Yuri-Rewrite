@@ -6,9 +6,10 @@ type WorkspaceDashboardProps = {
   modelName: string;
   chapters: ReactNode;
   taskCenter: ReactNode;
+  statusBar: ReactNode;
 };
 
-export function WorkspaceDashboard({ title, meta, modelName, chapters, taskCenter }: WorkspaceDashboardProps) {
+export function WorkspaceDashboard({ title, meta, modelName, chapters, taskCenter, statusBar }: WorkspaceDashboardProps) {
   return (
     <div className="workspace-dashboard">
       <header className="workspace-command-header topbar">
@@ -19,6 +20,7 @@ export function WorkspaceDashboard({ title, meta, modelName, chapters, taskCente
         <div className="workspace-chapter-surface">{chapters}</div>
         {taskCenter}
       </div>
+      <footer className="workspace-status-bar">{statusBar}</footer>
     </div>
   );
 }

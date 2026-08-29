@@ -1,4 +1,4 @@
-/* base — split from styles.css (visual redesign P2). Do not edit styles.css directly; edit the layer files. */
+/* base — document rhythm, quiet controls, focus and scrollbar polish. */
 
 * {
   box-sizing: border-box;
@@ -8,12 +8,18 @@ body {
   margin: 0;
   min-width: 1040px;
   min-height: 700px;
-  background:
-    radial-gradient(circle at 78% -12%, color-mix(in srgb, var(--color-brand-2) 8%, transparent), transparent 34%),
-    linear-gradient(180deg, color-mix(in srgb, var(--color-surface) 58%, transparent), var(--color-bg)),
-    var(--color-bg);
+  background: var(--color-bg);
   color: var(--color-text);
-  line-height: 1.55;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 button,
@@ -22,11 +28,10 @@ select,
 textarea {
   font: inherit;
   transition:
-    background-color 140ms ease,
-    border-color 140ms ease,
-    box-shadow 140ms ease,
-    color 140ms ease,
-    transform 140ms ease;
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
 }
 
 button {
@@ -39,30 +44,26 @@ button {
   display: inline-flex;
   gap: 8px;
   justify-content: center;
-  min-height: 36px;
-  padding: 0 12px;
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--color-text) 4%, transparent);
+  min-height: 30px;
+  padding: 0 11px;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 button:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--color-brand-2) 34%, var(--color-border));
-  background: color-mix(in srgb, var(--color-brand-2-soft) 54%, var(--color-surface-raised));
-  box-shadow: 0 5px 14px color-mix(in srgb, var(--color-brand-2) 10%, transparent);
-  transform: translateY(-1px);
+  background: var(--color-surface-muted);
+  border-color: var(--color-border-strong);
 }
 
 button:active:not(:disabled) {
-  box-shadow: none;
-  transform: translateY(0);
+  background: var(--color-surface-subtle);
 }
 
 button:disabled {
   color: var(--color-text-disabled);
   cursor: not-allowed;
-  opacity: 0.64;
-  transform: none;
+  opacity: 0.6;
 }
 
 .sr-only {
@@ -84,22 +85,27 @@ textarea {
   border-radius: var(--radius-control);
   background: var(--color-surface-raised);
   color: var(--color-text);
-  min-height: 36px;
-  padding: 8px 10px;
+  min-height: 34px;
+  padding: 7px 10px;
   width: 100%;
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text) 4%, transparent);
   font-size: 13px;
 }
 
 input:hover:not(:disabled),
 select:hover:not(:disabled),
 textarea:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--color-brand-2) 28%, var(--color-border));
+  border-color: var(--color-border-strong);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-disabled);
 }
 
 textarea {
   min-height: 92px;
   resize: vertical;
+  line-height: 1.7;
 }
 
 pre {
@@ -115,10 +121,9 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  border-color: color-mix(in srgb, var(--color-brand) 68%, var(--color-border));
+  border-color: color-mix(in srgb, var(--color-brand) 55%, var(--color-border));
   outline: none;
-  outline-offset: 1px;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 20%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 16%, transparent);
 }
 
 .form-grid {
@@ -137,7 +142,13 @@ label {
   flex-direction: column;
   font-size: 12px;
   gap: 5px;
-  font-weight: 600;
+  font-weight: 500;
+}
+
+label input,
+label select,
+label textarea {
+  margin-top: 5px;
 }
 
 .muted {
@@ -149,21 +160,22 @@ label {
   animation: spin 0.9s linear infinite;
 }
 
-/* Neutral visual refresh: keeps the existing desktop workflow while tightening the product surface. */
+/* Thin, quiet scrollbars everywhere. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
 
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
 
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 999px;
+}
 
-
-
-
-
-
-
-
-
-
-label input,
-label select,
-label textarea {
-  margin-top: 5px;
+*::-webkit-scrollbar-track {
+  background: transparent;
 }

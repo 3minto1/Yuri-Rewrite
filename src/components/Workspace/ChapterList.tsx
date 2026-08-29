@@ -2,10 +2,10 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import { List, useListRef, type RowComponentProps } from "react-window";
 import type { Chapter } from "../../types";
 import { ScrollablePanel } from "../common/ScrollablePanel";
-import { StatusBadge } from "../common/StatusBadge";
+import { getStatusTone } from "../common/StatusBadge";
 
 export const CHAPTER_VIRTUALIZATION_THRESHOLD = 300;
-const CHAPTER_ROW_HEIGHT = 52;
+const CHAPTER_ROW_HEIGHT = 40;
 
 type ChapterListProps = {
   chapters: Chapter[];
@@ -39,7 +39,8 @@ const ChapterButton = memo(function ChapterButton({
   titleDrafts,
   onTitleDraftChange
 }: ChapterButtonProps) {
-  const title = `${chapter.index}. ${displayTitle(chapter)}`;
+  const fullTitle = `${chapter.index}. ${displayTitle(chapter)}`;
+  const stateLabel = `分析 ${statusText[chapter.analysis_status] ?? chapter.analysis_status}，改写 ${statusText[chapter.rewrite_status] ?? chapter.rewrite_status}`;
   if (editing) {
     return (
       <div className={selectedChapterId === chapter.id ? "chapter-item chapter-item-editing active" : "chapter-item chapter-item-editing"}>
@@ -62,18 +63,14 @@ const ChapterButton = memo(function ChapterButton({
       ref={buttonRef}
       className={selectedChapterId === chapter.id ? "chapter-item active" : "chapter-item"}
       onClick={() => onSelect(chapter.id)}
-      title={title}
+      title={fullTitle}
+      aria-label={`${fullTitle}，${stateLabel}`}
     >
-      <span className="chapter-title">{title}</span>
-      <span className="chapter-status-row">
-        <StatusBadge
-          status={chapter.analysis_status}
-          label={`分析 ${statusText[chapter.analysis_status] ?? chapter.analysis_status}`}
-        />
-        <StatusBadge
-          status={chapter.rewrite_status}
-          label={`改写 ${statusText[chapter.rewrite_status] ?? chapter.rewrite_status}`}
-        />
+      <span className="chapter-title-index" aria-hidden="true">{chapter.index}.</span>
+      <span className="chapter-title">{displayTitle(chapter)}</span>
+      <span className="chapter-state" aria-hidden="true">
+        <i className={`chapter-state-dot is-${getStatusTone(chapter.analysis_status)}`} />
+        <i className={`chapter-state-dot is-${getStatusTone(chapter.rewrite_status)}`} />
       </span>
     </button>
   );

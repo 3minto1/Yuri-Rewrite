@@ -69,7 +69,7 @@
 }
 
 @media (max-width: 900px) {
-  .app-shell { grid-template-columns: 64px 208px minmax(0, 1fr); }
-  .app-shell.sidebar-collapsed { grid-template-columns: 64px 0 minmax(0, 1fr); }
+  .app-shell { grid-template-columns: 48px 208px minmax(0, 1fr); }
+  .app-shell.sidebar-collapsed { grid-template-columns: 48px 0 minmax(0, 1fr); }
   .workspace-dashboard-body { grid-template-columns: minmax(0, 1fr) 272px; }
 }

@@ -23,10 +23,10 @@ describe("ChapterList", () => {
 
   it("keeps the normal DOM list below the threshold", () => {
     const rows = chapters(CHAPTER_VIRTUALIZATION_THRESHOLD - 1);
-    render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={vi.fn()} displayTitle={displayTitle} statusText={statusText} />);
+    const { container } = render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={vi.fn()} displayTitle={displayTitle} statusText={statusText} />);
     expect(screen.getAllByRole("button").filter((button) => button.className.includes("chapter-item"))).toHaveLength(rows.length);
-    expect(screen.getAllByText("分析 待处理")[0].closest(".status-badge")).toHaveClass("status-neutral");
-    expect(screen.getAllByText("改写 待处理")[0].closest(".status-badge")).toHaveClass("status-neutral");
+    expect(container.querySelectorAll(".chapter-state")).toHaveLength(rows.length);
+    expect(screen.getAllByRole("button", { name: /分析 待处理，改写 待处理/ })).toHaveLength(rows.length);
   });
 
   it("shows independent analysis and rewrite status tones", () => {
@@ -37,26 +37,28 @@ describe("ChapterList", () => {
     }];
     render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={vi.fn()} displayTitle={displayTitle} statusText={{ ...statusText, running: "进行中" }} />);
 
-    expect(screen.getByText("分析 完成").closest(".status-badge")).toHaveClass("status-success");
-    expect(screen.getByText("改写 进行中").closest(".status-badge")).toHaveClass("status-progress");
-    expect(screen.getByRole("button", { name: /第1章/ })).toHaveAttribute("title", "1. 第1章");
+    const row = screen.getByRole("button", { name: /1\. 第1章，分析 完成，改写 进行中/ });
+    const dots = row.querySelectorAll(".chapter-state-dot");
+    expect(dots[0]).toHaveClass("is-success");
+    expect(dots[1]).toHaveClass("is-progress");
+    expect(row).toHaveAttribute("title", "1. 第1章");
   });
 
   it("virtualizes at the threshold and for very large novels", () => {
     const rows = chapters(3_000);
     render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={vi.fn()} displayTitle={displayTitle} statusText={statusText} />);
     expect(screen.getAllByRole("button").length).toBeLessThan(CHAPTER_VIRTUALIZATION_THRESHOLD);
-    expect(screen.getByText("1. 第1章")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^1\. 第1章，/ })).toBeInTheDocument();
   });
 
   it("selects rows and scrolls a distant selected chapter into view", async () => {
     const onSelect = vi.fn();
     const rows = chapters(3_000);
     const view = render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={onSelect} displayTitle={displayTitle} statusText={statusText} />);
-    fireEvent.click(screen.getByText("1. 第1章"));
+    fireEvent.click(screen.getByRole("button", { name: /^1\. 第1章，/ }));
     expect(onSelect).toHaveBeenCalledWith("chapter-1");
     view.rerender(<ChapterList chapters={rows} selectedChapterId="chapter-3000" onSelect={onSelect} displayTitle={displayTitle} statusText={statusText} />);
-    await waitFor(() => expect(screen.getByText("3000. 第3000章")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^3000\. 第3000章，/ })).toBeInTheDocument());
   });
 
   it("filters to a chapter by number and selects it with Enter", () => {
@@ -65,7 +67,7 @@ describe("ChapterList", () => {
     render(<ChapterList chapters={rows} selectedChapterId="chapter-1" onSelect={onSelect} displayTitle={displayTitle} statusText={statusText} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "搜索章节" }), { target: { value: "250" } });
-    expect(screen.getByText((_, node) => node?.textContent === "250. 第250章")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^250\. 第250章，/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "跳转" })).not.toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("textbox", { name: "搜索章节" }), { key: "Enter" });
 
@@ -96,9 +98,9 @@ describe("ChapterList", () => {
     expect(onRenameChapter).toHaveBeenCalledTimes(1);
   });
 
-  it("hides analysis and rewrite status badges while editing titles", () => {
+  it("hides analysis and rewrite status dots while editing titles", () => {
     const rows = chapters(2);
-    render(
+    const { container } = render(
       <ChapterList
         chapters={rows}
         selectedChapterId="chapter-1"
@@ -109,12 +111,10 @@ describe("ChapterList", () => {
       />
     );
 
-    expect(screen.getAllByText("分析 待处理")).toHaveLength(2);
-    expect(screen.getAllByText("改写 待处理")).toHaveLength(2);
+    expect(container.querySelectorAll(".chapter-state")).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "编辑" }));
 
-    expect(screen.queryByText("分析 待处理")).not.toBeInTheDocument();
-    expect(screen.queryByText("改写 待处理")).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".chapter-state")).toHaveLength(0);
     expect(screen.getByRole("textbox", { name: "第 1 章名称" })).toHaveValue("第1章");
   });
 

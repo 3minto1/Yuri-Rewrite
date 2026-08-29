@@ -1,18 +1,19 @@
 import {
-  Bot,
-  ChartNoAxesCombined,
-  ClipboardList,
-  GitCompareArrows,
+  BookOpenText,
+  ChartLine,
+  Columns2,
+  Cpu,
+  FlaskConical,
   Github,
   HelpCircle,
-  House,
   Loader2,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
-  Settings,
-  Sparkles,
+  ScrollText,
+  SlidersHorizontal,
+  SquarePen,
   Sun
 } from "lucide-react";
 import { forwardRef } from "react";
@@ -65,49 +66,49 @@ export function ActivityRail(props: ActivityRailProps) {
   return (
     <nav className="activity-rail" aria-label="全局功能">
       <RailButton label="Yuri Rewrite 主页" className="activity-brand" onClick={() => navigate("workspace")}>
-        <Sparkles size={22} />
+        <BookOpenText size={18} />
       </RailButton>
       <div className="activity-rail-primary">
         <RailButton label="工作台" active={props.activeView === "workspace"} onClick={() => navigate("workspace")}>
-          <House size={20} />
+          <SquarePen size={18} />
           {props.taskProgress !== undefined && <span className="activity-progress-dot" aria-hidden="true" title={`任务进度 ${props.taskProgress}%`} />}
         </RailButton>
         <RailButton label="对比" active={props.activeView === "compare"} disabled={!props.canCompare} onClick={() => navigate("compare")}>
-          <GitCompareArrows size={20} />
+          <Columns2 size={18} />
         </RailButton>
         <RailButton label={props.rewriteAbProgress ? `A/B 实验，${props.rewriteAbRunning ? "运行中，" : ""}候选 ${props.rewriteAbProgress}` : "A/B 实验"} active={props.activeView === "rewrite-ab"} disabled={!props.canOpenRewriteAb} onClick={props.onOpenRewriteAb}>
-          {props.rewriteAbBusy ? <Loader2 className="spin" size={20} /> : <GitCompareArrows size={20} />}
+          {props.rewriteAbBusy ? <Loader2 className="spin" size={18} /> : <FlaskConical size={18} />}
           {props.rewriteAbProgress && <span className="activity-mini-count">{props.rewriteAbProgress}</span>}
         </RailButton>
         <RailButton label="管理模型" active={props.activeView === "models"} onClick={() => navigate("models")}>
-          <Bot size={20} />
+          <Cpu size={18} />
         </RailButton>
         <RailButton label="设置" active={props.activeView === "settings"} onClick={() => navigate("settings")}>
-          <Settings size={20} />
+          <SlidersHorizontal size={18} />
         </RailButton>
       </div>
       <div className="activity-rail-secondary">
         <RailButton label={props.contextCollapsed ? "展开侧栏" : "折叠侧栏"} onClick={props.onToggleContext}>
-          {props.contextCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          {props.contextCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
         </RailButton>
         <RailButton label={props.theme === "dark" ? "日间模式" : "夜间模式"} aria-pressed={props.theme === "dark"} onClick={props.onToggleTheme}>
-          {props.theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}
+          {props.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
         </RailButton>
         <RailButton label="日志" active={props.activeView === "logs"} onClick={() => navigate("logs")}>
-          <ClipboardList size={20} />
+          <ScrollText size={17} />
         </RailButton>
         <RailButton label="Token统计" active={props.activeView === "token-stats"} onClick={props.onOpenTokenStats} disabled={props.systemBusy}>
-          <ChartNoAxesCombined size={20} />
+          <ChartLine size={17} />
         </RailButton>
         <RailButton label="帮助" onClick={props.onOpenHelp}>
-          <HelpCircle size={20} />
+          <HelpCircle size={17} />
         </RailButton>
         <RailButton label="检查更新" onClick={props.onCheckUpdates} disabled={props.systemBusy}>
-          {props.updateBusy ? <Loader2 className="spin" size={20} /> : <RefreshCw size={20} />}
+          {props.updateBusy ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
           {props.hasAvailableUpdate && <span className="activity-update-dot" aria-label="发现新版本" />}
         </RailButton>
         <RailButton label="GitHub" onClick={props.onOpenGithub} disabled={props.systemBusy}>
-          <Github size={20} />
+          <Github size={17} />
         </RailButton>
       </div>
     </nav>
