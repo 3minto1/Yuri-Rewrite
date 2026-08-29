@@ -1,4 +1,5 @@
 use super::common::*;
+use super::rules::split_dynamic_context;
 use crate::domain::{ModelOutput, ModelProfile};
 use crate::model_support::ModelResponseError;
 use reqwest::{Client, RequestBuilder};
@@ -18,11 +19,26 @@ pub(crate) async fn generate_anthropic(
     let endpoint = anthropic_messages_endpoint(base);
     let output_limit =
         output_limit_override.unwrap_or(if prefer_json_output { 16_384 } else { 65_536 });
+    let (static_prefix, dynamic_suffix) = split_dynamic_context(user);
+    let user_content = if dynamic_suffix.is_empty() {
+        json!(user)
+    } else {
+        // The static rule prefix is identical across every shard of a novel;
+        // marking it as a cache breakpoint lets the provider reuse it.
+        json!([
+            {
+                "type": "text",
+                "text": static_prefix,
+                "cache_control": {"type": "ephemeral"}
+            },
+            {"type": "text", "text": dynamic_suffix}
+        ])
+    };
     let mut payload = json!({
         "model": model,
         "max_tokens": output_limit,
         "system": system,
-        "messages": [{"role": "user", "content": user}]
+        "messages": [{"role": "user", "content": user_content}]
     });
 
     if anthropic_model_accepts_sampling(&model) {

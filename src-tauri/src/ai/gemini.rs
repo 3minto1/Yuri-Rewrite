@@ -1,4 +1,5 @@
 use super::common::*;
+use super::rules::recombine_dynamic_context;
 use crate::domain::{ModelOutput, ModelProfile};
 use crate::model_support::{parse_gemini_parts, ModelResponseError};
 use reqwest::Client;
@@ -19,7 +20,7 @@ pub(crate) async fn generate_gemini(
             {
                 "role": "user",
                 "parts": [
-                    {"text": format!("{}\n\n{}", system, user)}
+                    {"text": format!("{}\n\n{}", system, recombine_dynamic_context(user))}
                 ]
             }
         ],

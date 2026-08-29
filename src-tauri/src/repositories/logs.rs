@@ -29,6 +29,26 @@ pub(crate) fn cleanup_old_ai_logs(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Cached prompt tokens reported by the provider (Anthropic
+/// `cache_read_input_tokens`, OpenAI-compatible
+/// `prompt_tokens_details.cached_tokens`). `None` when the provider does not
+/// report a cache hit.
+pub(crate) fn extract_cached_tokens(raw_response: Option<&str>) -> Option<usize> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_response?).ok()?;
+    let usage = value.get("usage")?;
+    usage
+        .get("cache_read_input_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .map(|count| count as usize)
+        .filter(|count| *count > 0)
+}
+
 pub(crate) fn extract_token_usage(raw_response: Option<&str>) -> Option<(usize, usize)> {
     let value = serde_json::from_str::<serde_json::Value>(raw_response?).ok()?;
     if let Some(usage) = value.get("usage") {

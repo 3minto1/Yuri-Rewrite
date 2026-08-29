@@ -2722,6 +2722,8 @@ fn finalize_review_decision(
         filter_review_decision_against_rewrites(decision, shard, rewrites, settings);
     let (decision, deterministic_issues) =
         merge_deterministic_protagonist_residue_issues(decision, shard, rewrites, settings);
+    let (decision, rule_issues) =
+        merge_deterministic_rule_issues(decision, shard, rewrites, settings);
     if !filtered_issues.is_empty() {
         append_ai_log(
             state,
@@ -2749,6 +2751,22 @@ fn finalize_review_decision(
             &format!(
                 "本地扫描发现改写稿仍包含主角原名或派生称呼残留，将作为 blocking 问题进入修复流程：\n{}",
                 review_issues_text(&deterministic_issues)
+            ),
+            None,
+            None,
+        )?;
+    }
+    if !rule_issues.is_empty() {
+        append_ai_log(
+            state,
+            Some(novel_id),
+            profile_id,
+            "本地规则校验",
+            Some(shard_label),
+            "warning",
+            &format!(
+                "本地确定性规则校验发现以下问题（广告残留/姓名映射未应用），将作为 blocking 问题进入修复流程：\n{}",
+                review_issues_text(&rule_issues)
             ),
             None,
             None,
@@ -2831,6 +2849,8 @@ fn build_batch_review_decision_prompt_with_context(
         shard_context.trim().to_string()
     };
     let review_constraints = build_compact_review_constraints(settings, core_prompt, canon_text);
+    let review_checklist = render_review_blocking_checklist();
+    let review_exclusions = render_review_exclusions();
     format!(
         r#"【JSON 输出硬性格式】
 - 必须只输出一个合法 JSON 对象，不要 Markdown，不要解释，不要代码块，不要前后缀。
@@ -2840,21 +2860,10 @@ fn build_batch_review_decision_prompt_with_context(
 请以“审查专家”身份判断改写稿是否合格。只列会导致打回的 blocking 问题，不直接改写正文。
 
 Blocking 清单：
-- 主角或指定性转角色在改写稿中仍有明确男性姓名、代词、身份、称谓、身体特征或社会角色残留。
-- 未指定性转的角色被误改性别、亲属关系、称谓或代词。
-- 主角与男性角色共同被复数指代，或群体中包含任一未指定性转的男性成员时，改写稿却使用“她们”；此类混合性别群体必须使用“他们”或准确的群体称呼。只有确认全员女性时才使用“她们”。
-- 当前改写稿缺句、重复、串章、空正文、额外章节、marker/章节边界错误，或破坏原文事件顺序、因果、战力、伏笔、人物动机。
-- 外貌、能力状态、关系推进、核心设定或高级设定出现实质矛盾。
-- 主角改名后，改写稿仍保留“同名、原名、旧名、以旧名某字为名、名字含义”等暴露旧主角姓名或与新姓名矛盾的表达。
-- 标题只有在明确出现主角原名，或明确描述主角男性身份、男性称谓、男性身体状态时才算问题；标题编号与 marker index 不一致不是问题。
+{}
 
 排除项：
-- 每个问题必须引用“待审查改写稿”中仍存在的实际文字；只出现在原文中的证据不得列入 issues。
-- 不要把仅与主角原名共享单字的未指定 NPC 当成主角残留。例如主角“石昊”改为“石念昔”时，未被指定或映射的 NPC“秦昊”仍应保留，不是 blocking。
-- “这家伙”“这个家伙”“家伙”“熊孩子”“孩子”“吃货”“小鬼”等中性昵称本身不是男性残留。只有同处证据明确出现“少年”“男孩”“男子”“公子”“少爷”“小子”“他”等男性指代且确实指向主角，才是 blocking。
-- 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，改写稿保留原文人称代词和称谓不是问题。
-- 群体成员性别不明时，保留原文“他们”或使用中性群体称呼不是问题；不得仅因群体中包含女性主角就要求改成“她们”。
-- 原文中明显不属于小说正文的作者更新提示、求票求收藏、简短勘误、作者与读者互动、装饰分隔线和孤立乱码允许删除，不得按缺句或内容缺失打回。完本感言、卷末后记、正式后记、番外和实际剧情正文不在此排除项内；无法确定时必须按正文严格审查。
+{}
 - 不要输出通过项、优点、确认事项、建议性润色或“无需修改”的内容。
 
 问题字段长度：
@@ -2901,6 +2910,8 @@ Blocking 清单：
 {}
 
 再次确认：只输出合法 JSON 对象；不要 Markdown、解释或代码块；字符串内换行写成 \n，英文双引号写成 \"；不得因字段长度限制漏报 blocking 问题。"#,
+        review_checklist,
+        review_exclusions,
         review_constraints,
         shard_context,
         build_batch_chapter_text(chapters, false),
@@ -3352,6 +3363,154 @@ fn missing_content_claim_only_targets_droppable_author_notes(
                         || is_obvious_droppable_author_note_line(line))
             })
         })
+}
+
+fn explicit_mapping_pairs(settings: &NovelSettings) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut seen = HashSet::new();
+    for text in [&settings.protagonist_aliases, &settings.additional_feminize_names] {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((source, target)) = line.split_once("->") else {
+                continue;
+            };
+            let source = source.trim();
+            let target = target.trim();
+            if source.is_empty() || target.is_empty() || source == target {
+                continue;
+            }
+            if seen.insert((source.to_string(), target.to_string())) {
+                pairs.push((source.to_string(), target.to_string()));
+            }
+        }
+    }
+    pairs
+}
+
+fn detect_ad_residue_issues(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+) -> Vec<ReviewIssue> {
+    let rewrite_by_id = rewrites
+        .iter()
+        .map(|rewrite| (rewrite.id.as_str(), rewrite))
+        .collect::<HashMap<_, _>>();
+    let mut issues = Vec::new();
+    for chapter in chapters {
+        let Some(rewrite) = rewrite_by_id.get(chapter.id.as_str()) else {
+            continue;
+        };
+        let rewrite_text = format!("{}\n{}", rewrite.title, rewrite.text);
+        let residue_lines: Vec<String> = rewrite_text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && is_high_confidence_ad_line(line))
+            .map(str::to_string)
+            .take(3)
+            .collect();
+        if residue_lines.is_empty() {
+            continue;
+        }
+        issues.push(ReviewIssue {
+            chapter_indexes: vec![chapter.index],
+            scope: "chapter".to_string(),
+            category: "ad_residue".to_string(),
+            severity: "blocking".to_string(),
+            problem: format!(
+                "分片索引 {} 的改写稿仍残留广告/求票求收藏行：{}。",
+                chapter.index,
+                residue_lines.join("；")
+            ),
+            required_fix: "这些行是非正文内容，必须整行删除；不要因此改动其他剧情正文。".to_string(),
+        });
+    }
+    issues
+}
+
+fn detect_unapplied_name_mapping_issues(
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> Vec<ReviewIssue> {
+    let pairs = explicit_mapping_pairs(settings);
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let rewrite_by_id = rewrites
+        .iter()
+        .map(|rewrite| (rewrite.id.as_str(), rewrite))
+        .collect::<HashMap<_, _>>();
+    let mut issues = Vec::new();
+    for chapter in chapters {
+        let Some(rewrite) = rewrite_by_id.get(chapter.id.as_str()) else {
+            continue;
+        };
+        if !chapter.original_text.contains(pairs[0].0.as_str()) {
+            continue;
+        }
+        let rewrite_text = format!("{}\n{}", rewrite.title, rewrite.text);
+        let unapplied: Vec<String> = pairs
+            .iter()
+            .filter(|(source, _)| {
+                chapter.original_text.contains(source.as_str())
+                    && rewrite_text.contains(source.as_str())
+            })
+            .map(|(source, target)| format!("『{source}』应替换为『{target}』"))
+            .take(3)
+            .collect();
+        if unapplied.is_empty() {
+            continue;
+        }
+        issues.push(ReviewIssue {
+            chapter_indexes: vec![chapter.index],
+            scope: "chapter".to_string(),
+            category: "name_mapping_not_applied".to_string(),
+            severity: "blocking".to_string(),
+            problem: format!(
+                "分片索引 {} 的改写稿未应用姓名映射：{}。",
+                chapter.index,
+                unapplied.join("；")
+            ),
+            required_fix: "按姓名映射表将原文姓名统一替换为指定改写名，并保持代词与称谓一致。".to_string(),
+        });
+    }
+    issues
+}
+
+fn merge_deterministic_rule_issues(
+    decision: ReviewDecision,
+    chapters: &[Chapter],
+    rewrites: &[ParsedChapterRewrite],
+    settings: &NovelSettings,
+) -> (ReviewDecision, Vec<ReviewIssue>) {
+    let mut rule_issues = detect_ad_residue_issues(chapters, rewrites);
+    rule_issues.extend(detect_unapplied_name_mapping_issues(chapters, rewrites, settings));
+    if rule_issues.is_empty() {
+        return (decision, Vec::new());
+    }
+
+    let mut issues = decision.issues;
+    let mut existing_keys = issues.iter().map(review_issue_text).collect::<HashSet<_>>();
+    let mut added = Vec::new();
+    for issue in rule_issues {
+        let key = review_issue_text(&issue);
+        if existing_keys.contains(&key) {
+            continue;
+        }
+        existing_keys.insert(key);
+        added.push(issue.clone());
+        issues.push(issue);
+    }
+    (
+        ReviewDecision {
+            approved: issues.is_empty(),
+            issues,
+        },
+        added,
+    )
 }
 
 fn merge_deterministic_protagonist_residue_issues(
@@ -7097,13 +7256,17 @@ fn format_model_log_content(
         Some(false) => "关闭",
         None => "不适用",
     };
+    let cache_line = crate::repositories::logs::extract_cached_tokens(Some(&output.raw_response))
+        .map(|tokens| format!("\n- 提示词缓存命中：{} tokens", tokens))
+        .unwrap_or_default();
     format!(
-        "调用统计：\n- 输入字符数：{}\n- 输出字符数：{}\n- AI 调用耗时：{:.2} 秒\n- 复检：{}\n- 思考模式：{}\n\n{}",
+        "调用统计：\n- 输入字符数：{}\n- 输出字符数：{}\n- AI 调用耗时：{:.2} 秒\n- 复检：{}\n- 思考模式：{}{}\n\n{}",
         output.input_chars,
         output.output_chars,
         output.elapsed_ms as f64 / 1000.0,
         review_label,
         profile.thinking_mode,
+        cache_line,
         output.text.trim()
     )
 }
@@ -8026,10 +8189,10 @@ mod tests {
         let required = required_feminized_name_sources(&settings);
         assert_eq!(required, vec!["萧炎", "炎儿", "岩枭"]);
 
-        let prompt = build_rewrite_settings_prompt(&settings);
+        let prompt = build_compact_rewrite_rule_pack(&settings);
         assert!(prompt.contains("主角原文别名/指定别名映射：炎儿 -> 小妍儿、岩枭"));
-        assert!(prompt.contains("主角别名和其他指定女性化人物"));
-        assert!(prompt.contains("必须逐字使用指定改写名"));
+        assert!(prompt.contains("按姓名映射同步女性化"));
+        assert!(prompt.contains("必须逐字使用 target"));
 
         let content =
             build_name_mapping_asset_content(&settings, Vec::new()).expect("valid mapping content");
@@ -8057,7 +8220,7 @@ mod tests {
         assert!(prompt.contains("不能抛弃现稿、退回原文重新生成"));
         assert!(prompt.contains("【规则优先级】"));
         assert!(prompt.contains("【改写规则包】"));
-        assert!(prompt.contains("保守清理正文"));
+        assert!(prompt.contains("输入正文中不应出现广告"));
         assert!(prompt.contains("当前改写稿正文"));
         assert!(prompt.contains("原文仅用于核对事实"));
         assert!(prompt.contains("前一章已完成改写摘要"));
@@ -8610,14 +8773,10 @@ mod tests {
 
         assert!(prompt.contains("处理范围约束："));
         assert!(prompt.contains("【规则优先级】"));
-        assert!(prompt.contains("保守清理正文"));
-        assert!(prompt.contains("修正明显错别字"));
-        assert!(prompt.contains("不得借此删除剧情正文、番外、后记"));
-        assert!(prompt.contains("人名"));
-        assert!(prompt.contains("地名"));
-        assert!(prompt.contains("功法术语"));
+        assert!(prompt.contains("输入正文中不应出现广告"));
+        assert!(prompt.contains("拿不准时必须保留原文"));
         assert!(prompt.contains("姓名映射表"));
-        assert!(prompt.contains("未指定角色必须保持原文性别"));
+        assert!(prompt.contains("未列入基准表的人物保持原文性别"));
         assert!(prompt.contains("【改写规则包】"));
         assert!(prompt.contains("群体代词按成员构成判断"));
         assert!(prompt.contains("标题默认保留原标题和原编号"));
@@ -8752,34 +8911,27 @@ mod tests {
         let mut creative_settings = strict_settings.clone();
         creative_settings.rewrite_mode = "creative".to_string();
 
-        let strict_prompt = build_rewrite_settings_prompt(&strict_settings);
-        let creative_prompt = build_rewrite_settings_prompt(&creative_settings);
+        let strict_prompt = build_compact_rewrite_rule_pack(&strict_settings);
+        let creative_prompt = build_compact_rewrite_rule_pack(&creative_settings);
 
         assert!(strict_prompt.contains("严谨模式"));
-        assert!(strict_prompt.contains("更加忠于原文"));
-        assert!(strict_prompt.contains("不对主角添加过多额外女性化描写"));
-        assert!(strict_prompt.contains("章节标题原则上保留原标题和原编号"));
-        assert!(strict_prompt.contains("只有标题明确出现主角原名"));
-        assert!(strict_prompt.contains("看不出主角改写前曾是男性"));
-        assert!(strict_prompt.contains("男性化姓名、代词、称谓、身份、身体特征"));
-        assert!(strict_prompt.contains("人物外貌特征必须前后一致"));
-        assert!(strict_prompt.contains("上一章是金发，下一章不能无理由变成红发"));
-        assert!(strict_prompt.contains("人物关系和百合向情绪推进必须连续"));
-        assert!(strict_prompt.contains("只允许主角、用户填写的“其他指定女性化人物/姓名映射”"));
-        assert!(strict_prompt.contains("其他未指定人物必须保持原文性别、身份、称谓和人称代词"));
-        assert!(strict_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
-        assert!(strict_prompt.contains("保留原文中的人称代词和称谓"));
-        assert!(strict_prompt.contains("群体中包含任何未指定性转的男性成员"));
-        assert!(strict_prompt.contains("只有能够确认群体成员全部为女性时才使用“她们”"));
-        assert!(strict_prompt.contains("性别构成不明时保留原文“他们”"));
-        assert!(strict_prompt.contains("不得因为百合改写目标而把所有重要配角"));
-        assert!(strict_prompt.contains("不要因为 NPC 名字与主角原名共享某个字"));
-        assert!(strict_prompt.contains("涉及主角姓名来源、同名关系、名字含义、旧名对比"));
+        assert!(strict_prompt.contains("忠于原文，不做过大改动"));
+        assert!(strict_prompt.contains("必要女性化描写不能减少"));
+        assert!(strict_prompt.contains("标题默认保留原标题和原编号"));
+        assert!(strict_prompt.contains("仅在明确指向主角原名"));
+        assert!(strict_prompt.contains("让读者看不出主角原本是男性"));
+        assert!(strict_prompt.contains("清除姓名、代词、称谓、身体、外貌气质"));
+        assert!(strict_prompt.contains("外貌、称谓、关系和百合向情绪推进必须承接一致性资产及相邻上下文"));
+        assert!(strict_prompt.contains("所有代词、称谓和性别表达按【人物性别基准表】执行"));
+        assert!(strict_prompt.contains("未列入基准表的人物保持原文性别"));
+        assert!(strict_prompt.contains("非人生物保留原文代词和称谓"));
+        assert!(strict_prompt.contains("群体代词按成员构成判断"));
+        assert!(strict_prompt.contains("含任何未指定男性成员用“他们”"));
+        assert!(strict_prompt.contains("仅与主角原名共享单字的未指定 NPC 不得误改"));
+        assert!(strict_prompt.contains("涉及主角旧名、同名、名字来源"));
         assert!(creative_prompt.contains("创意模式"));
-        assert!(creative_prompt.contains("优先级高于普通的“中度再创作”约束"));
-        assert!(creative_prompt.contains("每章都能明确感知主角已经从男性变为女性"));
-        assert!(creative_prompt.contains("每章至少在关键场景中增加或强化 2-4 处女性化感知点"));
-        assert!(creative_prompt.contains("同性亲密感和百合向情绪推进"));
+        assert!(creative_prompt.contains("2-4 处女性化感知点"));
+        assert!(creative_prompt.contains("不能堆砌"));
     }
 
     #[test]
@@ -8804,10 +8956,10 @@ mod tests {
         assert!(prompt.contains("主角原姓名：萧炎"));
         assert!(prompt.contains("主角改写后姓名：未指定"));
         assert!(prompt.contains("标题默认保留原标题和原编号"));
-        assert!(prompt.contains("未指定角色保持原文性别"));
+        assert!(prompt.contains("未列入基准表的人物保持原文性别"));
         assert!(prompt.contains("群体代词按成员构成判断"));
         assert!(prompt.contains("非人生物保留原文代词和称谓"));
-        assert!(prompt.contains("读者看不出主角原本是男性"));
+        assert!(prompt.contains("让读者看不出主角原本是男性"));
         assert!(prompt.contains("严谨模式，忠于原文"));
         assert!(!prompt.contains("主角原文别名："));
         assert!(!prompt.contains("其他指定女性化人物/姓名映射："));
@@ -8827,7 +8979,6 @@ mod tests {
         settings.advanced_settings = "保持文风克制，动作描写细腻。".to_string();
         settings.rewrite_mode = "creative".to_string();
 
-        let legacy = build_rewrite_settings_prompt(&settings);
         let compact = build_compact_rewrite_rule_pack(&settings);
 
         assert!(compact.contains("主角原文别名/指定别名映射：炎儿、岩枭"));
@@ -8842,10 +8993,7 @@ mod tests {
         assert!(compact.contains("旧名、同名、名字来源"));
         assert!(compact.contains("每章在关键场景自然增加或强化 2-4 处女性化感知点"));
         assert!(compact.contains("高级设定：保持文风克制"));
-        assert!(
-            compact.chars().count() * 100 < legacy.chars().count() * 75,
-            "compact rule pack should be at least 25% shorter than legacy settings prompt"
-        );
+        assert!(compact.contains("所有代词、称谓和性别表达按【人物性别基准表】执行"));
     }
 
     #[test]
@@ -8895,6 +9043,114 @@ mod tests {
                 .expect("final marker reminder")
                 > prompt.find("当前输入章节").expect("input chapters")
         );
+        assert!(prompt.contains("<<<YURI_REWRITE_DYNAMIC_CONTEXT>>>"));
+        assert!(prompt.contains("【人物性别基准表】"));
+        assert!(prompt.contains(
+            "- 萧炎：主角，必须彻底女性化（改写名按姓名映射或同音/近音规则生成并保持一致）",
+        ));
+    }
+
+    #[test]
+    fn batch_rewrite_prompt_static_prefix_is_stable_across_chapters() {
+        let settings = sample_novel_settings();
+        let chapters_a = vec![sample_chapter(1, "第一章", "萧炎走进大厅。")];
+        let chapters_b = vec![
+            sample_chapter(2, "第二章", "萧妍在庭院修炼。"),
+            sample_chapter(3, "第三章", "夜色渐深。"),
+        ];
+        let prompt_a = build_batch_rewrite_prompt_with_context(
+            &chapters_a,
+            "一致性资产 A",
+            &settings,
+            "核心规则",
+            "",
+        );
+        let prompt_b = build_batch_rewrite_prompt_with_context(
+            &chapters_b,
+            "一致性资产 B",
+            &settings,
+            "核心规则",
+            "",
+        );
+
+        let marker = "<<<YURI_REWRITE_DYNAMIC_CONTEXT>>>";
+        let prefix_a = prompt_a.split(marker).next().expect("marker in prompt a");
+        let prefix_b = prompt_b.split(marker).next().expect("marker in prompt b");
+        assert_eq!(prefix_a, prefix_b, "static prefix must be byte-identical");
+        assert!(!prefix_a.contains("第一章"));
+        assert!(!prefix_a.contains("一致性资产 A"));
+    }
+
+    #[test]
+    fn detect_ad_residue_issues_flags_remaining_ad_lines() {
+        let chapter = sample_chapter(1, "第一章", "萧炎走进大厅。");
+        let rewrites = vec![ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "萧妍走进大厅。\n求月票！求收藏！".to_string(),
+        }];
+
+        let issues = detect_ad_residue_issues(std::slice::from_ref(&chapter), &rewrites);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].category, "ad_residue");
+        assert!(issues[0].problem.contains("求月票"));
+
+        let clean = vec![ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "萧妍走进大厅。".to_string(),
+        }];
+        assert!(detect_ad_residue_issues(std::slice::from_ref(&chapter), &clean).is_empty());
+    }
+
+    #[test]
+    fn detect_unapplied_name_mapping_issues_flags_missing_replacement() {
+        let settings = NovelSettings {
+            novel_id: "novel-1".to_string(),
+            protagonist_name: "萧炎".to_string(),
+            protagonist_aliases: String::new(),
+            rewritten_protagonist_name: String::new(),
+            additional_feminize_names: "林动 -> 林筝".to_string(),
+            bust: String::new(),
+            body_type: String::new(),
+            rewrite_mode: "strict".to_string(),
+            advanced_settings: String::new(),
+            relationship_targets: "[]".to_string(),
+            updated_at: "now".to_string(),
+        };
+        let chapter = sample_chapter(1, "第一章", "林动施展能力。");
+        let unapplied = vec![ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "林动继续施展能力。".to_string(),
+        }];
+        let issues =
+            detect_unapplied_name_mapping_issues(std::slice::from_ref(&chapter), &unapplied, &settings);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].problem.contains("『林动』应替换为『林筝』"));
+
+        let applied = vec![ParsedChapterRewrite {
+            id: chapter.id.clone(),
+            index: chapter.index,
+            title: chapter.title.clone(),
+            text: "林筝继续施展能力。".to_string(),
+        }];
+        assert!(detect_unapplied_name_mapping_issues(std::slice::from_ref(&chapter), &applied, &settings)
+            .is_empty());
+    }
+
+    #[test]
+    fn high_confidence_ad_lines_are_stripped_from_rewrite_input_but_blank_lines_stay() {
+        let text = "萧炎走进大厅。\n\n求月票！求收藏！\nhttps://example.com/book\n萧炎坐了下来。";
+        let stripped = strip_high_confidence_ad_lines(text);
+        assert!(stripped.contains("萧炎走进大厅。"));
+        assert!(stripped.contains("萧炎坐了下来。"));
+        assert!(!stripped.contains("求月票"));
+        assert!(!stripped.contains("example.com"));
+        assert!(stripped.contains("\n\n"), "blank lines must be kept");
     }
 
     #[test]
@@ -8913,12 +9169,11 @@ mod tests {
             updated_at: "now".to_string(),
         };
 
-        let prompt = build_rewrite_settings_prompt(&settings);
+        let prompt = build_compact_rewrite_rule_pack(&settings);
 
         assert!(prompt.contains("主角改写后姓名：萧妍"));
-        assert!(prompt.contains("强制姓名规则"));
-        assert!(prompt.contains("主角姓名必须统一为“萧妍”"));
-        assert!(prompt.contains("不得自行改成其他姓名"));
+        assert!(prompt.contains("姓名映射表和用户指定改名最高优先级"));
+        assert!(prompt.contains("已有 `source -> target` 必须全篇统一替换"));
     }
 
     #[test]
@@ -8928,11 +9183,11 @@ mod tests {
             r#"[{"name":"余靖秋","relationship":"女主候选","notes":"克制暧昧"}]"#,
         );
 
-        let prompt = build_rewrite_settings_prompt(&settings);
+        let prompt = build_compact_rewrite_rule_pack(&settings);
 
         assert!(prompt.contains("重点百合互动对象"));
         assert!(prompt.contains("余靖秋（女主候选）：克制暧昧"));
-        assert!(prompt.contains("不得因此改变未指定角色性别"));
+        assert!(prompt.contains("不得改变未指定角色性别"));
         assert!(prompt.contains("原文主线逻辑"));
     }
 
@@ -8960,7 +9215,7 @@ mod tests {
         )
         .expect("valid mapping content");
         let entries = parse_name_mapping_entries(&content);
-        let prompt = build_rewrite_settings_prompt(&settings);
+        let prompt = build_compact_rewrite_rule_pack(&settings);
 
         assert!(content.contains("\"protagonist\""));
         assert!(entries
@@ -8977,8 +9232,8 @@ mod tests {
             .any(|entry| entry.source == "唐三" && entry.target == "唐姗"));
         assert!(prompt.contains("姓名映射表"));
         assert!(prompt.contains("其他指定女性化人物/姓名映射：林动 -> 林筝"));
-        assert!(prompt.contains("必须逐字使用指定改写名"));
-        assert!(prompt.contains("并发分片和后续批次也必须继续使用同一份映射表"));
+        assert!(prompt.contains("必须逐字使用 target"));
+        assert!(!prompt.contains("不得自行生成同一人物的其他女性化姓名"));
     }
 
     #[test]
@@ -9171,7 +9426,7 @@ mod tests {
         assert!(prompt.contains("男主残留"));
         assert!(prompt.contains("读者看不出主角原本是男性"));
         assert!(prompt.contains("外貌、称谓、关系和百合向情绪推进必须承接一致性资产及相邻上下文"));
-        assert!(prompt.contains("未指定角色保持原文性别"));
+        assert!(prompt.contains("未列入基准表的人物保持原文性别"));
         assert!(prompt.contains("含任何未指定男性成员用“他们”"));
         assert!(prompt.contains("只有确认全员女性才用“她们”"));
         assert!(prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
@@ -9199,11 +9454,6 @@ mod tests {
             title: chapter.title.clone(),
             text: "萧妍走进大厅。".to_string(),
         };
-        let prompt = build_batch_review_prompt_with_settings(
-            std::slice::from_ref(&chapter),
-            std::slice::from_ref(&rewrite),
-            &settings,
-        );
         let decision_prompt = build_batch_review_decision_prompt_with_context(
             std::slice::from_ref(&chapter),
             std::slice::from_ref(&rewrite),
@@ -9213,21 +9463,6 @@ mod tests {
             "",
         );
 
-        assert!(prompt.contains("如果当前为创意模式"));
-        assert!(prompt.contains("只是替换姓名/代词"));
-        assert!(prompt.contains("章节标题原则上必须保留原标题和原编号"));
-        assert!(prompt.contains("无法确认指向主角的男性词语都不是标题问题"));
-        assert!(prompt.contains("女性外貌、神态、互动距离、称谓变化、百合向情绪张力"));
-        assert!(prompt.contains("看不出主角原本是男性"));
-        assert!(prompt.contains("人物外貌特征是否前后一致"));
-        assert!(prompt.contains("百合向关系推进是否承接前文"));
-        assert!(prompt.contains("不能为了强调性别而破坏原文战力"));
-        assert!(
-            prompt.contains("未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者是否被误改性别")
-        );
-        assert!(prompt.contains("同一人物在不同章节中的他/她"));
-        assert!(prompt.contains("复数群体代词是否符合成员构成"));
-        assert!(prompt.contains("若被改成“她们”必须修正"));
         assert!(decision_prompt.contains("Blocking 清单"));
         assert!(decision_prompt.contains("混合性别群体必须使用“他们”"));
         assert!(decision_prompt.contains("不得仅因群体中包含女性主角就要求改成“她们”"));
@@ -9237,7 +9472,9 @@ mod tests {
         assert!(decision_prompt.contains("动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物"));
         assert!(decision_prompt.contains("保留原文人称代词和称谓"));
         assert!(decision_prompt.contains("仅与主角原名共享单字的未指定 NPC"));
-        assert!(decision_prompt.contains("同名/旧名/以旧名某字为名"));
+        assert!(decision_prompt.contains("同名、原名、旧名、以旧名某字为名"));
+        assert!(decision_prompt.contains("改写稿仍残留广告、求票求收藏"));
+        assert!(decision_prompt.contains("姓名映射表中的 `source -> target` 未被应用"));
         assert!(decision_prompt.contains("JSON 输出硬性格式"));
         assert!(decision_prompt.contains("不得因为字段长度限制而省略问题"));
         assert!(decision_prompt.contains("problem 最多 120 字"));
@@ -10141,7 +10378,7 @@ mod tests {
         assert!(prompt.contains("原文主线内容"));
         assert!(prompt.contains("上一版改写稿"));
         assert!(prompt.contains("上一版改写稿正文"));
-        assert!(prompt.contains("保守清理正文"));
+        assert!(prompt.contains("输入正文中不应出现广告"));
         assert!(prompt.contains("姓名映射表和用户指定改名最高优先级"));
         assert!(prompt.contains("未指定角色、性别不明者和非人生物必须按原文"));
         assert!(!prompt.contains("改写要求：\n1. 将原本男女性别叙事自然改写为双女主百合叙事。"));
@@ -10197,7 +10434,7 @@ mod tests {
         assert!(prompt.contains("改写内容 2"));
         assert!(prompt.contains("【输出格式硬性要求】"));
         assert!(prompt.contains("【规则优先级】"));
-        assert!(prompt.contains("保守清理正文"));
+        assert!(prompt.contains("输入正文中不应出现广告"));
         assert!(prompt.contains("再次确认：只输出目标章节的结果"));
         assert!(prompt.contains("相邻章节只读上下文"));
         assert!(prompt.contains("主角与男性共同被指代或群体含男性成员时使用“他们”"));

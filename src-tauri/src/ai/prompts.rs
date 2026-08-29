@@ -1,55 +1,7 @@
+use super::rules::{render_rewrite_hard_rules, CLEANUP_RULE, DYNAMIC_CONTEXT_MARKER};
 use crate::domain::{CanonAsset, Chapter, NovelSettings, ParsedChapterRewrite};
 use crate::{additional_feminize_name_sources, relationship_targets_summary, truncate_text};
 use std::collections::HashSet;
-
-#[allow(dead_code)]
-pub(crate) fn build_novel_settings_prompt(settings: &NovelSettings) -> String {
-    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
-        "留空，由 AI 按姓名女性化规则生成".to_string()
-    } else {
-        settings.rewritten_protagonist_name.trim().to_string()
-    };
-    let additional = if settings.additional_feminize_names.trim().is_empty() {
-        "无".to_string()
-    } else {
-        settings.additional_feminize_names.clone()
-    };
-    let additional = if settings.advanced_settings.trim().is_empty() {
-        additional
-    } else {
-        format!(
-            "{}\n\n高级设定：{}",
-            additional,
-            settings.advanced_settings.trim()
-        )
-    };
-    let relationship_targets = relationship_targets_summary(&settings.relationship_targets);
-    format!(
-        r#"小说基本设定：
-- 主角原姓名：{}
-- 主角原文别名/指定别名映射：{}
-- 主角改写后姓名：{}
-- 其他指定女性化人物/姓名映射：{}
-- 重点百合互动对象：{}
-- 身材：{}
-- 体型：{}
-
-姓名女性化规则：
-1. 如果“主角改写后姓名”不是留空，必须把主角统一改为该姓名，标题和正文都必须遵守，不得自行生成其他主角新名。
-2. 如果“主角改写后姓名”留空，主角姓名必须女性化，不能保留明显男性化姓名；优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字。
-3. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
-4. 主角别名或其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
-5. 分析和改写必须维护一致的姓名映射，避免同一人物前后姓名不一致。
-6. 重点百合互动对象只用于增强关系连续性和百合互动，不得因此改变未指定角色性别、原文主线逻辑或章节边界。"#,
-        settings.protagonist_name,
-        aliases_or_none(settings),
-        rewritten_name,
-        additional,
-        relationship_targets,
-        settings.bust,
-        settings.body_type
-    )
-}
 
 pub(crate) fn build_analysis_identity_context(settings: &NovelSettings) -> String {
     let alias_sources = additional_feminize_name_sources(&settings.protagonist_aliases);
@@ -512,95 +464,6 @@ pub(crate) fn take_last_chars(text: &str, max_chars: usize) -> String {
     chars.into_iter().collect()
 }
 
-pub(crate) fn build_rewrite_settings_prompt(settings: &NovelSettings) -> String {
-    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
-        "留空，由 AI 按姓名女性化规则生成".to_string()
-    } else {
-        settings.rewritten_protagonist_name.trim().to_string()
-    };
-    let forced_name_rule = if settings.rewritten_protagonist_name.trim().is_empty() {
-        "当前未指定主角改写后姓名：AI 必须按同音或近音原则为主角生成女性化姓名，并在全批次保持一致。".to_string()
-    } else {
-        format!(
-            "强制姓名规则：用户已指定主角改写后姓名为“{}”。改写标题、正文、称谓映射和后续复检时，主角姓名必须统一为“{}”；不得自行改成其他姓名，也不得保留主角原姓名“{}”。",
-            settings.rewritten_protagonist_name.trim(),
-            settings.rewritten_protagonist_name.trim(),
-            settings.protagonist_name.trim()
-        )
-    };
-    let additional_names = if settings.additional_feminize_names.trim().is_empty() {
-        "无".to_string()
-    } else {
-        settings.additional_feminize_names.clone()
-    };
-    let advanced_settings = if settings.advanced_settings.trim().is_empty() {
-        "无".to_string()
-    } else {
-        settings.advanced_settings.trim().to_string()
-    };
-    let relationship_targets = relationship_targets_summary(&settings.relationship_targets);
-
-    format!(
-        r#"小说基本设定：
-- 主角原姓名：{}
-- 主角原文别名/指定别名映射：{}
-- 主角改写后姓名：{}
-- 其他指定女性化人物/姓名映射：{}
-- 重点百合互动对象：{}
-- 身材：{}
-- 体型：{}
-- 改写模式：{}
-
-{}
-
-高级设定：
-{}
-
-姓名女性化规则：
-1. {}
-2. 正文必须检查主角姓名。章节标题原则上保留原标题和原编号；只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时，才需要改成女性化表达。普通意象、事件概括、其他角色描述和无法确认指向主角的男性词语都不需要为了女性化而修改。
-3. 如果用户未指定主角改写后姓名，优先保留姓氏，名字部分用同音字或近音字替换为更女性化的字；如果用户已指定，则以用户指定姓名为最高优先级。
-4. 示例：萧炎 -> 萧妍；李火旺 -> 李火婉。
-5. 主角别名和其他指定女性化人物只在文本中实际出现时处理，未出现则忽略；若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名，不得自行生成其他姓名。
-6. 主角原文别名与主角是同一人物；每个别名都必须按一致性资产中的固定映射同步女性化，不能把别名误判为另一名角色，也不能只修改主姓名而遗漏别名。
-7. 一致性资产中的“姓名映射表”优先级最高；凡是映射表中已有 `source -> target`，标题和正文都必须统一替换为 target，不得自行生成同一人物的其他女性化姓名。
-8. 改写必须维护一致的姓名映射，避免同一人物前后姓名不一致；并发分片和后续批次也必须继续使用同一份映射表。
-9. 不要因为 NPC 名字与主角原名共享某个字，就把该 NPC 当作主角改名。例如主角“石昊”改为“石念昔”时，未被指定或映射的 NPC“秦昊”仍应保持“秦昊”，不能改成“秦念昔”或其他主角映射名。
-10. 涉及主角姓名来源、同名关系、名字含义、旧名对比、以某字为名等句子，必须随主角改名同步调整逻辑。不能在主角已改名后仍写“她原本同名”“都曾以主角原名中的某字为名”等让读者看出旧男主姓名的矛盾表达。
-
-核心目标：
-让没读过原文的读者阅读改写后的标题和正文时，看不出主角改写前曾是男性。凡是与主角有关的男性化姓名、代词、称谓、身份、身体特征、外貌气质、动作习惯、社会评价、亲密互动暗示，都必须改成自然的女性化表达；不能只删除男性化信息，也不能留下“男主”“少年郎”“公子”“他作为男人”等残留痕迹。
-
-人物性别与代词一致性规则：
-1. 只允许主角、用户填写的“其他指定女性化人物/姓名映射”、以及一致性资产“姓名映射表”中明确存在映射的人物进行性别转换。
-2. 其他未指定人物必须保持原文性别、身份、称谓和人称代词：原文男性配角继续使用男性身份与“他/父亲/兄弟/少爷/公子”等符合原文的表达；原文女性配角继续使用女性身份与“她/母亲/姐妹/小姐”等符合原文的表达。
-3. 不得因为百合改写目标而把所有重要配角、敌人、长辈、师父、兄弟、父亲或旁观者都改成女性；也不得在不同章节中让同一配角一会儿是男性、一会儿是女性。
-4. 对性别不明或原文暂未明确的人物，应保持中性称呼或沿用原文称谓，等一致性资产或原文后续明确后再固定；不要凭空改成女性或男性。
-5. 对原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，必须保留原文中的人称代词和称谓，不要为了女性化主角而强行改成“她”或改成其他性别表达。
-6. 复数群体代词必须按群体实际构成判断：主角与一个或多个男性角色共同被指代，或群体中包含任何未指定性转的男性成员时，必须使用“他们”或原文中准确的群体称呼，不能因为主角已女性化就改成“她们”；只有能够确认群体成员全部为女性时才使用“她们”。性别构成不明时保留原文“他们”或改用中性群体称呼。
-7. 改写时必须参考一致性资产中的人物卡、人物关系、姓名映射表和原文上下文，确保每个人物的性别、代词、称谓、亲属关系和社会身份跨章节一致。
-
-一致性硬性要求：
-1. 人物外貌特征必须前后一致。发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态一旦由原文、设定或一致性资产确立，后续章节不得随意改变；例如上一章是金发，下一章不能无理由变成红发。
-2. 如果原文没有明确外貌，不要每章随机发明互相矛盾的新特征；需要补充女性化描写时，应使用与已建立设定兼容的细节，并保持后续复用。
-3. 人物关系和百合向情绪推进必须连续。暧昧、信任、依赖、吃醋、保护欲、亲密距离等变化要承接前文，不能上一章刚建立的关系下一章突然重置。
-4. 称谓、代词、身份和旁人态度必须统一。主角已经女性化后，旁人对她的称呼、视线、互动距离、社会评价也要自然匹配女性身份，不能在不同章节反复摇摆。
-5. 重点百合互动对象用于提示应优先维护的互动对象、关系定位和情绪推进；可自然增强暧昧、信任、依赖、保护欲或亲密距离，但不得因此改变未指定角色性别、原文主线逻辑、战力逻辑或章节边界。
-6. 新增女性化细节必须服务当前剧情和人物状态，不得为了强调性别而制造与原文战力、性格、伏笔、剧情逻辑冲突的描写。"#,
-        settings.protagonist_name,
-        aliases_or_none(settings),
-        rewritten_name,
-        additional_names,
-        relationship_targets,
-        settings.bust,
-        settings.body_type,
-        rewrite_mode_label(&settings.rewrite_mode),
-        rewrite_mode_prompt(&settings.rewrite_mode),
-        advanced_settings,
-        forced_name_rule
-    )
-}
-
 pub(crate) fn build_compact_rewrite_rule_pack(settings: &NovelSettings) -> String {
     let mut setting_lines = vec![
         format!("- 主角原姓名：{}", settings.protagonist_name.trim()),
@@ -653,15 +516,14 @@ pub(crate) fn build_compact_rewrite_rule_pack(settings: &NovelSettings) -> Strin
 {}
 
 硬性规则：
-1. 标题默认保留原标题和原编号；仅在明确指向主角原名、男性身份/称谓/身体状态时女性化；marker index 不是标题编号。
-2. 主角及映射表/用户指定角色必须彻底女性化；清除姓名、代词、称谓、身体、外貌气质、动作习惯和旁人评价中的男主残留，让读者看不出主角原本是男性。
-3. 姓名映射表和用户指定改名最高优先级；已有 `source -> target` 必须全篇统一替换，不得自行改名；未指定目标才按同音/近音生成。
-4. 未指定角色保持原文性别、身份、称谓和代词；性别不明者保持中性或沿用原文；动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物保留原文代词和称谓。
-5. 群体代词按成员构成判断：含任何未指定男性成员用“他们”或准确群体称呼；只有确认全员女性才用“她们”。
-6. 保留主线、章节顺序、因果、战力、伏笔和人物动机；外貌、称谓、关系和百合向情绪推进必须承接一致性资产及相邻上下文。
-7. 仅与主角原名共享单字的未指定 NPC 不得误改；涉及主角旧名、同名、名字来源或以旧名某字为名的句子，必须随主角改名同步消除旧男主姓名矛盾。
+{}
+
+{}
+
 8. {}"#,
         setting_lines.join("\n"),
+        render_rewrite_hard_rules(),
+        CLEANUP_RULE,
         mode_rule
     )
 }
@@ -670,23 +532,6 @@ pub(crate) fn rewrite_mode_label(mode: &str) -> &'static str {
     match mode {
         "creative" => "创意模式",
         _ => "严谨模式",
-    }
-}
-
-pub(crate) fn rewrite_mode_prompt(mode: &str) -> &'static str {
-    match mode {
-        "creative" => {
-            r#"改写模式规则：当前为创意模式，此规则优先级高于普通的“中度再创作”约束。
-1. 必须让读者在每章都能明确感知主角已经从男性变为女性，而不是只替换姓名和代词。
-2. 在不改变主线、关键事件、章节顺序和核心逻辑的前提下，主动补充女性化细节：女性外貌、身形仪态、神态反应、衣着/发丝/气息等可感知细节，以及旁人看待女性主角时的称谓、距离感、保护欲、亲密互动或误会。
-3. 原文涉及男性身体、男性身份、男性社会称呼、男性动作习惯、男性气质展示时，必须改写为与设定身材和体型一致的女性表达；不能只删除这些内容。
-4. 主角与周围人物互动时，应自然体现她作为女性后的关系变化，例如语气、肢体距离、旁人态度、暧昧张力、同性亲密感和百合向情绪推进。
-5. 每章至少在关键场景中增加或强化 2-4 处女性化感知点；战斗、修炼、对话、日常和情感场景都要优先寻找可自然植入的位置。
-6. 新增内容必须贴合原剧情和原文风格，不要写成与当前情节无关的堆砌描写，不得破坏已有伏笔、战力逻辑和人物动机。"#
-        }
-        _ => {
-            "改写模式规则：当前为严谨模式。AI 必须更加忠于原文，不做过大改动，不对主角添加过多额外女性化描写；但必要的女性化描写不能减少，原文本身已有的男性化描写在改写后必须自然转换为女性化描写。"
-        }
     }
 }
 
@@ -715,6 +560,135 @@ pub(crate) fn chapter_end_marker(chapter: &Chapter) -> String {
     format!(
         "<<<YURI_REWRITE_CHAPTER_END index={} id={}>>>",
         chapter.index, chapter.id
+    )
+}
+
+/// High-confidence ad / author-note lines that are safe to remove from the
+/// rewrite input before generation. Deliberately narrower than the full
+/// droppable-line classifier: blank lines and soft update notices stay, so
+/// story text can never be pre-stripped by mistake.
+pub(crate) fn is_high_confidence_ad_line(line: &str) -> bool {
+    let trimmed =
+        line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}' || ch == '\u{3000}');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let compact: String = trimmed.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if matches!(
+        compact.as_str(),
+        "作者的话" | "作者有话说" | "作者附言" | "题外话" | "PS" | "P.S."
+    ) {
+        return true;
+    }
+    if [
+        "求月票",
+        "求推荐票",
+        "求收藏",
+        "求订阅",
+        "求追读",
+        "求点击",
+        "求鲜花",
+        "求评价票",
+        "大家投票",
+        "投月票",
+        "投推荐票",
+        "感谢打赏",
+        "谢谢打赏",
+        "打赏加更",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
+    {
+        return true;
+    }
+    compact.contains("http://") || compact.contains("https://") || compact.contains("www.")
+}
+
+pub(crate) fn strip_high_confidence_ad_lines(text: &str) -> String {
+    text.lines()
+        .filter(|line| !is_high_confidence_ad_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Chapter input for the rewrite prompt: obvious ad lines are removed here so
+/// the model never sees them and cannot forget (or refuse) to remove them.
+pub(crate) fn build_batch_rewrite_input_text(chapters: &[Chapter]) -> String {
+    chapters
+        .iter()
+        .map(|chapter| {
+            let text = strip_high_confidence_ad_lines(&chapter.original_text);
+            format!(
+                "{}\n标题：{}\n正文：\n{}\n{}",
+                chapter_start_marker(chapter),
+                chapter.title,
+                text.trim(),
+                chapter_end_marker(chapter)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn explicit_name_pairs(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let (source, target) = line.split_once("->")?;
+            let source = source.trim();
+            let target = target.trim();
+            if source.is_empty() || target.is_empty() || source == target {
+                return None;
+            }
+            Some((source.to_string(), target.to_string()))
+        })
+        .collect()
+}
+
+/// Deterministic gender baseline for the chapter prompt, built from the
+/// protagonist and the user-configured name mappings. Conversion targets are
+/// listed explicitly so pronoun handling becomes a lookup instead of reasoning.
+pub(crate) fn build_character_baseline_roster(settings: &NovelSettings) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let protagonist = settings.protagonist_name.trim();
+    let rewritten = settings.rewritten_protagonist_name.trim();
+    if !protagonist.is_empty() {
+        if rewritten.is_empty() {
+            lines.push(format!(
+                "- {protagonist}：主角，必须彻底女性化（改写名按姓名映射或同音/近音规则生成并保持一致）"
+            ));
+        } else {
+            lines.push(format!(
+                "- {protagonist} -> {rewritten}：主角，必须彻底女性化并逐字使用改写名"
+            ));
+        }
+    }
+    for alias in additional_feminize_name_sources(&settings.protagonist_aliases) {
+        let alias = alias.trim();
+        if !alias.is_empty() {
+            lines.push(format!(
+                "- {alias}：主角原文别名/指定别名，与主角是同一人物，按姓名映射同步女性化"
+            ));
+        }
+    }
+    for (source, target) in explicit_name_pairs(&settings.additional_feminize_names) {
+        lines.push(format!(
+            "- {source} -> {target}：姓名映射，必须逐字使用 {target} 并彻底女性化"
+        ));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.push(
+        "- 其余人物：一律保持原文性别、身份、称谓与代词（详见人物卡）；性别不明者保持中性；非人生物保留原文代词；群体代词按成员构成判断"
+            .to_string(),
+    );
+    format!(
+        "【人物性别基准表】所有代词、称谓和性别表达必须按此表执行：\n{}",
+        lines.join("\n")
     )
 }
 
@@ -781,35 +755,6 @@ pub(crate) fn build_batch_rewrite_text(
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_analysis_prompt_with_settings(
-    chapter: &Chapter,
-    settings: &NovelSettings,
-) -> String {
-    format!(
-        r#"请分析以下章节，并输出 JSON：
-{{
-  "outline": "本章大纲",
-  "characters": ["角色与设定变化"],
-  "relationships": ["人物关系变化"],
-  "locations": ["地点"],
-  "foreshadowing": ["伏笔或回收"],
-  "name_feminization_map": ["原姓名 -> 女性化姓名，未出现的人物不要写入"],
-  "rewrite_notes": ["后续百合改写必须注意的性别、称谓、动作、外貌、关系细节"]
-}}
-
-{}
-
-章节标题：{}
-
-章节正文：
-{}"#,
-        build_rewrite_settings_prompt(settings),
-        chapter.title,
-        truncate_text(&chapter.original_text, 30_000)
-    )
-}
-
-#[allow(dead_code)]
 pub(crate) fn build_batch_rewrite_prompt_with_settings(
     chapters: &[Chapter],
     canon_text: &str,
@@ -863,7 +808,7 @@ pub(crate) fn build_rewrite_priority_prompt() -> &'static str {
 }
 
 pub(crate) fn cleanup_text_rule() -> &'static str {
-    "保守清理正文：修正明显错别字、OCR/编码残留、重复或明显无关标点；删除广告、站外推广、求票求收藏、读者互动、乱码装饰等明显非正文内容。不得借此删除剧情正文、番外、后记、完本感言、正式作者后记、人物台词、专有名词、功法术语、地名、人名或作者有意的风格化表达；拿不准时必须保留。"
+    CLEANUP_RULE
 }
 
 pub(crate) fn build_compact_revision_settings_prompt(settings: &NovelSettings) -> String {
@@ -905,16 +850,23 @@ pub(crate) fn build_compact_revision_settings_prompt(settings: &NovelSettings) -
     )
 }
 
-pub(crate) fn build_batch_rewrite_prompt_with_context(
+pub(crate) struct BatchRewritePromptParts {
+    pub(crate) static_prefix: String,
+    pub(crate) dynamic_suffix: String,
+}
+
+pub(crate) fn build_batch_rewrite_prompt_parts(
     chapters: &[Chapter],
     canon_text: &str,
     settings: &NovelSettings,
     core_prompt: &str,
     shard_context: &str,
-) -> String {
+) -> BatchRewritePromptParts {
     let shard_context = prompt_context_or_none(shard_context);
-    format!(
+    let static_prefix = format!(
         r#"{}
+
+{}
 
 {}
 
@@ -926,10 +878,17 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
 1. 将原本男女性别叙事自然改写为双女主百合叙事；当前输入中的所有章节必须一次性完整改写。
 2. 采用中度再创作：保留主线、冲突、章节顺序、战力逻辑、人物动机和关键伏笔；只在【改写规则包】允许范围内调整互动、细节、称谓、外貌和关系推进。
 3. {}
-4. 严格遵守【规则优先级】、【改写规则包】和一致性资产；如有冲突，按规则优先级处理。
-5. 每章必须复制输入中对应的 START/END marker，index 和 id 逐字保留；只输出当前输入章节的 marker、标题和正文，不要解释、Markdown 或额外章节。
-
-一致性资产：
+4. 严格遵守【规则优先级】、【改写规则包】、【人物性别基准表】和一致性资产；如有冲突，按规则优先级处理。
+5. 每章必须复制输入中对应的 START/END marker，index 和 id 逐字保留；只输出当前输入章节的 marker、标题和正文，不要解释、Markdown 或额外章节。"#,
+        rewrite_marker_format_guard("当前输入章节"),
+        build_rewrite_priority_prompt(),
+        build_core_prompt_section(core_prompt),
+        build_compact_rewrite_rule_pack(settings),
+        build_character_baseline_roster(settings),
+        CLEANUP_RULE,
+    );
+    let dynamic_suffix = format!(
+        r#"一致性资产：
 {}
 
 处理范围约束：
@@ -939,15 +898,28 @@ pub(crate) fn build_batch_rewrite_prompt_with_context(
 {}
 
 {}"#,
-        rewrite_marker_format_guard("当前输入章节"),
-        build_rewrite_priority_prompt(),
-        build_core_prompt_section(core_prompt),
-        build_compact_rewrite_rule_pack(settings),
-        cleanup_text_rule(),
         canon_text,
         shard_context,
-        build_batch_chapter_text(chapters, false),
+        build_batch_rewrite_input_text(chapters),
         rewrite_marker_final_reminder("当前输入章节")
+    );
+    BatchRewritePromptParts {
+        static_prefix,
+        dynamic_suffix,
+    }
+}
+
+pub(crate) fn build_batch_rewrite_prompt_with_context(
+    chapters: &[Chapter],
+    canon_text: &str,
+    settings: &NovelSettings,
+    core_prompt: &str,
+    shard_context: &str,
+) -> String {
+    let parts = build_batch_rewrite_prompt_parts(chapters, canon_text, settings, core_prompt, shard_context);
+    format!(
+        "{}\n\n{}\n\n{}",
+        parts.static_prefix, DYNAMIC_CONTEXT_MARKER, parts.dynamic_suffix
     )
 }
 
@@ -981,6 +953,8 @@ pub(crate) fn build_single_chapter_rewrite_from_draft_prompt(
 5. {}
 6. 只输出当前章节的一组完整 marker、标题和非空正文，不要解释、不要 Markdown。
 
+<<<YURI_REWRITE_DYNAMIC_CONTEXT>>>
+
 本次用户要求：
 {}
 
@@ -1011,67 +985,6 @@ pub(crate) fn build_single_chapter_rewrite_from_draft_prompt(
         truncate_text(&chapter.original_text, 30_000),
         build_batch_chapter_text(std::slice::from_ref(chapter), true),
         rewrite_marker_final_reminder("当前章节")
-    )
-}
-
-#[allow(dead_code)]
-pub(crate) fn build_batch_review_prompt_with_settings(
-    chapters: &[Chapter],
-    rewrites: &[ParsedChapterRewrite],
-    settings: &NovelSettings,
-) -> String {
-    build_batch_review_prompt_with_context(chapters, rewrites, settings, "")
-}
-
-pub(crate) fn build_batch_review_prompt_with_context(
-    chapters: &[Chapter],
-    rewrites: &[ParsedChapterRewrite],
-    settings: &NovelSettings,
-    shard_context: &str,
-) -> String {
-    let shard_context = prompt_context_or_none(shard_context);
-    format!(
-        r#"请复检并自动修正以下批次改写稿。
-
-{}
-
-{}
-
-重点检查：
-1. 主角姓名是否已按规则女性化，且全批次一致。
-2. 章节标题原则上必须保留原标题和原编号。只有标题明确出现主角原名，或明确描述主角的男性身份、男性称谓、男性身体状态时才检查并修正；普通意象、事件概括、其他角色描述和无法确认指向主角的男性词语都不是标题问题。
-3. 其他指定姓名只在出现时女性化，且前后一致。
-4. 人称代词、称谓、身体描写、外貌气质、社会称呼、动作习惯和互动细节是否仍残留男性主角痕迹。
-5. 身材、体型和高级设定是否被遵守。
-6. 如果当前为创意模式，检查每章关键场景是否有足够清晰的女性化感知点；若只是替换姓名/代词，应主动补充贴合原剧情的女性外貌、神态、互动距离、称谓变化、百合向情绪张力等细节。
-7. 改写后的标题和正文是否能让没读过原文的读者看不出主角原本是男性。
-8. 人物外貌特征是否前后一致：发色、瞳色、身高、体型、胸部设定、年龄感、标志性服饰、伤痕、气质和能力状态不能在不同章节无理由变化。
-9. 百合向关系推进是否承接前文：暧昧、信任、依赖、吃醋、保护欲、亲密距离、称谓和旁人态度不能突然重置或跳跃。
-10. 女性化补充是否贴合剧情和一致性资产，不能为了强调性别而破坏原文战力、伏笔、人物性格和逻辑。
-11. 未指定性转的配角、敌人、长辈、师父、兄弟、父亲、旁观者是否被误改性别；同一人物在不同章节中的他/她、先生/小姐、父亲/母亲、兄弟/姐妹、少爷/小姐等代词和称谓是否前后一致。
-12. 复数群体代词是否符合成员构成：主角与男性角色共同被指代，或群体中含任一未指定性转的男性成员时，必须使用“他们”或准确的群体称呼；若被改成“她们”必须修正。只有确认全员女性时，“她们”才合格；成员性别不明时保留原文“他们”或中性群体称呼。
-13. 原文未明确性别或性别模糊的动物、灵兽、妖兽、凶兽、神兽、器灵等非人生物，改写稿保留原文人称代词和称谓时应视为合格，不要当作主角男性残留或未女性化问题。
-14. 章节内部和章节之间是否有逻辑不通、缺句、重复、边界错乱。允许改写稿删除原文中明显不属于小说正文的作者更新提示、求票求收藏、简短勘误、作者与读者互动、装饰分隔线和孤立乱码；但完本感言、卷末后记、正式后记、番外和任何剧情正文的缺失仍是问题。拿不准时按正文严格检查。
-15. marker 中的 index 是内部顺序标识，不是原标题中的章节编号。序章、楔子、番外等会使二者不同；不得据此修改标题或判定章节矛盾。
-
-输出要求：
-1. 如果发现问题，直接在正文中修正。
-2. 如果没有问题，原样输出改写稿。
-3. 每章必须以输入中对应的 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 开始标记开头，并以对应的 `<<<YURI_REWRITE_CHAPTER_END ...>>>` 结束标记结尾；marker 中的 index 和 id 必须逐字复制，不得省略、改写或自行生成。
-4. 只输出当前输入章节的边界标记、修正后标题和正文，不要解释、不要 Markdown 包裹，不要输出当前输入之外的章节。
-
-处理范围约束：
-{}
-
-待复检改写稿：
-{}
-
-{}"#,
-        rewrite_marker_format_guard("当前待复检章节"),
-        build_rewrite_settings_prompt(settings),
-        shard_context,
-        build_batch_rewrite_text(chapters, rewrites),
-        rewrite_marker_final_reminder("当前待复检章节")
     )
 }
 

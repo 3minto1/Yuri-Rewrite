@@ -1,4 +1,5 @@
 use super::common::*;
+use super::rules::recombine_dynamic_context;
 use crate::domain::{ModelOutput, ModelProfile};
 use crate::model_support::ModelResponseError;
 use reqwest::Client;
@@ -16,6 +17,7 @@ pub(crate) async fn generate_openai_compatible(
     let base = profile.base_url.trim().trim_end_matches('/');
     let model = normalize_model_name(base, &profile.model);
     let endpoint = openai_chat_endpoint(base);
+    let user = recombine_dynamic_context(user);
     let mut payload = json!({
         "model": model,
         "temperature": profile.temperature,
