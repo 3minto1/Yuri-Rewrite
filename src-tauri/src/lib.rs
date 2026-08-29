@@ -2900,6 +2900,10 @@ Blocking 清单：
 
 {}
 
+{}
+
+<<<YURI_REWRITE_DYNAMIC_CONTEXT>>>
+
 处理范围约束：
 {}
 
@@ -2913,6 +2917,7 @@ Blocking 清单：
         review_checklist,
         review_exclusions,
         review_constraints,
+        prompt_context_or_none(&build_character_baseline_roster(settings)),
         shard_context,
         build_batch_chapter_text(chapters, false),
         build_batch_rewrite_text(chapters, rewrites)
@@ -3020,15 +3025,17 @@ fn build_batch_revision_prompt_with_context(
 
 {}
 
+{}
+
 审查专家已打回上一版改写稿。请你作为原改写专家，根据下面的问题清单重新输出当前分片的完整改写结果。
 
 修复要求：
 1. 不要只局部补丁，必须重新输出当前分片所有章节的完整标题和正文。
 2. 保留原章节顺序和所有 `<<<YURI_REWRITE_CHAPTER_START ...>>>` / `<<<YURI_REWRITE_CHAPTER_END ...>>>` marker，marker 的 index 和 id 必须逐字复制。
-3. 逐条修复审查问题，同时继续遵守姓名映射、女性化要求、未指定角色性别保持、外貌一致性、百合关系连续性和原文逻辑。
-4. {}
-5. 主角与男性共同被指代或群体含男性成员时必须使用“他们”或准确群体称呼，只有确认全员女性时才使用“她们”；性别不明非人生物保留原文代词和称谓可通过。
-6. 只输出当前分片章节，不要解释、不要 Markdown、不要输出审查意见。
+3. 逐条修复审查问题，同时继续遵守规则包、人物性别基准表和一致性资产。
+4. 只输出当前分片章节，不要解释、不要 Markdown、不要输出审查意见。
+
+<<<YURI_REWRITE_DYNAMIC_CONTEXT>>>
 
 审查打回问题：
 {}
@@ -3049,8 +3056,8 @@ fn build_batch_revision_prompt_with_context(
         rewrite_marker_format_guard("当前分片章节"),
         build_rewrite_priority_prompt(),
         build_core_prompt_section(core_prompt),
-        build_compact_revision_settings_prompt(settings),
-        cleanup_text_rule(),
+        build_compact_rewrite_rule_pack(settings),
+        prompt_context_or_none(&build_character_baseline_roster(settings)),
         issue_text,
         canon_text,
         prompt_context_or_none(shard_context),
@@ -3082,22 +3089,6 @@ fn build_targeted_revision_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
-        "按姓名映射表或同音近音规则生成，并保持一致"
-    } else {
-        settings.rewritten_protagonist_name.trim()
-    };
-    let core_prompt = if core_prompt.trim().is_empty() {
-        "无".to_string()
-    } else {
-        truncate_text(core_prompt.trim(), 1_200)
-    };
-    let advanced_settings = if settings.advanced_settings.trim().is_empty() {
-        "无".to_string()
-    } else {
-        truncate_text(settings.advanced_settings.trim(), 1_200)
-    };
-    let relationship_targets = relationship_targets_summary(&settings.relationship_targets);
     let shard_context = if shard_context.trim().is_empty() {
         "无".to_string()
     } else {
@@ -3110,25 +3101,27 @@ fn build_targeted_revision_prompt(
 
 {}
 
-必须遵守：
-- 主角原名：{}；主角改写名：{}；其他指定女性化人物/姓名映射：{}。
-- 重点百合互动对象：{}。这些对象只用于维护百合互动和关系连续性，不得因此改变未指定角色性别或原文主线逻辑。
-- 身材/体型：{} / {}；改写模式：{}。
-- 核心设定：{}
-- 高级设定：{}
+{}
+
+{}
+
+{}
+
+定向修复要求：
 - 保留原章节顺序、原文主线、因果、战力、伏笔、人物动机和目标章节 marker。
-- 只修复 blocking 问题，不改动已合格内容；未指定性转角色保持原文性别；主角与男性共同被指代或群体含男性成员时使用“他们”或准确群体称呼，只有全员女性时才使用“她们”；性别不明的动物、灵兽等非人生物保留原文代词可通过。
-- {}
+- 只修复 blocking 问题，不改动已合格内容。
 - 每个目标章节必须完整输出原 `<<<YURI_REWRITE_CHAPTER_START ...>>>` 和 `<<<YURI_REWRITE_CHAPTER_END ...>>>`，marker 的 index 和 id 逐字复制。
 - 只输出目标章节的 marker、标题、正文；不要解释、不要 Markdown。
 
-分片约束：
-{}
+<<<YURI_REWRITE_DYNAMIC_CONTEXT>>>
 
 审查打回问题：
 {}
 
 相关一致性资料：
+{}
+
+分片约束：
 {}
 
 相邻章节只读上下文（不得输出）：
@@ -3143,23 +3136,12 @@ fn build_targeted_revision_prompt(
 {}"#,
         rewrite_marker_format_guard("目标章节"),
         build_rewrite_priority_prompt(),
-        settings.protagonist_name.trim(),
-        rewritten_name,
-        if settings.additional_feminize_names.trim().is_empty() {
-            "无"
-        } else {
-            settings.additional_feminize_names.trim()
-        },
-        relationship_targets,
-        settings.bust,
-        settings.body_type,
-        rewrite_mode_label(&settings.rewrite_mode),
-        core_prompt,
-        advanced_settings,
-        cleanup_text_rule(),
-        shard_context,
+        build_core_prompt_section(core_prompt),
+        build_compact_rewrite_rule_pack(settings),
+        prompt_context_or_none(&build_character_baseline_roster(settings)),
         issue_text,
         canon_text,
+        shard_context,
         adjacent_context,
         build_batch_chapter_text(target_chapters, false),
         build_batch_rewrite_text(target_chapters, target_rewrites),
@@ -10374,7 +10356,8 @@ mod tests {
 
         assert!(prompt.contains("【输出格式硬性要求】"));
         assert!(prompt.contains("【规则优先级】"));
-        assert!(prompt.contains("【压缩小说设定】"));
+        assert!(prompt.contains("【改写规则包】"));
+        assert!(prompt.contains("【人物性别基准表】"));
         assert!(prompt.contains("审查打回问题"));
         assert!(prompt.contains("第一章仍有主角男性称谓"));
         assert!(prompt.contains("相关一致性资产"));
@@ -10384,7 +10367,8 @@ mod tests {
         assert!(prompt.contains("上一版改写稿正文"));
         assert!(prompt.contains("输入正文中不应出现广告"));
         assert!(prompt.contains("姓名映射表和用户指定改名最高优先级"));
-        assert!(prompt.contains("未指定角色、性别不明者和非人生物必须按原文"));
+        assert!(prompt.contains("未列入基准表的人物保持原文性别"));
+        assert!(prompt.contains("非人生物保留原文代词和称谓"));
         assert!(!prompt.contains("改写要求：\n1. 将原本男女性别叙事自然改写为双女主百合叙事。"));
         assert!(!prompt.contains("采用中度再创作：保留主线、冲突、章节顺序"));
     }
@@ -10441,9 +10425,9 @@ mod tests {
         assert!(prompt.contains("输入正文中不应出现广告"));
         assert!(prompt.contains("再次确认：只输出目标章节的结果"));
         assert!(prompt.contains("相邻章节只读上下文"));
-        assert!(prompt.contains("主角与男性共同被指代或群体含男性成员时使用“他们”"));
-        assert!(prompt.contains("只有全员女性时才使用“她们”"));
-        assert!(!prompt.contains(&format!("原文内容 1 {}", "很长正文".repeat(20))));
+        assert!(prompt.contains("含任何未指定男性成员用“他们”"));
+        assert!(prompt.contains("只有确认全员女性才用“她们”"));
+                assert!(!prompt.contains(&format!("原文内容 1 {}", "很长正文".repeat(20))));
         assert!(!prompt.contains(&format!("原文内容 3 {}", "很长正文".repeat(20))));
         assert!(!prompt.contains(&chapter_start_marker(&chapters[0])));
         assert!(!prompt.contains(&chapter_start_marker(&chapters[2])));

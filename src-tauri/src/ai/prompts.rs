@@ -809,45 +809,6 @@ pub(crate) fn cleanup_text_rule() -> &'static str {
     CLEANUP_RULE
 }
 
-pub(crate) fn build_compact_revision_settings_prompt(settings: &NovelSettings) -> String {
-    let rewritten_name = if settings.rewritten_protagonist_name.trim().is_empty() {
-        "按姓名映射表或同音近音规则生成，并保持一致"
-    } else {
-        settings.rewritten_protagonist_name.trim()
-    };
-    let additional_names = if settings.additional_feminize_names.trim().is_empty() {
-        "无"
-    } else {
-        settings.additional_feminize_names.trim()
-    };
-    let advanced_settings = if settings.advanced_settings.trim().is_empty() {
-        "无".to_string()
-    } else {
-        truncate_text(settings.advanced_settings.trim(), 1_200)
-    };
-    format!(
-        r#"【压缩小说设定】
-- 主角原姓名：{}
-- 主角原文别名/指定别名映射：{}
-- 主角改写后姓名：{}
-- 其他指定女性化人物/姓名映射：{}
-- 身材/体型：{} / {}
-- 改写模式：{}
-- 高级设定：{}
-- 姓名映射表和用户指定改名最高优先级；主角别名或其他姓名若写作 `原姓名 -> 改写后姓名`，必须逐字使用指定改写名；标题默认保留原标题和原编号，只有明确指向主角原名、男性身份、男性称谓或男性身体状态时才女性化。
-- 未指定角色、性别不明者和非人生物必须按原文及一致性资产保持性别、称谓和代词；群体代词按成员构成判断，含未指定男性成员时用“他们”或准确群体称呼。
-- 人物外貌、关系、称谓、百合向情绪推进必须承接前文，不能为了修复问题制造新矛盾。"#,
-        settings.protagonist_name.trim(),
-        aliases_or_none(settings),
-        rewritten_name,
-        additional_names,
-        settings.bust.trim(),
-        settings.body_type.trim(),
-        rewrite_mode_label(&settings.rewrite_mode),
-        advanced_settings
-    )
-}
-
 pub(crate) struct BatchRewritePromptParts {
     pub(crate) static_prefix: String,
     pub(crate) dynamic_suffix: String,
