@@ -38,7 +38,12 @@ pub(crate) fn export_novel(
         .unwrap_or_else(|| state.data_dir.join("exports"));
     fs::create_dir_all(&output_dir).map_err(to_string)?;
     let output_path = output_dir.join(format!("{}-rewrite.{}", safe_title, extension));
-    fs::write(&output_path, body).map_err(to_string)?;
+    let tmp_path = output_dir.join(format!("{}-rewrite.{}.tmp", safe_title, extension));
+    fs::write(&tmp_path, body).map_err(to_string)?;
+    if let Err(error) = fs::rename(&tmp_path, &output_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(to_string(error));
+    }
     Ok(ExportResult {
         path: output_path.to_string_lossy().to_string(),
     })

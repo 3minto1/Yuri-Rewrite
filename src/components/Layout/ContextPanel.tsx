@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 type ContextPanelProps = {
   collapsed: boolean;
@@ -8,8 +8,15 @@ type ContextPanelProps = {
 };
 
 export function ContextPanel({ collapsed, title, subtitle, children }: ContextPanelProps) {
+  const panelRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const node = panelRef.current;
+    if (!node) return;
+    if (collapsed) node.setAttribute("inert", "");
+    else node.removeAttribute("inert");
+  }, [collapsed]);
   return (
-    <aside className="context-panel" aria-label={`${title}上下文`} aria-hidden={collapsed || undefined}>
+    <aside ref={panelRef} className="context-panel" aria-label={`${title}上下文`} aria-hidden={collapsed || undefined}>
       <header className="context-panel-header">
         <strong>{title}</strong>
         {subtitle && <span>{subtitle}</span>}

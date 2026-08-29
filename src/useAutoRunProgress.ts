@@ -15,6 +15,7 @@ export function useAutoRunProgress(
   const callbackRef = useRef(onProgress);
   const activeJobIdRef = useRef("");
   const terminalJobIdRef = useRef("");
+  const lastProgressFingerprintRef = useRef("");
 
   useEffect(() => {
     callbackRef.current = onProgress;
@@ -23,6 +24,7 @@ export function useAutoRunProgress(
   useEffect(() => {
     activeJobIdRef.current = "";
     terminalJobIdRef.current = "";
+    lastProgressFingerprintRef.current = "";
   }, [novelId]);
 
   useEffect(() => {
@@ -38,6 +40,7 @@ export function useAutoRunProgress(
       if (terminalJobIdRef.current === progress.id) {
         if (progress.status === "running") {
           terminalJobIdRef.current = "";
+          lastProgressFingerprintRef.current = "";
         } else {
           return;
         }
@@ -47,6 +50,16 @@ export function useAutoRunProgress(
         && activeJobIdRef.current !== progress.id
         && !replacementStatuses.includes(progress.status)
       ) return;
+      const fingerprint = JSON.stringify([
+        progress.status,
+        progress.message,
+        progress.current_chapter,
+        progress.shard_completed,
+        progress.chapter_completed,
+        progress.active_shards
+      ]);
+      if (fingerprint === lastProgressFingerprintRef.current) return;
+      lastProgressFingerprintRef.current = fingerprint;
       activeJobIdRef.current = progress.id;
       callbackRef.current(progress);
       if (terminalStatuses.includes(progress.status)) {

@@ -404,7 +404,7 @@ describe("CompareView", () => {
     await waitForQualityButtonCount(2);
   });
 
-  it("updates quality counts while editing the current rewrite", () => {
+  it("updates quality counts while editing the current rewrite", async () => {
     render(<Harness initialChapters={[
       { ...chapters[0], rewrite_text: "萧妍走进大厅。" }
     ]} />);
@@ -415,9 +415,9 @@ describe("CompareView", () => {
       target: { value: "萧炎仍然走进大厅。" }
     });
 
-    expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("1");
+    await waitFor(() => expect(screen.getByRole("button", { name: /检查/ })).toHaveTextContent("1"));
     fireEvent.click(screen.getByRole("button", { name: /检查/ }));
-    expect(screen.getByLabelText("本地质量检查")).toHaveTextContent("当前章 1 · 全书 1");
+    await waitFor(() => expect(screen.getByLabelText("本地质量检查")).toHaveTextContent("当前章 1 · 全书 1"));
   });
 
   it("opens rewrite-only search when a quality issue is clicked", async () => {

@@ -583,6 +583,7 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
   const [diffEnabled, setDiffEnabled] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
+  const [scannedEditDraft, setScannedEditDraft] = useState("");
   const [editBusy, setEditBusy] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(false);
   const [rewriteDialogOpen, setRewriteDialogOpen] = useState(false);
@@ -636,11 +637,16 @@ export const CompareView = memo(function CompareView(props: CompareViewProps) {
     () => sortQualityIssues([...qualityCache.values()].flatMap((entry) => entry.issues)),
     [qualityCache]
   );
+  useEffect(() => {
+    if (!editing) return;
+    const timer = window.setTimeout(() => setScannedEditDraft(editDraft), 350);
+    return () => window.clearTimeout(timer);
+  }, [editDraft, editing]);
   const editingQualityIssues = useMemo(() => {
     if (!editing || !selectedChapter) return [];
-    if (!isQualityScannableChapter(selectedChapter, editDraft)) return [];
-    return scanChapterQuality(selectedChapter, novelSettings, editDraft);
-  }, [editDraft, editing, novelSettings, selectedChapter]);
+    if (!isQualityScannableChapter(selectedChapter, scannedEditDraft)) return [];
+    return scanChapterQuality(selectedChapter, novelSettings, scannedEditDraft);
+  }, [editing, novelSettings, scannedEditDraft, selectedChapter]);
   const qualityIssues = useMemo(() => {
     if (!editing || !selectedChapter) return cachedQualityIssues;
     return sortQualityIssues([

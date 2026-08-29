@@ -192,6 +192,10 @@ pub(crate) struct AutoRunProgressState {
     pub(crate) chapter_total: usize,
     pub(crate) completed_chapter_ids: HashSet<String>,
     pub(crate) active_shards: BTreeMap<usize, ActiveShardProgress>,
+    /// Job-row persistence throttle: rows are rewritten at most every 500ms
+    /// or on a phase change, instead of on every progress event.
+    pub(crate) last_job_persist: Option<std::time::Instant>,
+    pub(crate) persisted_phase: Option<String>,
 }
 
 pub(crate) struct AutoRunCleanup<'a> {

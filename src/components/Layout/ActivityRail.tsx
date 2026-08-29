@@ -69,7 +69,11 @@ export function ActivityRail(props: ActivityRailProps) {
         <BookOpenText size={18} />
       </RailButton>
       <div className="activity-rail-primary">
-        <RailButton label="工作台" active={props.activeView === "workspace"} onClick={() => navigate("workspace")}>
+        <RailButton
+          label={props.taskProgress !== undefined ? `工作台，任务进行中 ${props.taskProgress}%` : "工作台"}
+          active={props.activeView === "workspace"}
+          onClick={() => navigate("workspace")}
+        >
           <SquarePen size={18} />
           {props.taskProgress !== undefined && <span className="activity-progress-dot" aria-hidden="true" title={`任务进度 ${props.taskProgress}%`} />}
         </RailButton>
@@ -103,7 +107,11 @@ export function ActivityRail(props: ActivityRailProps) {
         <RailButton label="帮助" onClick={props.onOpenHelp}>
           <HelpCircle size={17} />
         </RailButton>
-        <RailButton label="检查更新" onClick={props.onCheckUpdates} disabled={props.systemBusy}>
+        <RailButton
+          label={props.hasAvailableUpdate ? "检查更新，发现新版本" : "检查更新"}
+          onClick={props.onCheckUpdates}
+          disabled={props.systemBusy}
+        >
           {props.updateBusy ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
           {props.hasAvailableUpdate && <span className="activity-update-dot" aria-label="发现新版本" />}
         </RailButton>

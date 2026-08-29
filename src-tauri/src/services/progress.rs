@@ -347,7 +347,21 @@ fn emit_auto_runtime_progress(state: &State<'_, AppState>, novel_id: &str) -> Re
                 .unwrap_or(i64::MAX)
                 .min(job.total_chapters)
         });
-    update_job(state, &job.id, "running", current_chapter, &message)?;
+    let now = std::time::Instant::now();
+    let should_persist_job = progress_state
+        .last_job_persist
+        .map(|last| now.duration_since(last).as_millis() >= 500)
+        .unwrap_or(true)
+        || progress_state.persisted_phase.as_deref() != Some(phase);
+    if should_persist_job {
+        update_job(state, &job.id, "running", current_chapter, &message)?;
+        if let Ok(mut progress) = state.auto_run_progress.lock() {
+            if let Some(entry) = progress.get_mut(novel_id) {
+                entry.last_job_persist = Some(now);
+                entry.persisted_phase = Some(phase.to_string());
+            }
+        }
+    }
     let payload = JobProgress {
         id: job.id,
         novel_id: job.novel_id,

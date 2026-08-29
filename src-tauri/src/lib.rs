@@ -6816,15 +6816,29 @@ mod legacy_progress_implementation {
                 phase_label(phase)
             )
         };
-        update_job(
-            state,
-            &job.id,
-            "running",
-            control
-                .completed_batches
-                .saturating_sub(control.start_batch_index),
-            &message,
-        )?;
+        let now = std::time::Instant::now();
+        let should_persist_job = progress_state
+            .last_job_persist
+            .map(|last| now.duration_since(last).as_millis() >= 500)
+            .unwrap_or(true)
+            || progress_state.persisted_phase.as_deref() != Some(phase);
+        if should_persist_job {
+            update_job(
+                state,
+                &job.id,
+                "running",
+                control
+                    .completed_batches
+                    .saturating_sub(control.start_batch_index),
+                &message,
+            )?;
+            if let Ok(mut progress) = state.auto_run_progress.lock() {
+                if let Some(entry) = progress.get_mut(novel_id) {
+                    entry.last_job_persist = Some(now);
+                    entry.persisted_phase = Some(phase.to_string());
+                }
+            }
+        }
         let payload = JobProgress {
             id: job.id,
             novel_id: job.novel_id,

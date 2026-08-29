@@ -2896,7 +2896,7 @@ export default function App() {
 
       <section className="workspace">
         {displayedNotice && (
-          <div className="notice notice-panel">
+          <div className="notice notice-panel" role="status" aria-live="polite">
             <span>{displayedNotice}</span>
             {busy === "download-update" && updateProgress?.stage === "downloading" && (
               <div className="update-download-progress" aria-label="更新包下载进度">

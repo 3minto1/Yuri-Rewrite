@@ -6,6 +6,7 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
+        PRAGMA journal_mode = WAL;
 
         CREATE TABLE IF NOT EXISTS novels (
             id TEXT PRIMARY KEY,
