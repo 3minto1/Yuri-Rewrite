@@ -875,15 +875,13 @@ pub(crate) fn build_batch_rewrite_prompt_parts(
 改写要求：
 1. 将原本男女性别叙事自然改写为双女主百合叙事；当前输入中的所有章节必须一次性完整改写。
 2. 采用中度再创作：保留主线、冲突、章节顺序、战力逻辑、人物动机和关键伏笔；只在【改写规则包】允许范围内调整互动、细节、称谓、外貌和关系推进。
-3. {}
-4. 严格遵守【规则优先级】、【改写规则包】、【人物性别基准表】和一致性资产；如有冲突，按规则优先级处理。
-5. 每章必须复制输入中对应的 START/END marker，index 和 id 逐字保留；只输出当前输入章节的 marker、标题和正文，不要解释、Markdown 或额外章节。"#,
+3. 严格遵守【规则优先级】、【改写规则包】、【人物性别基准表】和一致性资产；如有冲突，按规则优先级处理。
+4. 每章必须复制输入中对应的 START/END marker，index 和 id 逐字保留；只输出当前输入章节的 marker、标题和正文，不要解释、Markdown 或额外章节。"#,
         rewrite_marker_format_guard("当前输入章节"),
         build_rewrite_priority_prompt(),
         build_core_prompt_section(core_prompt),
         build_compact_rewrite_rule_pack(settings),
         build_character_baseline_roster(settings),
-        CLEANUP_RULE,
     );
     let dynamic_suffix = format!(
         r#"一致性资产：
@@ -934,8 +932,11 @@ pub(crate) fn build_single_chapter_rewrite_from_draft_prompt(
     } else {
         instructions.trim()
     };
+    let roster = prompt_context_or_none(&build_character_baseline_roster(settings));
     format!(
         r#"{}
+
+{}
 
 {}
 
@@ -975,6 +976,7 @@ pub(crate) fn build_single_chapter_rewrite_from_draft_prompt(
         build_rewrite_priority_prompt(),
         build_core_prompt_section(core_prompt),
         build_compact_rewrite_rule_pack(settings),
+        roster,
         cleanup_text_rule(),
         instructions,
         canon_text,
@@ -1097,58 +1099,6 @@ pub(crate) fn prompt_context_or_none(context: &str) -> String {
     } else {
         context.to_string()
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn build_analysis_prompt(chapter: &Chapter) -> String {
-    format!(
-        r#"请只基于原文分析以下章节，并输出合法 JSON：
-{{
-  "outline": "本章原文大纲",
-  "characters": ["原文人物、别名、原文性别线索、原文人称代词、身份、称谓、外貌、性格、动机、能力或状态变化"],
-  "relationships": ["原文人物关系与关系变化"],
-  "locations": ["原文地点、场景和空间关系"],
-  "foreshadowing": ["原文伏笔、悬念、回收或关键信息"],
-  "terms": ["原文术语、组织、物品、功法、系统规则等"],
-  "names": ["原文出现的人名、称谓、别名、指代对象、对应人物的原文性别或性别不明状态"]
-}}
-
-要求：
-1. 只提取和维护原文一致性资产。
-2. 不要提出任何后续处理方向。
-3. 不要补充原文没有的信息，不要改变原文人物、姓名、关系或剧情。
-4. 必须尽量记录人物的原文性别线索、代词、称谓和亲属身份；无法确定时写“性别不明”，不要猜测。
-5. 只输出 JSON，不要 Markdown。
-
-章节标题：{}
-
-章节正文：
-{}"#,
-        chapter.title,
-        truncate_text(&chapter.original_text, 30_000)
-    )
-}
-
-#[allow(dead_code)]
-pub(crate) fn build_analysis_prompt_legacy(chapter: &Chapter) -> String {
-    format!(
-        r#"请分析以下章节，并输出 JSON：
-{{
-  "outline": "本章大纲",
-  "characters": ["角色与设定变化"],
-  "relationships": ["人物关系变化"],
-  "locations": ["地点"],
-  "foreshadowing": ["伏笔或回收"],
-  "rewrite_notes": ["后续百合改写必须注意的性别、称谓、动作、外貌、关系细节"]
-}}
-
-章节标题：{}
-
-章节正文：
-{}"#,
-        chapter.title,
-        truncate_text(&chapter.original_text, 30_000)
-    )
 }
 
 #[allow(dead_code)]

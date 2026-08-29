@@ -4833,10 +4833,11 @@ async fn revise_full_rewrite_shard_after_review(
     shard_label: &str,
     decision: &ReviewDecision,
 ) -> Result<Vec<ParsedChapterRewrite>, String> {
+    let shard_canon_text = build_relevant_canon_text_from_text(canon_text, shard, settings);
     let prompt = build_batch_revision_prompt_with_context(
         shard,
         rewrites,
-        canon_text,
+        &shard_canon_text,
         settings,
         core_prompt,
         shard_context,
@@ -5095,10 +5096,11 @@ async fn retry_revision_shard_after_parse_error(
         "{}\n\n必须重新输出当前分片的全部章节，并完整保留每章开始和结束标记。",
         shard_context.trim()
     );
+    let shard_canon_text = build_relevant_canon_text_from_text(canon_text, shard, settings);
     let base_prompt = build_batch_revision_prompt_with_context(
         shard,
         rewrites,
-        canon_text,
+        &shard_canon_text,
         settings,
         core_prompt,
         retry_context.trim(),
@@ -5231,10 +5233,12 @@ async fn recover_revision_shard_by_subdivision(
 
         let batch_label = format_batch_label(&subshard);
         let context = format_shard_context(0, 1, 1, &batch_label, &subshard);
+        let subshard_canon_text =
+            build_relevant_canon_text_from_text(canon_text, &subshard, settings);
         let prompt = build_batch_revision_prompt_with_context(
             &subshard,
             &subrewrites,
-            canon_text,
+            &subshard_canon_text,
             settings,
             core_prompt,
             &context,
