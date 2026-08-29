@@ -1253,6 +1253,12 @@
   border: 1px solid color-mix(in srgb, var(--status-color) 22%, transparent);
   border-radius: var(--radius-control);
   padding: 10px 12px;
+  /* The shared .job-strip class is a horizontal flex strip; the task-center
+     card must stack vertically instead or every child collapses to one
+     character per line. */
+  display: block;
+  margin: 0;
+  min-height: 0;
 }
 
 .task-running-heading {

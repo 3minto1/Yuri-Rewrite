@@ -124,6 +124,11 @@ describe("style layer integrity", () => {
     expect(layout).toMatch(/\.workspace-status-state\.tone-progress::before\s*\{[^}]*background: var\(--color-progress\);/s);
   });
 
+  it("keeps the running task card stacked instead of the flex job strip", () => {
+    expect(layout).toMatch(/\.task-running-card\s*\{[^}]*display: block;/s);
+    expect(layout).toMatch(/\.task-running-card\s*\{[^}]*margin: 0;/s);
+  });
+
   it("keeps the workspace content on a raised content layer above the chrome", () => {
     expect(tokens).toMatch(/--color-content:\s*#fffcf5;/);
     expect(tokens).toMatch(/:root\[data-theme="dark"\]\s*\{[^}]*--color-content:\s*#2a251c;/s);
