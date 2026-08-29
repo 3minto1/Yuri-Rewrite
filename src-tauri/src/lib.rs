@@ -2917,7 +2917,7 @@ Blocking 清单：
         review_checklist,
         review_exclusions,
         review_constraints,
-        prompt_context_or_none(&build_character_baseline_roster(settings)),
+        prompt_context_or_none(&build_full_character_roster(canon_text, chapters, settings)),
         shard_context,
         build_batch_chapter_text(chapters, false),
         build_batch_rewrite_text(chapters, rewrites)
@@ -3057,7 +3057,7 @@ fn build_batch_revision_prompt_with_context(
         build_rewrite_priority_prompt(),
         build_core_prompt_section(core_prompt),
         build_compact_rewrite_rule_pack(settings),
-        prompt_context_or_none(&build_character_baseline_roster(settings)),
+        prompt_context_or_none(&build_full_character_roster(canon_text, chapters, settings)),
         issue_text,
         canon_text,
         prompt_context_or_none(shard_context),
@@ -3138,7 +3138,7 @@ fn build_targeted_revision_prompt(
         build_rewrite_priority_prompt(),
         build_core_prompt_section(core_prompt),
         build_compact_rewrite_rule_pack(settings),
-        prompt_context_or_none(&build_character_baseline_roster(settings)),
+        prompt_context_or_none(&build_full_character_roster(canon_text, target_chapters, settings)),
         issue_text,
         canon_text,
         shard_context,
@@ -10438,9 +10438,11 @@ mod tests {
         let chapter = sample_chapter(1, "第一章", "萧炎和父亲说话，旁边的少女点头。");
         let prompt = build_batch_analysis_prompt(&[chapter]);
 
-        assert!(prompt.contains("原文性别线索"));
-        assert!(prompt.contains("原文人称代词"));
-        assert!(prompt.contains("性别不明"));
+        assert!(prompt.contains("性别:男/女/未知/非人"));
+        assert!(prompt.contains("代词:他/她/它"));
+        assert!(prompt.contains("未知"));
+        assert!(prompt.contains("无法确定归属的称呼与指代"));
+        assert!(!prompt.contains("人物性别基准表"));
         assert!(!prompt.contains("百合"));
         assert!(!prompt.contains("女性化"));
         assert!(!prompt.contains("代词替换"));

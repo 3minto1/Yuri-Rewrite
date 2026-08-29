@@ -646,10 +646,7 @@ fn explicit_name_pairs(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Deterministic gender baseline for the chapter prompt, built from the
-/// protagonist and the user-configured name mappings. Conversion targets are
-/// listed explicitly so pronoun handling becomes a lookup instead of reasoning.
-pub(crate) fn build_character_baseline_roster(settings: &NovelSettings) -> String {
+fn character_baseline_lines(settings: &NovelSettings, covered: &mut HashSet<String>) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let protagonist = settings.protagonist_name.trim();
     let rewritten = settings.rewritten_protagonist_name.trim();
@@ -663,6 +660,10 @@ pub(crate) fn build_character_baseline_roster(settings: &NovelSettings) -> Strin
                 "- {protagonist} -> {rewritten}：主角，必须彻底女性化并逐字使用改写名"
             ));
         }
+        covered.insert(protagonist.to_string());
+        if !rewritten.is_empty() {
+            covered.insert(rewritten.to_string());
+        }
     }
     for alias in additional_feminize_name_sources(&settings.protagonist_aliases) {
         let alias = alias.trim();
@@ -670,20 +671,106 @@ pub(crate) fn build_character_baseline_roster(settings: &NovelSettings) -> Strin
             lines.push(format!(
                 "- {alias}：主角原文别名/指定别名，与主角是同一人物，按姓名映射同步女性化"
             ));
+            covered.insert(alias.to_string());
         }
     }
     for (source, target) in explicit_name_pairs(&settings.additional_feminize_names) {
         lines.push(format!(
             "- {source} -> {target}：姓名映射，必须逐字使用 {target} 并彻底女性化"
         ));
+        covered.insert(source);
+        covered.insert(target);
     }
+    lines
+}
+
+const ROSTER_KEEP_REST_LINE: &str = "- 其余人物：一律保持原文性别、身份、称谓与代词（详见人物卡）；性别不明者保持中性；非人生物保留原文代词；群体代词按成员构成判断";
+
+/// Deterministic gender baseline for the chapter prompt, built from the
+/// protagonist and the user-configured name mappings. Conversion targets are
+/// listed explicitly so pronoun handling becomes a lookup instead of reasoning.
+/// Full gender baseline: the settings anchors above, plus every structured
+/// 人物卡 entry whose name appears in the input chapters. Non-target
+/// characters become explicit "keep original gender" rows, so pronoun
+/// handling for the whole cast is a lookup instead of reasoning.
+pub(crate) fn build_full_character_roster(
+    canon_text: &str,
+    chapters: &[Chapter],
+    settings: &NovelSettings,
+) -> String {
+    let mut covered = HashSet::new();
+    let mut lines = character_baseline_lines(settings, &mut covered);
+    let chapter_text = chapters
+        .iter()
+        .map(|chapter| chapter.original_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for asset in parse_compact_canon_assets(canon_text) {
+        if asset.kind == "姓名映射表" {
+            for (source, target) in explicit_name_pairs(&asset.content) {
+                if covered.insert(target.clone()) {
+                    lines.push(format!(
+                        "- {source} -> {target}：姓名映射，必须逐字使用 {target} 并彻底女性化"
+                    ));
+                    covered.insert(source);
+                }
+            }
+        }
+    }
+
+    for asset in parse_compact_canon_assets(canon_text) {
+        if asset.kind != "人物卡" {
+            continue;
+        }
+        for line in asset.content.lines() {
+            let line = line.trim();
+            if line.is_empty() || !(line.contains('|') || line.contains('｜')) {
+                // Legacy prose character cards have no structured fields; skip
+                // them instead of guessing (backward compatible).
+                continue;
+            }
+            let parts: Vec<&str> = line.split(['|', '｜']).map(str::trim).collect();
+            let Some(name) = parts
+                .first()
+                .copied()
+                .filter(|name| !name.is_empty() && name.chars().count() <= 12)
+            else {
+                continue;
+            };
+            if covered.contains(name) || !chapter_text.contains(name) {
+                continue;
+            }
+            let gender = parts.iter().skip(1).find_map(|part| {
+                let part = part.trim();
+                let part = part.strip_prefix("性别").map(str::trim).unwrap_or(part);
+                let part = part.trim_start_matches([':', '：']).trim();
+                match part {
+                    "男" => Some("男"),
+                    "女" => Some("女"),
+                    "未知" => Some("未知"),
+                    "非人" => Some("非人"),
+                    _ => None,
+                }
+            });
+            let Some(gender) = gender else {
+                continue;
+            };
+            let keep = match gender {
+                "男" => "保持原文男性，不得女性化",
+                "女" => "保持原文女性",
+                "未知" => "性别未确认，保持中性称呼",
+                _ => "非人生物，保持原文代词和称谓",
+            };
+            covered.insert(name.to_string());
+            lines.push(format!("- {name}：{keep}（人物卡）"));
+        }
+    }
+
     if lines.is_empty() {
         return String::new();
     }
-    lines.push(
-        "- 其余人物：一律保持原文性别、身份、称谓与代词（详见人物卡）；性别不明者保持中性；非人生物保留原文代词；群体代词按成员构成判断"
-            .to_string(),
-    );
+    lines.push(ROSTER_KEEP_REST_LINE.to_string());
     format!(
         "【人物性别基准表】所有代词、称谓和性别表达必须按此表执行：\n{}",
         lines.join("\n")
@@ -842,7 +929,7 @@ pub(crate) fn build_batch_rewrite_prompt_parts(
         build_rewrite_priority_prompt(),
         build_core_prompt_section(core_prompt),
         build_compact_rewrite_rule_pack(settings),
-        build_character_baseline_roster(settings),
+        build_full_character_roster(canon_text, chapters, settings),
     );
     let dynamic_suffix = format!(
         r#"一致性资产：
@@ -893,7 +980,11 @@ pub(crate) fn build_single_chapter_rewrite_from_draft_prompt(
     } else {
         instructions.trim()
     };
-    let roster = prompt_context_or_none(&build_character_baseline_roster(settings));
+    let roster = prompt_context_or_none(&build_full_character_roster(
+        canon_text,
+        std::slice::from_ref(chapter),
+        settings,
+    ));
     format!(
         r#"{}
 
@@ -1008,30 +1099,33 @@ pub(crate) fn build_batch_analysis_prompt_with_identity(
         _ => (0, 0),
     };
     let shard_context = prompt_context_or_none(shard_context);
+    let count = chapters.len();
     format!(
         r#"请只基于原文分析以下整个批次，并输出一个合法 JSON 对象。
 
 输出结构必须是：
 {{
   "batch": {{
-    "start_index": {},
-    "end_index": {},
-    "chapter_count": {}
+    "start_index": "以实际输入章节为准",
+    "end_index": "以实际输入章节为准",
+    "chapter_count": "以实际输入章节为准"
   }},
   "outline": ["本批次原文主线、关键事件和状态变化，按时间顺序概括"],
-  "characters": ["本批次出现的重要人物、别名、原文性别线索、原文人称代词、身份、称谓、外貌、性格、动机、能力或状态变化"],
+  "characters": [
+    "每个重要人物一条，格式必须为：姓名｜性别:男/女/未知/非人｜身份与称谓:原文称谓和亲属身份｜外貌与特征:原文外貌、性格、动机、能力或状态变化｜代词:他/她/它｜其他:原文别名"
+  ],
   "relationships": ["本批次人物关系与关系变化"],
   "locations": ["本批次地点、场景和空间关系"],
   "foreshadowing": ["本批次伏笔、悬念、回收或关键信息"],
   "terms": ["本批次术语、组织、物品、功法、系统规则等"],
-  "names": ["本批次出现的人名、称谓、别名、指代对象、对应人物的原文性别或性别不明状态"]
+  "names": ["仅记录暂无法确定归属的称呼与指代（代词、绰号、敬称等）；凡能确定对应人物的性别，一律记录在 characters 中"]
 }}
 
 要求：
 1. 输入可能是完整批次，也可能是并发分片；必须一次性分析当前输入中实际出现的全部章节。
 2. 只输出一份当前输入级一致性资产，不要按章节逐章输出，不要输出 `chapters` 数组。
 3. 不要补充原文没有的信息，不要改变原文人物、姓名、关系或剧情。
-4. 必须尽量记录人物的原文性别线索、代词、称谓和亲属身份；无法确定时写“性别不明”，不要猜测。
+4. characters 每条必须严格使用上述字段格式，字段之间用全角或半角竖线分隔；性别只能取 男/女/未知/非人，必须依据原文性别线索、代词和称谓判断，无法确定时写 未知，不要猜测。
 5. 不要提出任何后续处理方向。
 6. JSON 字符串内部如果需要换行，必须写成 `\n`，不要在字符串里输出真实换行或其他控制字符。
 7. 只输出 JSON，不要解释、不要 Markdown。
@@ -1039,14 +1133,15 @@ pub(crate) fn build_batch_analysis_prompt_with_identity(
 人物身份提示：
 {}
 
+<<<YURI_REWRITE_DYNAMIC_CONTEXT>>>
+
+当前输入范围：第 {start_index} - {end_index} 章，共 {count} 章；batch 三个字段必须按此填写。
+
 处理范围约束：
 {}
 
 当前输入章节：
 {}"#,
-        start_index,
-        end_index,
-        chapters.len(),
         prompt_context_or_none(identity_context),
         shard_context,
         build_batch_analysis_chapter_text(chapters)
