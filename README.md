@@ -4,6 +4,8 @@ Yuri Rewrite 是一款 Windows 本地桌面工具，用来导入 TXT 小说，�
 
 小说正文、改写稿、模型配置、任务日志、Token 统计、导出文件和 API Key 都保存在本机。程序本身不提供公共 AI 服务，使用前需要准备自己的模型账号和 API Key。
 
+> 📖 **[详细使用指南（含界面截图）](docs/usage-guide.md)** —— 从配置模型到导出的完整图文流程。
+
 ## 下载与运行
 
 1. 打开 GitHub 仓库的 [Releases](https://github.com/3minto1/Yuri-Rewrite/releases) 页面。
