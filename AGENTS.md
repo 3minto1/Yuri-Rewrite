@@ -28,7 +28,7 @@ The user owns the AI account and API key. Novel content, SQLite data, internal b
 - `src/types/`: shared frontend domain types.
 - `src/tauriApi.ts`: strongly typed Tauri command boundary. Keep command names and argument mappings centralized here.
 - `src-tauri/src/commands/`: Tauri commands grouped by domain.
-- `src-tauri/src/ai/`: provider calls, prompts, response parsing, and shared AI behavior.
+- `src-tauri/src/ai/`: provider calls, prompts, response parsing, and shared AI behavior; `ai/rules.rs` is the single-source registry for rewrite/revision/review rule text.
 - `src-tauri/src/db/`: SQLite schema and migrations.
 - `src-tauri/src/repositories/`: database access helpers for logs and other extracted domains.
 - `src-tauri/src/services/`: shared analysis, rewrite, review, estimation, and shard-context services.
@@ -86,6 +86,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Keep API keys and unsaved secret form values in local component state, never Zustand.
 - Zustand stores runtime UI/domain state only and is not a second persistence layer. SQLite and Tauri remain the source of truth.
 - Prefer domain modules under `commands`, `ai`, `db`, and `text`. Do not move unrelated logic back into a monolithic `lib.rs` or `App.tsx`.
+- Prompt rule text lives in `ai/rules.rs` and is rendered into the rewrite, revision and review prompts. Do not hand-write parallel rule variants inside individual prompt builders.
 - Preserve existing prompts and parsing behavior during structural refactors. Move one domain at a time and test immediately.
 - Use `pub(crate)` for internal Rust APIs unless a wider public surface is required.
 
@@ -93,7 +94,8 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 ### Import and Chapters
 
-- TXT import goes through Tauri backend commands, not browser-only file APIs.
+- TXT import goes through Tauri backend commands, not browser-only file APIs. Heavy file/DB commands (import, export, deletions, settings save, chapter-rule split, novel detail) must stay async so they never block the UI thread.
+- Encoding detection understands UTF-8 and UTF-16 byte-order marks and falls back to GB18030; the detected label is stored on the novel and shown in the workspace.
 - Recognize common Chinese web-novel heading units including `章`, `节`, `回`, `卷`, `部`, `篇`, `集`, `幕`, `话`, `夜`, `案`, `场`, `弹`, `折`, and `更`.
 - Loose numbered headings are fallback-only. Use them only when standard headings are absent and candidate numbers are sequential.
 - Treat explicit author update notices such as isolated `第X更`, `第X更到`, `继续写`, `还有第X章`, and `未完待续` conservatively as non-chapter content. A pseudo heading may donate its body to the preceding formal chapter only when the surrounding formal headings use the same non-`更` unit and have consecutive ordinals.
@@ -108,8 +110,11 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 - Analysis requires a novel-settings record but analyzes the original novel only. Do not inject yuri instructions, feminization settings, body settings, or advanced rewrite instructions into analysis prompts.
 - Analysis produces compact original-canon assets: outline, characters, original genders, pronouns, aliases, relationships, titles, locations, foreshadowing, terms, and name-mapping candidates.
+- Analysis `characters` entries must use the structured line format `姓名｜性别:男/女/未知/非人｜身份与称谓｜外貌与特征｜代词`. This format feeds the rewrite-time character gender baseline roster; keep it stable and stay backward compatible with older prose-format assets.
 - Rewrite processes only the selected batch and only chapters eligible after analysis.
 - Rewrite prompts include global core settings before normal rules, then novel settings, advanced settings, compact canon, and stable name mappings.
+- Rewrite, revision and review prompts are rendered from the `ai/rules.rs` registry, and the character gender baseline roster appears in all three. Mechanical constraints are enforced in code, not prose: high-confidence ad lines are stripped from model input before generation, and deterministic validators (ad residue, unapplied name mappings, protagonist residue) append blocking issues to the targeted repair flow.
+- Rewrite/revision/review prompts split a per-novel byte-stable static prefix from dynamic shard content; keep the split intact so provider prompt caches hit. Anthropic marks the prefix with a cache breakpoint, and cache-hit tokens are logged in AI logs.
 - Forced protagonist naming has highest priority. User-specified protagonist alias mappings and additional-name mappings use the same forced mapping priority. Otherwise use one consistent feminine mapping across shards and batches.
 - `protagonist_aliases` and `additional_feminize_names` are stored as strings for backward compatibility but may contain multiple lines in either `source` or `source -> target` format. Source-only entries are candidates for AI/local feminization; mapped entries must be preserved as fixed name mappings. Target names must not be treated as old-name residue.
 - `relationship_targets` is stored as normalized JSON text on novel settings. It guides yuri interaction continuity only; it must not override unchanged character gender, chapter boundaries, or source plot logic.
@@ -152,6 +157,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 
 - Validate model, API key, settings, batch, and output directory before registering an active task.
 - Use one cleanup guard so success, failure, cancellation, pause, or early return always releases the task lock.
+- The database runs in WAL mode. Running-job rows are persisted at most every 500 ms or on phase change; progress events themselves stay in-memory driven.
 - Reject duplicate active tasks for the same novel.
 - Reject deletion of a novel or model used by an active task.
 - Progress events remain `job-progress` and must be filtered by `novel_id` and the current task ID in the frontend.
@@ -189,6 +195,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 - Allowed concurrency values are `1`, `3`, `6`, `10`, `25`, and `50`, with `10` as the default. Batch sizes 10 and 30 allow at most 10, batch size 50 allows at most 25, and batch size 100 allows at most 50. The backend must enforce these constraints.
 - Changing chapter batch size rebuilds chapter-based batch rows and internal TXT files atomically without changing chapter IDs, source text, analyses, rewrites, manual edits, canon assets, or logs. Reject the change while any active or paused one-click task exists.
 - Export TXT only. Include only chapters with completed rewrite status and non-empty rewrite text. Never fall back to the original text.
+- TXT export writes to a temp file and renames atomically so a crash never leaves a truncated export.
 - Full one-click must not automatically generate or update cumulative TXT exports. Users export manually from Compare when they need a TXT file.
 - After normal rewrite completion, navigate to Compare. Preserve the selected batch after refreshes.
 
@@ -217,6 +224,7 @@ The cleanup script must remain scoped to `src-tauri/target/debug` and Cargo's de
 ## Frontend Behavior and Performance
 
 - The UI is an operational desktop tool. Keep navigation and existing control placement predictable.
+- Visual conventions (three-layer paper palette, flat no-gradient styling, 48px activity rail, stacked running-task card) are guarded by `src/styles/styleIntegrity.test.ts`; update that test together with intentional style changes.
 - Esc and visible Back buttons return non-workspace pages to the workspace without closing unrelated settings dialogs.
 - Notifications auto-dismiss after five seconds unless a specific dialog requires persistence.
 - First launch shows quick-start once; Help reopens the same content.
@@ -262,5 +270,8 @@ Match verification effort to the change, but complete the relevant checks before
 4. Release-impacting changes: `npm run tauri:build`.
 5. User-distributable builds: delete old local portable zips, then run `npm run package:portable:fresh`.
 6. All commits: `git diff --check` and `git status -sb`.
+7. After any code change, rebuild the portable package with `npm run package:portable:fresh` and keep the version number unchanged; bump the version only when the user explicitly requests a release.
+
+Release preparation can chain tests, packaging and portable ZIP verification with `npm run release:check`.
 
 Do not update versions, generate releases, upload portable packages, or create GitHub Releases unless the user explicitly asks for that release step. The intended release asset is the Windows x64 portable zip; installer artifacts are incidental.
